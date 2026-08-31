@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "portrait-autorig"
+version = "0.1.0"
+description = "Compile production-ready semantic portrait bundles into animated portrait rigs."
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = ["numpy>=1.24", "opencv-python>=4.0", "Pillow>=9.0"]
+
+[project.urls]
+Repository = "https://github.com/prentice7725/portrait-autorig"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
