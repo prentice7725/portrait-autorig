@@ -13,9 +13,13 @@ def crop_to_alpha(img: np.ndarray, alpha_threshold: int = 10) -> tuple[np.ndarra
     arr = np.asarray(img)
     if arr.ndim != 3 or arr.shape[-1] != 4:
         raise ValueError(f"img must be HxWx4, got {arr.shape}")
-    nz = cv2.findNonZero((arr[..., 3] > alpha_threshold).astype(np.uint8))
-    if nz is None:
+    if not np.any(arr[..., 3] > alpha_threshold):
         return None
+    # The threshold decides whether a layer is meaningful, not which edge
+    # pixels survive. Cropping to >threshold shaved faint antialiasing and made
+    # a lossless setup reconstruction impossible.
+    nz = cv2.findNonZero((arr[..., 3] > 0).astype(np.uint8))
+    assert nz is not None
     x, y, width, height = cv2.boundingRect(nz)
     return arr[y:y + height, x:x + width], [int(x), int(y), int(x + width), int(y + height)]
 
@@ -71,5 +75,65 @@ def composite_fidelity(original_rgba: np.ndarray, composite: np.ndarray,
         "bad_ratio": round(bad / total, 5),
         "bad_px": bad,
         "subject_px": total,
+    }
+
+
+def rest_fidelity(reference_rgba: np.ndarray, rig_rest_rgba: np.ndarray, *,
+                  alpha_threshold: int = 10, bad_threshold: int = 8) -> dict[str, float | int | str]:
+    """Compare a rig setup pose to the producer's canonical layer composite.
+
+    This deliberately does not compare either image to the original portrait:
+    static fidelity belongs to the producer. The compiler invariant begins at
+    the canonical composite and measures RGB error, alpha/visibility changes,
+    and high-percentile local error over the union of both visible regions.
+    """
+    reference = np.asarray(reference_rgba)
+    rest = np.asarray(rig_rest_rgba)
+    if reference.shape != rest.shape or reference.ndim != 3 or reference.shape[-1] != 4:
+        raise ValueError(f"rest images must be matching HxWx4 arrays: {reference.shape} != {rest.shape}")
+    visible_reference = reference[..., 3] > alpha_threshold
+    visible_rest = rest[..., 3] > alpha_threshold
+    subject = visible_reference | visible_rest
+    subject_px = int(subject.sum())
+    visibility_changed = int((visible_reference ^ visible_rest).sum())
+    if subject_px:
+        rgb_abs = np.abs(reference[..., :3].astype(np.int16)
+                         - rest[..., :3].astype(np.int16))
+        alpha_abs = np.abs(reference[..., 3].astype(np.int16)
+                           - rest[..., 3].astype(np.int16))
+        pixel_error = rgb_abs.max(axis=2)[subject]
+        mae = float(rgb_abs[subject].mean())
+        alpha_mae = float(alpha_abs[subject].mean())
+        bad = int(((rgb_abs.max(axis=2) > bad_threshold)
+                   | (alpha_abs > bad_threshold))[subject].sum())
+        p95 = float(np.percentile(pixel_error, 95))
+        p99 = float(np.percentile(pixel_error, 99))
+        maximum = int(pixel_error.max())
+    else:
+        mae = alpha_mae = p95 = p99 = 0.0
+        bad = maximum = 0
+    bad_ratio = bad / subject_px if subject_px else 0.0
+    if (mae <= 0.25 and alpha_mae <= 0.25 and bad_ratio <= 0.0005
+            and visibility_changed == 0 and p99 <= 2.0):
+        status = "pass"
+    elif (mae <= 1.0 and alpha_mae <= 1.0 and bad_ratio <= 0.005
+          and visibility_changed <= max(2, int(subject_px * 0.0001)) and p99 <= 8.0):
+        status = "degraded"
+    else:
+        status = "fail"
+    return {
+        "reference": "portrait_bundle_canonical_composite",
+        "metric_version": "1.0",
+        "status": status,
+        "mae": round(mae, 4),
+        "alpha_mae": round(alpha_mae, 4),
+        "bad_ratio": round(bad_ratio, 6),
+        "bad_px": bad,
+        "subject_px": subject_px,
+        "visibility_changed_px": visibility_changed,
+        "p95_error": round(p95, 3),
+        "p99_error": round(p99, 3),
+        "max_error": maximum,
+        "bad_threshold": bad_threshold,
     }
 

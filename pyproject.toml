@@ -16,5 +16,8 @@ Repository = "https://github.com/prentice7725/portrait-autorig"
 [project.optional-dependencies]
 test = ["pytest>=7"]
 
+[tool.setuptools]
+packages = ["portrait_autorig"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,4 +1,7 @@
 import json
+import ast
+from pathlib import Path
+import tomllib
 
 import numpy as np
 import pytest
@@ -16,6 +19,7 @@ def write_bundle(root, *, stage="production_repaired", layer_path="layers/face.p
     Image.fromarray(image, mode="RGBA").save(root / "original.png")
     if layer_path == "layers/face.png":
         Image.fromarray(image, mode="RGBA").save(root / "layers" / "face.png")
+    Image.fromarray(image, mode="RGBA").save(root / "layers" / "head.png")
     manifest = {
         "format": "portrait-bundle",
         "version": "1.0",
@@ -26,7 +30,10 @@ def write_bundle(root, *, stage="production_repaired", layer_path="layers/face.p
         },
         "semantics": {"schema": "portrait-semantic-tags", "version": "v3", "z_order": ["face"]},
         "original": "original.png",
-        "layers": {"face": {"path": layer_path, "source_tag": "face"}},
+        "layers": {
+            "face": {"path": layer_path, "source_tag": "face"},
+            "head": {"path": "layers/head.png", "source_tag": "head"},
+        },
         "layer_contract": {"canonical_stage": stage},
     }
     with open(root / "manifest.json", "w", encoding="utf-8") as handle:
@@ -36,7 +43,7 @@ def write_bundle(root, *, stage="production_repaired", layer_path="layers/face.p
 def test_bundle_reader_accepts_only_production_repaired_layers(tmp_path):
     write_bundle(tmp_path)
     asset = load_portrait_bundle(tmp_path)
-    assert set(asset.layers) == {"face"}
+    assert set(asset.layers) == {"face", "head"}
     assert asset.legacy_repair_applied is False
 
 
@@ -69,6 +76,28 @@ def test_bundle_compile_never_calls_legacy_repair(tmp_path, monkeypatch):
         manifest = json.load(handle)
     assert manifest["source"]["legacy_repair_applied"] is False
     assert manifest["parts"]
+    assert manifest["rig_preflight"]["status"] == "DEGRADED"
+    assert manifest["rig_preflight"]["static_portrait_validity"] == "not_evaluated"
 
     spine_path = export_rig_bundle(str(output), str(tmp_path / "spine"))
     assert spine_path.endswith(".json")
+
+
+def test_portrait_autorig_has_no_producer_or_heavy_model_import_dependency():
+    package = Path(__file__).parents[1] / "portrait_autorig"
+    imported = []
+    for source in package.glob("*.py"):
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.append(node.module)
+    forbidden = ("seethrough_engine", "torch", "diffusers")
+    assert not [name for name in imported
+                if any(name == prefix or name.startswith(prefix + ".")
+                       for prefix in forbidden)]
+    project = tomllib.loads((package.parent / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = " ".join(project["project"].get("dependencies", [])).lower()
+    assert "torch" not in dependencies
+    assert "diffusers" not in dependencies

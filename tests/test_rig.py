@@ -2,15 +2,18 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
+from portrait_autorig.image import composite_layers
 from portrait_autorig.rig import (
     BODY_REMAINDER, BODY_WEIGHT, EYE_SPLIT_TAGS,
     GROUP_BODY, GROUP_HEAD, GROUP_NECK,
     HEAD_REMAINDER, HEAD_WEIGHT, NECK_REMAINDER,
-    RIG_Z_ORDER, build_rig, depth_table, detect_anchors,
-    group_for_tag, split_eyes, split_remainder, write_rig_project,
+    RIG_Z_ORDER, build_rig, depth_table, derive_missing_eyewhite, detect_anchors,
+    group_for_tag, render_rig_rest, rig_preflight, split_eyes, split_remainder,
+    write_rig_project,
 )
 
 CANVAS = 128
@@ -37,6 +40,59 @@ def portrait_layers():
         "neck": rgba([(58, 56, 70, 72)]),
         "topwear": rgba([(36, 72, 92, 124)]),
     }
+
+
+def a002_like_layers():
+    """Featureless face over an occlusion-complete head with sclera baked in."""
+    skin = 176
+    layers = {
+        "head": rgba([(40, 8, 88, 68)], skin),
+        "face": rgba([(44, 12, 84, 64)], skin),
+        "irides": rgba([(51, 31, 55, 37), (73, 31, 77, 37)], 24),
+        "eyelash": rgba([(46, 28, 60, 30), (68, 28, 82, 30)], 32),
+        "eyebrow": rgba([(46, 22, 60, 24), (68, 22, 82, 24)], 48),
+        "mouth": rgba([(59, 50, 69, 52)], 64),
+        "neck": rgba([(58, 68, 70, 82)], skin),
+        "topwear": rgba([(34, 82, 94, 124)], 112),
+    }
+    # Only head/original know the sclera; face is opaque skin over it.
+    for x1, x2 in ((46, 60), (68, 82)):
+        layers["head"][30:38, x1:x2, :3] = 235
+        # The canonical stack reveals head's sclera through a face socket. The
+        # rig fallback must preserve that rest image while changing ownership.
+        layers["face"][30:38, x1:x2, 3] = 0
+    original = np.array(layers["head"], copy=True)
+    for tag in ("irides", "eyelash", "eyebrow", "mouth"):
+        mask = layers[tag][..., 3] > 10
+        original[mask] = layers[tag][mask]
+    return layers, original
+
+
+def full_rig_layers(manifest, images):
+    out = {}
+    h, w = manifest["canvas"]["height"], manifest["canvas"]["width"]
+    for part in manifest["parts"]:
+        full = np.zeros((h, w, 4), np.uint8)
+        x1, y1, x2, y2 = part["xyxy"]
+        full[y1:y2, x1:x2] = images[part["name"]]
+        out[part["tag"]] = full
+    return out
+
+
+def composite_in_manifest_order(manifest, images):
+    layers = full_rig_layers(manifest, images)
+    h, w = manifest["canvas"]["height"], manifest["canvas"]["width"]
+    rgb = np.zeros((h, w, 3), np.float32)
+    alpha = np.zeros((h, w, 1), np.float32)
+    for part in manifest["parts"]:
+        src = layers[part["tag"]].astype(np.float32)
+        src_alpha = src[..., 3:4] / 255.0
+        rgb = src[..., :3] * src_alpha + rgb * (1.0 - src_alpha)
+        alpha = src_alpha + alpha * (1.0 - src_alpha)
+    out = np.zeros((h, w, 4), np.uint8)
+    out[..., :3] = np.rint(rgb).astype(np.uint8)
+    out[..., 3] = np.rint(alpha[..., 0] * 255).astype(np.uint8)
+    return out
 
 
 class GroupTests(unittest.TestCase):
@@ -70,9 +126,11 @@ class DepthTableTests(unittest.TestCase):
 
     def test_remainder_regions_sit_behind_what_they_move_with(self):
         table = depth_table()
-        self.assertGreater(table[HEAD_REMAINDER], table["head"])
-        self.assertGreater(table[NECK_REMAINDER], table["neck"])
+        self.assertEqual(table[HEAD_REMAINDER], table["head"])
+        self.assertEqual(table[NECK_REMAINDER], table["neck"])
         self.assertEqual(table[BODY_REMAINDER], 1.0)
+        self.assertLess(RIG_Z_ORDER.index(HEAD_REMAINDER), RIG_Z_ORDER.index("back hair"))
+        self.assertLess(RIG_Z_ORDER.index(NECK_REMAINDER), RIG_Z_ORDER.index("back hair"))
 
 
 class SplitRemainderTests(unittest.TestCase):
@@ -95,6 +153,31 @@ class SplitRemainderTests(unittest.TestCase):
         self.assertIn(NECK_REMAINDER, regions)
         self.assertNotIn(HEAD_REMAINDER, regions)
         self.assertNotIn(BODY_REMAINDER, regions)
+
+    def test_tiny_isolated_neck_orphan_is_not_promoted(self):
+        layers = portrait_layers()
+        # Three disconnected pixels inside the neck bbox have location but no
+        # connected semantic support. This is the A002 failure shape.
+        remainder = rgba([(59, 59, 60, 60), (64, 63, 65, 64), (68, 69, 69, 70)])
+        regions = split_remainder(remainder, layers)
+        self.assertNotIn(NECK_REMAINDER, regions)
+        self.assertEqual(sum(int((image[..., 3] > 10).sum()) for image in regions.values()), 3)
+
+    def test_connected_neck_remainder_with_semantic_contact_is_preserved(self):
+        layers = portrait_layers()
+        remainder = rgba([(59, 58, 69, 70)])
+        regions = split_remainder(remainder, layers)
+        self.assertEqual(int((regions[NECK_REMAINDER][..., 3] > 10).sum()), 120)
+
+    def test_neck_bbox_without_semantic_contact_does_not_claim_component(self):
+        layers = portrait_layers()
+        # Two neck rails create a bbox around an empty centre. A substantial
+        # component in that rectangle still has no neck contact evidence.
+        layers["neck"] = rgba([(56, 56, 58, 72), (70, 56, 72, 72)])
+        remainder = rgba([(62, 62, 66, 66)])
+        regions = split_remainder(remainder, layers)
+        self.assertNotIn(NECK_REMAINDER, regions)
+        self.assertEqual(sum(int((image[..., 3] > 10).sum()) for image in regions.values()), 16)
 
     def test_every_recovered_pixel_survives_exactly_one_region(self):
         """The split must not lose or duplicate recovered pixels -- losing them
@@ -145,6 +228,138 @@ class SplitEyesTests(unittest.TestCase):
     def test_every_split_tag_is_a_known_v3_eye_layer(self):
         self.assertIn("eyewhite", EYE_SPLIT_TAGS)
         self.assertIn("irides", EYE_SPLIT_TAGS)
+
+
+class DerivedEyewhiteTests(unittest.TestCase):
+    def setUp(self):
+        self.layers, self.original = a002_like_layers()
+
+    def test_missing_eyewhite_can_be_derived_bilaterally(self):
+        center = detect_anchors(self.layers, (CANVAS, CANVAS))["face_center"][0]
+        split = dict(self.layers)
+        halves = split_eyes(split, center)
+        split.update(halves)
+        for parent in {tag[:-1] for tag in halves}:
+            split.pop(parent, None)
+        derived, report = derive_missing_eyewhite(self.original, split)
+        self.assertEqual(set(derived), {"eyewhitel", "eyewhiter"})
+        self.assertTrue(report["succeeded"])
+        self.assertGreaterEqual(report["confidence"], 0.55)
+
+    def test_native_eyewhite_uses_existing_split_path_without_fallback(self):
+        original = np.array(self.layers["head"], copy=True)
+        layers = portrait_layers()
+        with patch("portrait_autorig.rig.derive_missing_eyewhite") as fallback:
+            manifest, _ = build_rig(layers, original_rgba=original,
+                                    frame_size=(CANVAS, CANVAS))
+        fallback.assert_not_called()
+        tags = {part["tag"] for part in manifest["parts"]}
+        self.assertIn("eyewhitel", tags)
+        self.assertIn("eyewhiter", tags)
+
+    def test_derived_coverage_is_removed_from_head_working_copy(self):
+        manifest, images = build_rig(self.layers, original_rgba=self.original,
+                                     frame_size=(CANVAS, CANVAS))
+        full = full_rig_layers(manifest, images)
+        derived = ((full["eyewhitel"][..., 3] > 10)
+                   | (full["eyewhiter"][..., 3] > 10))
+        self.assertTrue(derived.any())
+        self.assertFalse((full["head"][..., 3] > 10)[derived].any())
+
+    def test_rest_composite_fidelity_improves(self):
+        baseline_manifest, baseline_images = build_rig(
+            self.layers, frame_size=(CANVAS, CANVAS)
+        )
+        derived_manifest, derived_images = build_rig(
+            self.layers, original_rgba=self.original, frame_size=(CANVAS, CANVAS)
+        )
+        baseline = composite_in_manifest_order(baseline_manifest, baseline_images)
+        derived = composite_in_manifest_order(derived_manifest, derived_images)
+        subject = self.original[..., 3] > 10
+        baseline_error = np.abs(baseline[..., :3].astype(int)
+                                - self.original[..., :3].astype(int))[subject].mean()
+        derived_error = np.abs(derived[..., :3].astype(int)
+                               - self.original[..., :3].astype(int))[subject].mean()
+        self.assertLessEqual(derived_error, baseline_error)
+
+    def test_derived_eyewhite_tracks_face_during_head_turn(self):
+        manifest, _ = build_rig(self.layers, original_rgba=self.original,
+                                frame_size=(CANVAS, CANVAS))
+        parts = {part["tag"]: part for part in manifest["parts"]}
+        for tag in ("eyewhitel", "eyewhiter"):
+            self.assertEqual(parts[tag]["depth"], parts["face"]["depth"])
+            self.assertEqual(parts[tag]["weight"], parts["face"]["weight"])
+            self.assertTrue(parts[tag]["derived"])
+
+    def test_low_confidence_derivation_stays_degraded(self):
+        flat = np.array(self.layers["face"], copy=True)
+        preflight = rig_preflight(self.layers, original_rgba=flat)
+        self.assertEqual(preflight["status"], "DEGRADED")
+        self.assertEqual(preflight["checks"]["eyewhite"]["available"], "missing")
+
+    def test_preflight_distinguishes_native_and_derived_readiness(self):
+        derived = rig_preflight(self.layers, original_rgba=self.original)
+        self.assertEqual(derived["status"], "READY_WITH_DERIVATION")
+        native_layers = dict(self.layers)
+        native_layers["eyewhite"] = rgba([(46, 30, 60, 38), (68, 30, 82, 38)], 235)
+        native = rig_preflight(native_layers, original_rgba=self.original)
+        self.assertEqual(native["status"], "READY")
+        self.assertEqual(native["checks"]["eyewhite"]["available"], "native")
+
+    def test_missing_head_or_face_is_incompatible_not_static_invalid(self):
+        preflight = rig_preflight({"face": self.layers["face"]},
+                                  original_rgba=self.original)
+        self.assertEqual(preflight["status"], "INCOMPATIBLE")
+        self.assertEqual(preflight["static_portrait_validity"], "not_evaluated")
+
+
+class RestFidelityTests(unittest.TestCase):
+    def test_rig_rest_matches_canonical_layer_reference(self):
+        layers = portrait_layers()
+        remainder = rgba([(30, 20, 40, 30), (59, 58, 69, 70)])
+        manifest, images = build_rig(layers, body_remainder=remainder,
+                                     frame_size=(CANVAS, CANVAS))
+        canonical = dict(layers)
+        canonical[BODY_REMAINDER] = remainder
+        reference = composite_layers(canonical, (CANVAS, CANVAS))
+        rest = render_rig_rest(manifest["parts"], images, (CANVAS, CANVAS))
+        np.testing.assert_array_equal(rest, reference)
+        self.assertEqual(manifest["rest_fidelity"]["status"], "pass")
+        self.assertEqual(manifest["rest_fidelity"]["visibility_changed_px"], 0)
+
+    def test_hidden_remainder_does_not_become_visible_after_subdivision(self):
+        layers = portrait_layers()
+        layers["topwear"] = rgba([(36, 50, 92, 124)], 90)
+        remainder = rgba([(59, 58, 69, 70)], 240)
+        manifest, images = build_rig(layers, body_remainder=remainder,
+                                     frame_size=(CANVAS, CANVAS))
+        tags = {part["tag"] for part in manifest["parts"]}
+        self.assertIn(NECK_REMAINDER, tags)
+        rest = render_rig_rest(manifest["parts"], images, (CANVAS, CANVAS))
+        self.assertEqual(tuple(rest[62, 64, :3]), (90, 90, 90))
+        self.assertEqual(manifest["rest_fidelity"]["status"], "pass")
+
+    def test_crop_and_reposition_preserve_faint_alpha_edges(self):
+        layers = portrait_layers()
+        mouth = np.zeros((CANVAS, CANVAS, 4), np.uint8)
+        mouth[43:49, 58:70, :3] = 35
+        mouth[43:49, 58:70, 3] = 3
+        mouth[44:48, 59:69, 3] = 255
+        layers["mouth"] = mouth
+        manifest, images = build_rig(layers, frame_size=(CANVAS, CANVAS))
+        mouth_part = next(part for part in manifest["parts"] if part["tag"] == "mouth")
+        self.assertEqual(mouth_part["xyxy"], [58, 43, 70, 49])
+        self.assertEqual(manifest["rest_fidelity"]["status"], "pass")
+        self.assertEqual(manifest["rest_fidelity"]["visibility_changed_px"], 0)
+
+    def test_neck_topwear_draw_order_matches_canonical_stack(self):
+        layers = portrait_layers()
+        layers["neck"] = rgba([(58, 56, 70, 76)], 210)
+        layers["topwear"] = rgba([(50, 66, 78, 100)], 70)
+        manifest, images = build_rig(layers, frame_size=(CANVAS, CANVAS))
+        rest = render_rig_rest(manifest["parts"], images, (CANVAS, CANVAS))
+        self.assertEqual(tuple(rest[70, 64, :3]), (70, 70, 70))
+        self.assertEqual(manifest["rest_fidelity"]["status"], "pass")
 
 
 class AnchorTests(unittest.TestCase):

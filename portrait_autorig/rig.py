@@ -15,14 +15,15 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from .image import crop_to_alpha
+from .image import composite_layers, crop_to_alpha, rest_fidelity
 from .semantic import SEMANTIC_Z_ORDER
 
 __all__ = [
     "GROUP_HEAD", "GROUP_NECK", "GROUP_BODY",
     "HEAD_REMAINDER", "NECK_REMAINDER", "BODY_REMAINDER",
     "EYE_SPLIT_TAGS", "RIG_Z_ORDER", "group_for_tag", "depth_table",
-    "split_remainder", "split_eyes", "detect_anchors", "build_rig",
+    "split_remainder", "split_eyes", "derive_missing_eyewhite",
+    "rig_preflight", "detect_anchors", "render_rig_rest", "build_rig",
     "write_rig_project",
 ]
 
@@ -57,6 +58,7 @@ NECK_TAGS = frozenset({"neck", "neckwear", NECK_REMAINDER})
 # problem. The `l`/`r` suffixes match the names `DEFAULT_SPINE_NAMES` already
 # knows, so a later Spine export maps them for free.
 EYE_SPLIT_TAGS = ("eyewhite", "irides", "eyelash", "eyebrow", "eyes")
+EYEWHITE_TAGS = frozenset({"eyewhite", "eyewhitel", "eyewhiter"})
 
 # Head-follow weights. Starting values, expected to move once the preview
 # exists -- see the feasibility doc's open risk on `back hair`.
@@ -122,14 +124,14 @@ DEFAULT_MOTION: dict[str, Any] = {
 def _rig_z_order() -> tuple[str, ...]:
     """`SEMANTIC_Z_ORDER` with the two new remainder regions inserted.
 
-    Each region sits directly behind the group it now moves with, so the
-    recovered pixels around the head are drawn behind the head *and* follow
-    it -- which is the whole point of splitting them. `body_remainder` keeps
-    its position at the very back, where `SEMANTIC_Z_ORDER` already puts it.
+    Remainder subdivision changes motion ownership, never setup visibility.
+    All three pieces therefore stay at the canonical remainder plane behind
+    every semantic layer. Their group/weight/depth may differ during motion,
+    but a pixel hidden in the producer composite remains hidden at rest.
     """
     order = list(SEMANTIC_Z_ORDER)
-    for tag, anchor in ((NECK_REMAINDER, "neck"), (HEAD_REMAINDER, "head")):
-        order.insert(order.index(anchor), tag)
+    insert_at = order.index(BODY_REMAINDER) + 1
+    order[insert_at:insert_at] = [HEAD_REMAINDER, NECK_REMAINDER]
     return tuple(order)
 
 
@@ -156,8 +158,15 @@ def depth_table() -> dict[str, float]:
     vocabulary already fixes, and estimating it costs a 3 GB model plus a pass
     per run (see `depth.estimate_layer_depths`).
     """
-    last = len(RIG_Z_ORDER) - 1
-    return {tag: round(1.0 - i / last, 4) for i, tag in enumerate(RIG_Z_ORDER)}
+    last = len(SEMANTIC_Z_ORDER) - 1
+    table = {tag: round(1.0 - i / last, 4)
+             for i, tag in enumerate(SEMANTIC_Z_ORDER)}
+    # Draw order and motion depth are intentionally independent. Remainder
+    # pieces stay behind everything at rest while following their semantic
+    # owner under head/neck motion.
+    table[HEAD_REMAINDER] = table["head"]
+    table[NECK_REMAINDER] = table["neck"]
+    return table
 
 
 _DEPTH_TABLE = depth_table()
@@ -240,9 +249,11 @@ def split_remainder(remainder_rgba: np.ndarray, layer_dict: dict[str, np.ndarray
 
     The split is by **nearest owner**, not by bounding box. Hair falling across
     a shoulder then divides along the actual boundary between the head and body
-    layers instead of at an arbitrary horizontal cut. The neck band is carved
-    out first, because a neck sits between the two and would otherwise be
-    arbitrarily assigned by whichever union happens to be a pixel closer.
+    layers instead of at an arbitrary horizontal cut. Neck ownership needs
+    stronger evidence than merely landing inside the neck's rectangle: a
+    connected candidate must be closest to the neck semantic, contact its
+    actual alpha, and have enough contact support for the neck's scale. Failed
+    neck candidates remain recoverable and fall through to head/body ownership.
 
     Note that this is a rig concern only. The Silhouette Guard's scoring and
     the portrait report keep seeing the single undivided remainder, so nothing
@@ -252,44 +263,94 @@ def split_remainder(remainder_rgba: np.ndarray, layer_dict: dict[str, np.ndarray
     if remainder.ndim != 3 or remainder.shape[-1] != 4:
         raise ValueError(f"remainder must be HxWx4, got {remainder.shape}")
     alpha = remainder[..., 3].astype(np.float32)
+    all_coverage = alpha > 0
     live = alpha > alpha_threshold
-    if not np.any(live):
+    if not np.any(all_coverage):
         return {}
+    if not np.any(live):
+        # A fully feathered remainder still contributes to the canonical rest
+        # image. Keep it at the canonical back plane rather than losing alpha
+        # solely because ownership evidence is too weak.
+        return {BODY_REMAINDER: _rgba_with_alpha(remainder, alpha)}
 
     head_union = _union_alpha(layer_dict, _group_tags(layer_dict, GROUP_HEAD), alpha_threshold)
     body_union = _union_alpha(layer_dict, _group_tags(layer_dict, GROUP_BODY), alpha_threshold)
     neck_union = _union_alpha(layer_dict, _group_tags(layer_dict, GROUP_NECK), alpha_threshold)
 
-    regions: dict[str, np.ndarray] = {}
-
     remaining = live.copy()
-    neck_box = _bbox(neck_union) if neck_union is not None else None
-    if neck_box is not None:
-        x1, y1, x2, y2 = neck_box
-        band = np.zeros_like(live)
-        band[y1:y2, x1:x2] = True
-        neck_part = remaining & band
-        if np.any(neck_part):
-            regions[NECK_REMAINDER] = _rgba_with_alpha(remainder, alpha * neck_part)
-            remaining &= ~neck_part
-
-    if not np.any(remaining):
-        return regions
-
     have_head = head_union is not None and bool(head_union.any())
     have_body = body_union is not None and bool(body_union.any())
-    if have_head and have_body:
+    have_neck = neck_union is not None and bool(neck_union.any())
+
+    if have_neck:
+        canvas_scale = max(live.shape) / 512.0
+        contact_px = max(1, int(round(canvas_scale)))
+        kernel = np.ones((2 * contact_px + 1, 2 * contact_px + 1), np.uint8)
+        neck_contact = cv2.dilate(neck_union.astype(np.uint8), kernel).astype(bool)
+        neck_distance = _distance_to(neck_union)
+        head_distance = (_distance_to(head_union) if have_head
+                         else np.full(live.shape, np.inf, np.float32))
+        body_distance = (_distance_to(body_union) if have_body
+                         else np.full(live.shape, np.inf, np.float32))
+        neck_nearest = live & (neck_distance <= head_distance) & (neck_distance <= body_distance)
+
+        # Connected ownership evidence is deliberately scaled from the actual
+        # neck semantic rather than the canvas. A002's three-pixel residue has
+        # neither the contact span nor the component support to pass, while a
+        # real recovered neck patch remains comfortably above both bars.
+        neck_box = _bbox(neck_union)
+        assert neck_box is not None
+        neck_short_side = min(neck_box[2] - neck_box[0], neck_box[3] - neck_box[1])
+        min_contact = max(4, int(round(neck_short_side * 0.04)))
+        min_component = max(8, min_contact * 2)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            neck_nearest.astype(np.uint8), 8
+        )
+        neck_part = np.zeros_like(live)
+        for label in range(1, count):
+            component = labels == label
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            contact = int((component & neck_contact).sum())
+            contact_ratio = contact / max(area, 1)
+            if area < min_component or contact < min_contact or contact_ratio < 0.25:
+                continue
+            neck_part |= component
+        if np.any(neck_part):
+            remaining &= ~neck_part
+    else:
+        neck_part = np.zeros_like(live)
+
+    if np.any(remaining) and have_head and have_body:
         head_part = remaining & (_distance_to(head_union) <= _distance_to(body_union))
-    elif have_head:
-        head_part = remaining
+    elif np.any(remaining) and have_head:
+        head_part = remaining.copy()
     else:
         head_part = np.zeros_like(remaining)
     body_part = remaining & ~head_part
 
-    if np.any(head_part):
-        regions[HEAD_REMAINDER] = _rgba_with_alpha(remainder, alpha * head_part)
-    if np.any(body_part):
-        regions[BODY_REMAINDER] = _rgba_with_alpha(remainder, alpha * body_part)
+    # Ownership is decided on meaningful alpha, then extended to every faint
+    # antialiased edge pixel by nearest connected owner. This is what makes
+    # crop/subdivision lossless at rest instead of shaving alpha <= threshold.
+    owner_masks = {
+        NECK_REMAINDER: neck_part,
+        HEAD_REMAINDER: head_part,
+        BODY_REMAINDER: body_part,
+    }
+    faint = all_coverage & ~live
+    populated = [(tag, mask) for tag, mask in owner_masks.items() if np.any(mask)]
+    if np.any(faint):
+        if not populated:
+            owner_masks[BODY_REMAINDER] |= faint
+        else:
+            distances = np.stack([_distance_to(mask) for _, mask in populated], axis=0)
+            nearest = np.argmin(distances, axis=0)
+            for index, (tag, _) in enumerate(populated):
+                owner_masks[tag] |= faint & (nearest == index)
+
+    regions: dict[str, np.ndarray] = {}
+    for tag, mask in owner_masks.items():
+        if np.any(mask):
+            regions[tag] = _rgba_with_alpha(remainder, alpha * mask)
     return regions
 
 
@@ -351,6 +412,310 @@ def split_eyes(layer_dict: dict[str, np.ndarray], face_center_x: float, *,
             out[f"{tag}{suffix}"] = _rgba_with_alpha(arr, alpha * side_mask)
 
     return out
+
+
+def _eye_feature_halves(layer_dict: dict[str, np.ndarray], face_center_x: float, *,
+                        alpha_threshold: int) -> dict[str, np.ndarray]:
+    """Return a non-mutating view with every splittable eye feature divided."""
+    working = dict(layer_dict)
+    halves = split_eyes(working, face_center_x, alpha_threshold=alpha_threshold)
+    for tag, image in halves.items():
+        working[tag] = image
+    for parent in {tag[:-1] for tag in halves}:
+        working.pop(parent, None)
+    return working
+
+
+def derive_missing_eyewhite(original_rgba: np.ndarray,
+                            layer_dict: dict[str, np.ndarray], *,
+                            alpha_threshold: int = 10,
+                            colour_margin: float = 12.0,
+                            ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    """Conservatively recover bilateral sclera from an eyeless layer contract.
+
+    This operates only on a rig working set. It compares the original against
+    the occlusion-complete ``head`` and featureless ``face`` inside ROIs grown
+    from existing iris anchors, removes pixels already owned by eye features,
+    and accepts the result only when both sides contain plausible connected
+    coverage. The returned images contain original pixels so the derived
+    overlay reconstructs the rest pose rather than inventing new colour.
+    """
+    report: dict[str, Any] = {
+        "source": "head_face_original_difference",
+        "attempted": False,
+        "succeeded": False,
+        "confidence": 0.0,
+        "failure": None,
+        "parts": [],
+        "sides": {},
+    }
+    if any(tag in layer_dict for tag in EYEWHITE_TAGS):
+        report["failure"] = "native_eyewhite_present"
+        return {}, report
+    head = layer_dict.get("head")
+    face = layer_dict.get("face")
+    original = np.asarray(original_rgba)
+    if head is None or face is None or original.shape != np.asarray(head).shape:
+        report["failure"] = "original_head_face_required"
+        return {}, report
+    report["attempted"] = True
+
+    iris_parts = {side: layer_dict.get(f"irides{side}") for side in ("l", "r")}
+    if any(image is None for image in iris_parts.values()):
+        report["failure"] = "bilateral_iris_anchors_required"
+        return {}, report
+
+    head_arr = np.asarray(head)
+    face_arr = np.asarray(face)
+    h, w = original.shape[:2]
+    original_rgb = original[..., :3].astype(np.float32)
+    head_rgb = head_arr[..., :3].astype(np.float32)
+    face_rgb = face_arr[..., :3].astype(np.float32)
+    head_error = np.linalg.norm(original_rgb - head_rgb, axis=2)
+    face_error = np.linalg.norm(original_rgb - face_rgb, axis=2)
+    explained_by_head = (face_error - head_error) >= colour_margin
+    # Face RGB is still useful evidence where its alpha intentionally opens an
+    # eye socket. Requiring face alpha here would make the exact rest-faithful
+    # missing-eyewhite case impossible to derive.
+    valid_surface = ((head_arr[..., 3] > alpha_threshold)
+                     & (original[..., 3] > alpha_threshold))
+
+    outputs: dict[str, np.ndarray] = {}
+    side_confidences: list[float] = []
+    for side, iris in iris_parts.items():
+        assert iris is not None
+        iris_mask = _mask_of(iris, alpha_threshold)
+        iris_box = _bbox(iris_mask)
+        iris_center = _centroid(_alpha_of(iris), alpha_threshold)
+        if iris_box is None or iris_center is None:
+            report["failure"] = f"empty_iris_{side}"
+            return {}, report
+        ix1, iy1, ix2, iy2 = iris_box
+        iris_w, iris_h = max(1, ix2 - ix1), max(1, iy2 - iy1)
+        cx, cy = iris_center
+        roi_x = max(6, int(round(iris_w * 1.45)))
+        roi_y = max(4, int(round(iris_h * 0.85)))
+        x1, x2 = max(0, int(round(cx)) - roi_x), min(w, int(round(cx)) + roi_x + 1)
+        y1, y2 = max(0, int(round(cy)) - roi_y), min(h, int(round(cy)) + roi_y + 1)
+        roi = np.zeros((h, w), bool)
+        roi[y1:y2, x1:x2] = True
+
+        owned = np.zeros((h, w), bool)
+        for prefix in ("irides", "eyelash", "eyebrow", "eyes"):
+            feature = layer_dict.get(f"{prefix}{side}")
+            if feature is not None:
+                owned |= _mask_of(feature, alpha_threshold)
+        owned = cv2.dilate(owned.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+        candidate = roi & valid_surface & explained_by_head & ~owned
+        candidate = cv2.morphologyEx(candidate.astype(np.uint8), cv2.MORPH_CLOSE,
+                                     np.ones((3, 5), np.uint8)).astype(bool)
+        candidate &= roi & valid_surface & ~owned
+
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            candidate.astype(np.uint8), 8
+        )
+        kept = np.zeros((h, w), bool)
+        iris_area = max(1, int(iris_mask.sum()))
+        min_area = max(8, int(round(iris_area * 0.12)))
+        max_area = max(min_area, int(round((x2 - x1) * (y2 - y1) * 0.55)))
+        near_iris = cv2.dilate(iris_mask.astype(np.uint8),
+                              np.ones((max(3, iris_h), max(3, iris_w * 2 + 1)), np.uint8)).astype(bool)
+        for label in range(1, count):
+            component = labels == label
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area < min_area or area > max_area or not np.any(component & near_iris):
+                continue
+            kept |= component
+        kept_area = int(kept.sum())
+        if kept_area < min_area:
+            report["failure"] = f"low_sclera_support_{side}"
+            return {}, report
+        advantage = float(np.mean((face_error - head_error)[kept]))
+        # Repaired feature layers often carry the full eye disk (A002's iris
+        # masks are ~650 px), while the two exposed sclera crescents total only
+        # ~100 px. Fifteen percent is therefore the measured support scale, not
+        # an expectation that sclera should rival the feature mask in area.
+        coverage_score = min(1.0, kept_area / max(iris_area * 0.15, 1.0))
+        colour_score = min(1.0, max(0.0, (advantage - colour_margin) / 32.0))
+        side_confidence = 0.55 * coverage_score + 0.45 * colour_score
+        side_confidences.append(side_confidence)
+        report["sides"][side] = {
+            "pixels": kept_area,
+            "iris_pixels": iris_area,
+            "mean_head_advantage": round(advantage, 3),
+            "confidence": round(float(side_confidence), 3),
+        }
+        outputs[f"eyewhite{side}"] = _rgba_with_alpha(original, original[..., 3] * kept)
+
+    confidence = round(float(min(side_confidences)), 3)
+    if confidence < 0.55:
+        report["failure"] = "confidence_below_threshold"
+        report["confidence"] = confidence
+        return {}, report
+    report.update({
+        "succeeded": True,
+        "confidence": confidence,
+        "failure": None,
+        "parts": sorted(outputs),
+        "removed_from": "head",
+        "motion_reference": "face",
+        "canonical_bundle_modified": False,
+    })
+    return outputs, report
+
+
+def rig_preflight(layer_dict: dict[str, np.ndarray], *,
+                  original_rgba: np.ndarray | None = None,
+                  body_remainder: np.ndarray | None = None,
+                  alpha_threshold: int = 10) -> dict[str, Any]:
+    """Assess rig readiness without re-judging static Portrait validity."""
+    available = {
+        tag for tag, image in layer_dict.items()
+        if image is not None and np.asarray(image).ndim == 3
+        and np.asarray(image).shape[-1] == 4
+        and np.any(np.asarray(image)[..., 3] > alpha_threshold)
+    }
+    checks: dict[str, Any] = {
+        tag: {"required": True, "available": tag in available}
+        for tag in ("head", "face", "mouth")
+    }
+    for tag in ("neck", "topwear", "irides", "eyelash"):
+        checks[tag] = {"required": True, "available": tag in available}
+    warnings: list[dict[str, str]] = []
+    missing_hard = [tag for tag in ("head", "face") if tag not in available]
+    if missing_hard:
+        warnings.append({"code": "missing_core_semantics",
+                         "message": f"required rig semantics missing: {', '.join(missing_hard)}"})
+        return {
+            "status": "INCOMPATIBLE",
+            "static_portrait_validity": "not_evaluated",
+            "checks": checks,
+            "missing": missing_hard,
+            "recoverable": [],
+            "warnings": warnings,
+        }
+
+    sample = next(np.asarray(layer_dict[tag]) for tag in available)
+    anchors = detect_anchors(layer_dict, sample.shape[:2], alpha_threshold=alpha_threshold)
+    face_center = anchors.get("face_center")
+    probe = (_eye_feature_halves(layer_dict, face_center[0], alpha_threshold=alpha_threshold)
+             if face_center is not None else dict(layer_dict))
+    native = any(tag in available for tag in EYEWHITE_TAGS)
+    bilateral_eyewhite = ("eyewhitel" in probe and "eyewhiter" in probe)
+    bilateral_anchors = (("iridesl" in probe and "iridesr" in probe)
+                         or ("eyel" in probe and "eyer" in probe))
+    derivation_report: dict[str, Any] | None = None
+    if not native and original_rgba is not None and bilateral_anchors:
+        derived_images, derivation_report = derive_missing_eyewhite(
+            original_rgba, probe, alpha_threshold=alpha_threshold
+        )
+        if derived_images:
+            candidate = dict(probe)
+            coverage = np.zeros(sample.shape[:2], bool)
+            for tag, image in derived_images.items():
+                candidate[tag] = image
+                coverage |= image[..., 3] > alpha_threshold
+            candidate_head = np.array(candidate["head"], copy=True)
+            candidate_head[..., 3] = np.where(
+                coverage, 0, candidate_head[..., 3]
+            ).astype(np.uint8)
+            candidate["head"] = candidate_head
+            canonical = dict(layer_dict)
+            if body_remainder is not None:
+                canonical[BODY_REMAINDER] = np.asarray(body_remainder)
+                candidate[BODY_REMAINDER] = np.asarray(body_remainder)
+            reference = composite_layers(canonical, sample.shape[:2])
+            candidate_rest = composite_layers(candidate, sample.shape[:2], order=RIG_Z_ORDER)
+            candidate_fidelity = rest_fidelity(reference, candidate_rest,
+                                               alpha_threshold=alpha_threshold)
+            derivation_report["candidate_rest_fidelity"] = candidate_fidelity
+            if candidate_fidelity["status"] != "pass":
+                derivation_report.update({
+                    "succeeded": False,
+                    "accepted": False,
+                    "failure": "rest_fidelity_rejected",
+                })
+            else:
+                derivation_report["accepted"] = True
+    derived = bool(derivation_report and derivation_report["succeeded"])
+    checks["eyewhite"] = {
+        "required": True,
+        "available": "native" if native else ("derived" if derived else "missing"),
+        "bilateral": bilateral_eyewhite or derived,
+    }
+    checks["eye_related_split"] = {
+        "required": True,
+        "bilateral_anchors": bilateral_anchors,
+    }
+    final_anchors = detect_anchors(probe, sample.shape[:2], alpha_threshold=alpha_threshold)
+    required_anchors = ("face_center", "eye_left", "eye_right", "mouth",
+                        "neck_pivot", "body_pivot")
+    checks["anchors"] = {
+        "required": list(required_anchors),
+        "available": sorted(name for name in required_anchors if name in final_anchors),
+        "missing": sorted(name for name in required_anchors if name not in final_anchors),
+    }
+    remainder_pixels = (int((np.asarray(body_remainder)[..., 3] > alpha_threshold).sum())
+                        if body_remainder is not None else 0)
+    checks["body_remainder"] = {
+        "required": False,
+        "available": body_remainder is not None and remainder_pixels > 0,
+        "alpha_pixels": remainder_pixels,
+    }
+    if body_remainder is not None and remainder_pixels:
+        ownership = split_remainder(body_remainder, layer_dict,
+                                    alpha_threshold=alpha_threshold)
+        checks["body_remainder"]["derived_owners"] = {
+            tag: int((image[..., 3] > alpha_threshold).sum())
+            for tag, image in ownership.items()
+        }
+    if derivation_report is not None:
+        checks["eyewhite"]["derivation"] = derivation_report
+
+    if "mouth" not in available:
+        warnings.append({"code": "missing_mouth",
+                         "message": "mouth animation is unavailable"})
+    if not bilateral_anchors:
+        warnings.append({"code": "eye_split_unavailable",
+                         "message": "bilateral iris anchors could not be established"})
+    if not native and not derived:
+        failure = ((derivation_report or {}).get("failure")
+                   or "native eyewhite is absent and derivation was not possible")
+        warnings.append({"code": "missing_eyewhite", "message": str(failure)})
+    elif native and not bilateral_eyewhite:
+        warnings.append({"code": "eyewhite_split_unavailable",
+                         "message": "native eyewhite could not be split bilaterally"})
+
+    for tag, capability in (("neck", "neck continuity"), ("topwear", "body motion"),
+                            ("irides", "eye anchors"), ("eyelash", "blink")):
+        if tag not in available:
+            warnings.append({"code": f"missing_{tag.replace(' ', '_')}",
+                             "message": f"{capability} is unavailable"})
+    if checks["anchors"]["missing"]:
+        warnings.append({"code": "missing_anchors",
+                         "message": "anchors unavailable: "
+                                    + ", ".join(checks["anchors"]["missing"])})
+
+    fully_available = ("mouth" in available and "neck" in available
+                       and "topwear" in available and "eyelash" in available
+                       and bilateral_anchors
+                       and (bilateral_eyewhite or derived))
+    status = ("READY_WITH_DERIVATION" if fully_available and derived
+              else "READY" if fully_available
+              else "DEGRADED")
+    missing = sorted(tag for tag, check in checks.items()
+                     if isinstance(check, dict) and check.get("required") is True
+                     and check.get("available") is False)
+    if not native:
+        missing.append("eyewhite")
+    return {
+        "status": status,
+        "static_portrait_validity": "not_evaluated",
+        "checks": checks,
+        "missing": sorted(set(missing)),
+        "recoverable": ["eyewhite"] if derived else [],
+        "warnings": warnings,
+    }
 
 
 def detect_anchors(layer_dict: dict[str, np.ndarray], frame_size: tuple[int, int], *,
@@ -469,7 +834,29 @@ def _mesh_cell(frame_size: tuple[int, int], fine: bool) -> int:
     return max(8, int(round(base * scale)))
 
 
+def render_rig_rest(parts: Collection[dict[str, Any]], images: dict[str, np.ndarray],
+                    frame_size: tuple[int, int]) -> np.ndarray:
+    """Composite cropped rig parts exactly as the runtime draws motion=0."""
+    canvas_h, canvas_w = int(frame_size[0]), int(frame_size[1])
+    full_layers: dict[str, np.ndarray] = {}
+    ordered_tags: list[str] = []
+    for part in sorted(parts, key=lambda item: item["z"]):
+        image = images.get(part["name"])
+        if image is None:
+            raise ValueError(f"missing rig image for {part['name']!r}")
+        x1, y1, x2, y2 = (int(value) for value in part["xyxy"])
+        if image.shape != (y2 - y1, x2 - x1, 4):
+            raise ValueError(f"rig crop shape disagrees with xyxy for {part['name']!r}")
+        full = np.zeros((canvas_h, canvas_w, 4), np.uint8)
+        full[y1:y2, x1:x2] = image
+        tag = str(part["tag"])
+        full_layers[tag] = full
+        ordered_tags.append(tag)
+    return composite_layers(full_layers, (canvas_h, canvas_w), order=tuple(ordered_tags))
+
+
 def build_rig(layer_dict: dict[str, np.ndarray], *,
+              original_rgba: np.ndarray | None = None,
               body_remainder: np.ndarray | None = None,
               depth_dict: dict[str, np.ndarray] | None = None,
               frame_size: tuple[int, int] | None = None,
@@ -478,6 +865,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
               run_id: str = "", tag_version: str = "",
               image_prefix: str = f"{RIG_SUBDIR}/images",
               motion: dict[str, Any] | None = None,
+              preflight: dict[str, Any] | None = None,
               ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     """Stages A-D: turn `{tag: full-canvas RGBA}` into `(manifest, images)`.
 
@@ -507,6 +895,15 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         sample = next(iter(working.values()))
         frame_size = (int(sample.shape[0]), int(sample.shape[1]))
     canvas_h, canvas_w = int(frame_size[0]), int(frame_size[1])
+    canonical_layers = dict(layer_dict)
+    if body_remainder is not None:
+        canonical_layers[BODY_REMAINDER] = np.asarray(body_remainder)
+    canonical_reference = composite_layers(canonical_layers, (canvas_h, canvas_w))
+    if preflight is None:
+        preflight = rig_preflight(layer_dict, original_rgba=original_rgba,
+                                  body_remainder=body_remainder,
+                                  alpha_threshold=alpha_threshold)
+    preflight = json.loads(json.dumps(preflight))
 
     # Stage B: remainder next, so the eye split and the anchors below see the
     # same layer set the manifest will describe.
@@ -533,12 +930,69 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
             anchors = detect_anchors(working, (canvas_h, canvas_w),
                                      alpha_threshold=alpha_threshold)
 
+    derived_report: dict[str, Any] | None = None
+    preflight_derivation = (preflight.get("checks", {}).get("eyewhite", {})
+                            .get("derivation", {}))
+    derivation_blocked = preflight_derivation.get("failure") == "rest_fidelity_rejected"
+    if (original_rgba is not None and not any(tag in working for tag in EYEWHITE_TAGS)
+            and not derivation_blocked):
+        head_before_derivation = np.array(working["head"], copy=True)
+        derived, derived_report = derive_missing_eyewhite(
+            original_rgba, working, alpha_threshold=alpha_threshold
+        )
+        if derived:
+            coverage = np.zeros((canvas_h, canvas_w), bool)
+            for tag, image in derived.items():
+                working[tag] = image
+                # Derived sclera is an overlay cut out of head, but it belongs
+                # to the face surface for motion. Matching face depth prevents
+                # the fallback from recreating A002's head/face parallax loss.
+                depth_parent[tag] = "face"
+                coverage |= image[..., 3] > alpha_threshold
+            head = np.array(working["head"], copy=True)
+            head[..., 3] = np.where(coverage, 0, head[..., 3]).astype(np.uint8)
+            working["head"] = head
+            anchors = detect_anchors(working, (canvas_h, canvas_w),
+                                     alpha_threshold=alpha_threshold)
+
+            candidate_rest = composite_layers(working, (canvas_h, canvas_w),
+                                              order=RIG_Z_ORDER)
+            candidate_fidelity = rest_fidelity(canonical_reference, candidate_rest,
+                                               alpha_threshold=alpha_threshold)
+            derived_report["candidate_rest_fidelity"] = candidate_fidelity
+            if candidate_fidelity["status"] != "pass":
+                for tag in derived:
+                    working.pop(tag, None)
+                    depth_parent.pop(tag, None)
+                working["head"] = head_before_derivation
+                derived_report.update({
+                    "accepted": False,
+                    "succeeded": False,
+                    "failure": "rest_fidelity_rejected",
+                })
+                eye_check = preflight.get("checks", {}).get("eyewhite", {})
+                eye_check.update({"available": "missing", "bilateral": False,
+                                  "derivation": derived_report})
+                preflight["status"] = "DEGRADED"
+                preflight["recoverable"] = []
+                preflight["warnings"] = list(preflight.get("warnings", [])) + [{
+                    "code": "eyewhite_derivation_rest_fidelity",
+                    "message": "derived eyewhite changed the canonical setup pose",
+                }]
+                anchors = detect_anchors(working, (canvas_h, canvas_w),
+                                         alpha_threshold=alpha_threshold)
+            else:
+                derived_report["accepted"] = True
+
     # Stage D.
     neck_box = neck_bbox(working, alpha_threshold=alpha_threshold)
     depths: dict[str, float] = {}
     for tag, arr in working.items():
         parent = depth_parent.get(tag, tag)
-        depth = _DEPTH_TABLE.get(tag, _DEPTH_TABLE.get(parent, UNKNOWN_DEPTH))
+        is_derived = bool(derived_report and derived_report.get("succeeded")
+                          and tag in derived_report["parts"])
+        depth = (_DEPTH_TABLE.get(parent, UNKNOWN_DEPTH) if is_derived
+                 else _DEPTH_TABLE.get(tag, _DEPTH_TABLE.get(parent, UNKNOWN_DEPTH)))
         if depth_dict is not None and parent in depth_dict:
             visible = arr[..., 3] > alpha_threshold
             estimated = np.asarray(depth_dict[parent])
@@ -546,10 +1000,9 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
                 depth = float(np.median(estimated[visible]))
         depths[tag] = round(float(depth), 4)
 
-    ordered = sorted(
-        working,
-        key=lambda t: (-depths[t], RIG_Z_ORDER.index(t) if t in RIG_Z_ORDER else -1),
-    )
+    ordered = sorted(working, key=lambda tag: (
+        RIG_Z_ORDER.index(tag) if tag in RIG_Z_ORDER else -1
+    ))
 
     parts: list[dict[str, Any]] = []
     images: dict[str, np.ndarray] = {}
@@ -576,6 +1029,8 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
             "mesh": {"cell": _mesh_cell((canvas_h, canvas_w),
                                         fine=weight["mode"] == "gradient_y")},
         })
+        if derived_report and derived_report.get("succeeded") and tag in derived_report["parts"]:
+            parts[-1]["derived"] = True
 
     manifest = {
         "version": MANIFEST_VERSION,
@@ -588,7 +1043,16 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         "anchors": anchors,
         "parts": parts,
         "motion": json.loads(json.dumps(motion if motion is not None else DEFAULT_MOTION)),
+        "rig_preflight": json.loads(json.dumps(preflight)),
     }
+    if derived_report and derived_report.get("succeeded"):
+        manifest["derived_semantics"] = {
+            "eyewhite": json.loads(json.dumps(derived_report))
+        }
+    rig_rest = render_rig_rest(parts, images, (canvas_h, canvas_w))
+    manifest["rest_fidelity"] = rest_fidelity(
+        canonical_reference, rig_rest, alpha_threshold=alpha_threshold
+    )
     return manifest, images
 
 
