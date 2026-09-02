@@ -14,7 +14,12 @@ On Windows, clone/install the project and then double-click:
 portrait_autorig_gui.pyw
 ```
 
-The GUI supports:
+The launcher exposes the production workflow as two explicit steps:
+
+1. **RIG 만들기** — compile the main production Portrait Bundle into a Rig Bundle.
+2. **표정 도너 조합** — attach eye/mouth expression donors to that finished Rig Bundle.
+
+The rig builder supports:
 
 - single Portrait Bundle builds
 - batch builds for a folder of `*.portrait` bundles
@@ -25,11 +30,25 @@ The GUI supports:
 - progress, per-portrait preflight/rest-fidelity status, and build logs
 - opening the generated output folder directly
 
-After installing the package, the same window is also registered as the
-`portrait-autorig-gui` GUI script. The GUI is intentionally a thin front-end;
-the reusable build workflow lives in `portrait_autorig/workflow.py` so later
-game deployment can use the same validated path without duplicating compiler
-logic.
+The expression composer supports multiple states in one pass. Built-in editable
+state presets are `eye_closed`, `wink_left`, `wink_right`, `mouth_open`, and
+`mouth_a/i/u/e/o`.
+
+Two donor modes are available:
+
+- **Generated image donor (fast):** select full-frame PNG/WebP/JPEG donors. Only
+  the semantic eye or mouth region is recovered; identity, hair, body, and all
+  untouched pixels continue to come from the main rig.
+- **Decomposed donor Rig (precise):** select an already compiled donor rig for
+  each state. The workflow merges all requested donor states first and writes
+  the expression block once, so one donor cannot overwrite a previously added
+  state.
+
+After installing the package, the same launcher is registered as the
+`portrait-autorig-gui` GUI script. GUI code is intentionally kept above reusable
+workflow functions (`workflow.py` and `expression_workflow.py`) so later game
+deployment can call the exact same validated build path without duplicating
+compiler logic.
 
 ## Command line (automation / fallback)
 
