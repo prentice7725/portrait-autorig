@@ -54,6 +54,15 @@ class PortraitAutorigLauncher:
 def main() -> None:
     root = tk.Tk()
     PortraitAutorigLauncher(root)
+    # A window opened from a launched-but-not-focused process (a double
+    # click on the .pyw, a shell association) otherwise draws behind
+    # whatever already has focus -- indistinguishable from not having
+    # started at all. Toggling topmost is the standard Tk way to force one
+    # foreground swap on launch without pinning the window there permanently.
+    root.lift()
+    root.attributes("-topmost", True)
+    root.after(200, lambda: root.attributes("-topmost", False))
+    root.focus_force()
     root.mainloop()
 
 

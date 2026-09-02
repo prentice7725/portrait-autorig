@@ -31,7 +31,9 @@
     display: grid; grid-template-columns: 1fr 320px; height: 100vh;
   }
   #stage { position: relative; display: grid; place-items: center; overflow: hidden; }
+  #canvasWrap { position: relative; max-width: 100%; max-height: 100vh; }
   canvas { max-width: 100%; max-height: 100vh; display: block; }
+  #regionOverlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   #drop {
     position: absolute; inset: 24px; border: 2px dashed var(--line); border-radius: 12px;
     display: grid; place-content: center; text-align: center; gap: 14px; padding: 32px;
@@ -66,7 +68,10 @@
 <body>
 
 <div id="stage">
-  <canvas id="gl"></canvas>
+  <div id="canvasWrap">
+    <canvas id="gl"></canvas>
+    <canvas id="regionOverlay"></canvas>
+  </div>
   <div id="drop">
     <h1>Portrait Rig Preview</h1>
     <p>Pick a run directory containing <code>*_rig_manifest.json</code> and
@@ -105,6 +110,21 @@
     <button id="blinkNow">Blink</button>
   </div>
   <p class="hint">Wink buttons exercise the left/right eye split (H4).</p>
+
+  <h2>Chest Soft Morph</h2>
+  <div class="meta" id="softMeta">not available in this run</div>
+  <label class="row"><input type="checkbox" id="doSoftMorph"> Chest Soft Morph</label>
+  <label>Strength <span class="val" id="softStrengthv">0.00</span>
+    <input type="range" id="softStrength" min="0" max="1" step="0.01" value="0"></label>
+  <label>Horizontal <span class="val" id="softHorizv">0.0px</span>
+    <input type="range" id="softHoriz" min="0" max="4" step="0.1" value="0"></label>
+  <label>Vertical <span class="val" id="softVertv">0.0px</span>
+    <input type="range" id="softVert" min="0" max="2" step="0.1" value="0"></label>
+  <label class="row"><input type="checkbox" id="softRegion"> Show region</label>
+  <p class="hint">Local two-lobe volume response confined to <code>topwear</code>,
+     layered on top of breathing rather than replacing it -- turning this off
+     leaves breathing exactly as it was. Disabled and unchecked when this
+     run's preflight could not derive a confident region (design doc 15).</p>
 
   <h2>Expression pack</h2>
   <div class="meta" id="packmeta">no pack in this run</div>
@@ -174,6 +194,14 @@ const TURN_Y_SCALE = 0.7;  // vertical parallax reads stronger, so damp it
 // reach 1.5, which is what found it.
 const IDLE_TURN = 0.3;
 const CHEST_WIDEN = 0.004; // ribcage expansion, as a fraction of chest width
+
+// Upper Torso Soft Morph (docs/PORTRAIT_AUTORIG_CHEST_SOFT_MORPH_DESIGN_v0.1.md).
+// A local two-lobe volume response layered on top of breathing, confined to
+// `topwear` -- CHEST_WIDEN above stays exactly as it is; this is additive.
+const SOFT_MORPH_TAG = "topwear";     // Phase 1 scope: this tag only (design doc 5)
+const SOFT_MORPH_DEFLATE_SCALE = 0.35; // exhale moves less than inhale (design doc 9)
+const SOFT_MORPH_CENTER_TRANSITION = 0.15; // fraction of topwear width past center_lock
+                                            // before the lock fully releases (design doc 8.2)
 
 // Ellipsoid shell (H6), read from Anime2.5DRig's 3D-shell mode. Depth parallax
 // slides each layer rigidly, so `front hair` and `head` drift apart by their
@@ -538,6 +566,49 @@ function buildMesh(part) {
   };
 }
 
+/** Precompute the two-lobe soft-morph weight field for a `topwear` mesh
+ *  (design doc 6-8): per-vertex left/right ellipse weight, each already
+ *  multiplied by the neckline and center locks, plus a lower-bias factor for
+ *  the small vertical component (9.2). Baked once at build time exactly like
+ *  `weight`/`ramp` in `buildMesh` -- the region geometry never changes frame
+ *  to frame, only `morph` (the breathing-driven scalar) does. */
+function buildSoftMorphWeights(part, mesh, spec) {
+  const [x1, y1, x2, y2] = part.xyxy;
+  const width = x2 - x1, height = y2 - y1;
+  const centerX = (x1 + x2) / 2;
+  const neckLockBottom = y1 + height * spec.neckline_lock;
+  const centerLockHalf = spec.center_lock * width;
+  const centerLockOuter = centerLockHalf + SOFT_MORPH_CENTER_TRANSITION * width;
+
+  const lobeGeom = (lobe) => ({
+    cx: x1 + lobe.center[0] * width, cy: y1 + lobe.center[1] * height,
+    rx: Math.max(1e-6, lobe.radius[0] * width), ry: Math.max(1e-6, lobe.radius[1] * height),
+  });
+  const left = lobeGeom(spec.left), right = lobeGeom(spec.right);
+
+  const n = mesh.rest.length / 2;
+  const wl = new Float32Array(n), wr = new Float32Array(n), lower = new Float32Array(n);
+  for (let i = 0, v = 0; i < n; i++, v += 2) {
+    const x = mesh.rest[v], y = mesh.rest[v + 1];
+    // Neckline lock (8.1): 0 at the garment's own top edge, released by the
+    // manifest's `neckline_lock` fraction of its height. Center lock (8.2):
+    // 0 within `center_lock` of the button/seam line, released over the
+    // fixed transition band above.
+    const lock = smoothstep(y1, neckLockBottom, y) * smoothstep(centerLockHalf, centerLockOuter, Math.abs(x - centerX));
+
+    const dl2 = ((x - left.cx) / left.rx) ** 2 + ((y - left.cy) / left.ry) ** 2;
+    const dr2 = ((x - right.cx) / right.rx) ** 2 + ((y - right.cy) / right.ry) ** 2;
+    wl[i] = smoothstep(1, 0, dl2) * lock;
+    wr[i] = smoothstep(1, 0, dr2) * lock;
+    // Concentrates the vertical component toward the bottom of whichever
+    // lobe a vertex is nearer, rather than lifting the whole zone uniformly
+    // -- which would fight the neckline lock right above it.
+    const near = dl2 <= dr2 ? left : right;
+    lower[i] = Math.max(0, Math.min(1, (y - near.cy) / near.ry));
+  }
+  return { left: wl, right: wr, lowerBias: lower };
+}
+
 /* ---------- GL ---------- */
 
 function compile(gl, type, src) {
@@ -607,11 +678,14 @@ function makeTexture(gl, bitmap) {
 
 function build(manifest, images) {
   const canvas = document.getElementById("gl");
+  const overlayCanvas = document.getElementById("regionOverlay");
   state.manifest = manifest;
   state.canvasW = manifest.canvas.width;
   state.canvasH = manifest.canvas.height;
   canvas.width = state.canvasW;
   canvas.height = state.canvasH;
+  overlayCanvas.width = state.canvasW;
+  overlayCanvas.height = state.canvasH;
 
   const { gl, prog, loc } = initGL(canvas);
   state.gl = gl; state.prog = prog; state.loc = loc;
@@ -651,6 +725,9 @@ function build(manifest, images) {
     };
   });
 
+  const softSpec = (manifest.motion || {}).upper_torso_soft_morph;
+  const hasSoftRegion = !!(softSpec && softSpec.left && softSpec.right);
+
   state.parts = manifest.parts.concat(expressionSpecs)
       .sort((a, b) => a.z - b.z).map((part) => {
     const mesh = buildMesh(part);
@@ -682,6 +759,9 @@ function build(manifest, images) {
       eyeCenterY: eyeAnchor ? eyeAnchor[1] : (part.xyxy[1] + part.xyxy[3]) / 2,
       openTop: box[1],
       openBottom: box[3],
+      // Phase 1 scope (design doc 5): only `topwear` deforms.
+      softMorph: (hasSoftRegion && part.tag === SOFT_MORPH_TAG)
+        ? buildSoftMorphWeights(part, mesh, softSpec) : null,
     };
   });
 
@@ -736,6 +816,31 @@ function build(manifest, images) {
   thick.value = manifest.motion.blink.lid_thickness ?? LID_MIN_SCALE;
   document.getElementById("lidThickv").textContent = Number(thick.value).toFixed(2);
 
+  const doSoft = document.getElementById("doSoftMorph");
+  const softStrength = document.getElementById("softStrength");
+  const softHoriz = document.getElementById("softHoriz");
+  const softVert = document.getElementById("softVert");
+  const softMeta = document.getElementById("softMeta");
+  if (hasSoftRegion) {
+    doSoft.checked = !!softSpec.enabled;
+    doSoft.disabled = false;
+    softStrength.value = softSpec.strength ?? 0;
+    softHoriz.value = softSpec.horizontal_px ?? 0;
+    softVert.value = softSpec.vertical_px ?? 0;
+    const reasons = softSpec.status_reasons || [];
+    softMeta.innerHTML = `<div>status <b>${softSpec.status}</b> &middot; `
+      + `confidence ${(softSpec.confidence ?? 0).toFixed(2)}</div>`
+      + (reasons.length ? `<div class="warn">${reasons.join(", ")}</div>` : "");
+  } else {
+    doSoft.checked = false;
+    doSoft.disabled = true;
+    const reasons = (softSpec && softSpec.status_reasons) || ["no_topwear"];
+    softMeta.textContent = softSpec ? `disabled: ${reasons.join(", ")}` : "not available in this run";
+  }
+  document.getElementById("softStrengthv").textContent = Number(softStrength.value).toFixed(2);
+  document.getElementById("softHorizv").textContent = Number(softHoriz.value).toFixed(1) + "px";
+  document.getElementById("softVertv").textContent = Number(softVert.value).toFixed(1) + "px";
+
   renderPanel();
   requestAnimationFrame(frame);
 }
@@ -771,6 +876,43 @@ function renderPanel() {
     row.append(cb, z, name);
     host.appendChild(row);
   }
+}
+
+/** `Show region` debug overlay (design doc 18): the two derived ellipses plus
+ *  the neckline/center lock lines, drawn on a plain 2D canvas stacked over
+ *  the WebGL one so the geometry can be checked without touching the render
+ *  path. No-ops when the checkbox is off or this run has no region. */
+function drawSoftRegionOverlay() {
+  const ctx = document.getElementById("regionOverlay").getContext("2d");
+  ctx.clearRect(0, 0, state.canvasW, state.canvasH);
+  if (!document.getElementById("softRegion").checked) return;
+  const spec = (state.manifest.motion || {}).upper_torso_soft_morph;
+  const topwear = state.parts.find((p) => p.spec.tag === SOFT_MORPH_TAG);
+  if (!spec || !spec.left || !spec.right || !topwear) return;
+
+  const [x1, y1, x2, y2] = topwear.spec.xyxy;
+  const width = x2 - x1, height = y2 - y1;
+  const drawLobe = (lobe, color) => {
+    const cx = x1 + lobe.center[0] * width, cy = y1 + lobe.center[1] * height;
+    const rx = lobe.radius[0] * width, ry = lobe.radius[1] * height;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(1, width * 0.006);
+    ctx.stroke();
+  };
+  drawLobe(spec.left, "rgba(110,168,254,0.9)");
+  drawLobe(spec.right, "rgba(254,168,110,0.9)");
+
+  const neckY = y1 + height * spec.neckline_lock;
+  ctx.strokeStyle = "rgba(255,255,255,0.5)";
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x1, neckY); ctx.lineTo(x2, neckY); ctx.stroke();
+
+  const centerX = (x1 + x2) / 2, half = spec.center_lock * width;
+  ctx.strokeStyle = "rgba(255,255,255,0.35)";
+  ctx.beginPath(); ctx.moveTo(centerX - half, y1); ctx.lineTo(centerX - half, y2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(centerX + half, y1); ctx.lineTo(centerX + half, y2); ctx.stroke();
 }
 
 /* ---------- animation ---------- */
@@ -894,6 +1036,24 @@ function deform(part, now, motion) {
       }
     }
 
+    // Chest soft morph: a small local volume response layered on top of the
+    // global breathing field above, confined to `topwear` alone. `wl`/`wr`
+    // already carry the neckline/center locks baked in, so this is a plain
+    // additive push -- outward for whichever lobe a vertex belongs to, and a
+    // little downward bias so the effect reads as cloth settling rather than
+    // sliding sideways in a straight line.
+    if (part.softMorph && motion.softMorph.enabled) {
+      const sm = motion.softMorph;
+      const amount = sm.strength * sm.morph;
+      if (amount !== 0) {
+        const wl = part.softMorph.left[i], wr = part.softMorph.right[i];
+        if (wl > 0 || wr > 0) {
+          x += sm.horizontalPx * amount * (wr - wl);
+          y += sm.verticalPx * amount * Math.max(wl, wr) * part.softMorph.lowerBias[i];
+        }
+      }
+    }
+
     live[v] = x; live[v + 1] = y;
   }
 }
@@ -945,6 +1105,13 @@ function frame(now) {
     mouth: expressionSwap(state.mouthOpen, useArt && !!state.art.mouth),
   };
 
+  const breathSin = document.getElementById("doBreathe").checked
+    ? Math.sin(t * 2 * Math.PI / state.manifest.motion.breathing.period_s) : 0;
+  // Same signal as the global breathing field, reshaped so exhale moves less
+  // than inhale (design doc 9) -- this is the one scalar chest soft morph
+  // rides on, it never runs on a clock of its own.
+  const softMorphAmount = Math.max(0, breathSin) + Math.min(0, breathSin) * SOFT_MORPH_DEFLATE_SCALE;
+
   const motion = {
     turnX: state.turnX, turnY: state.turnY,
     tiltRad: state.tiltDeg * Math.PI / 180,
@@ -956,12 +1123,18 @@ function frame(now) {
     blink,
     squash: { l: swap.l.squash, r: swap.r.squash },
     swap,
-    breath: document.getElementById("doBreathe").checked
-      ? Math.sin(t * 2 * Math.PI / state.manifest.motion.breathing.period_s) : 0,
+    breath: breathSin,
     breathAmp: parseFloat(document.getElementById("breathAmp").value),
     lidRatio: parseFloat(document.getElementById("lidLine").value),
     lidThickness: parseFloat(document.getElementById("lidThick").value),
     chestX: CHEST_WIDEN,
+    softMorph: {
+      enabled: document.getElementById("doSoftMorph").checked,
+      morph: softMorphAmount,
+      strength: parseFloat(document.getElementById("softStrength").value),
+      horizontalPx: parseFloat(document.getElementById("softHoriz").value),
+      verticalPx: parseFloat(document.getElementById("softVert").value),
+    },
     overrides: {
       ghost: document.getElementById("ghost").checked,
       neck: document.getElementById("neckMode").value,
@@ -1004,6 +1177,7 @@ function frame(now) {
       gl.drawElements(gl.LINES, p.mesh.wireCount, gl.UNSIGNED_SHORT, 0);
     }
   }
+  drawSoftRegionOverlay();
   requestAnimationFrame(frame);
 }
 
@@ -1058,6 +1232,19 @@ document.getElementById("collar").addEventListener("input", () => {
 document.getElementById("breathAmp").addEventListener("input", () => {
   document.getElementById("breathAmpv").textContent =
     parseFloat(document.getElementById("breathAmp").value).toFixed(1) + "px";
+});
+
+document.getElementById("softStrength").addEventListener("input", () => {
+  document.getElementById("softStrengthv").textContent =
+    parseFloat(document.getElementById("softStrength").value).toFixed(2);
+});
+document.getElementById("softHoriz").addEventListener("input", () => {
+  document.getElementById("softHorizv").textContent =
+    parseFloat(document.getElementById("softHoriz").value).toFixed(1) + "px";
+});
+document.getElementById("softVert").addEventListener("input", () => {
+  document.getElementById("softVertv").textContent =
+    parseFloat(document.getElementById("softVert").value).toFixed(1) + "px";
 });
 
 document.getElementById("blinkNow").addEventListener("click",

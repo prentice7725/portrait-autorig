@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from . import soft_morph
 from .image import composite_layers, crop_to_alpha, rest_fidelity
 from .semantic import SEMANTIC_Z_ORDER
 
@@ -655,6 +656,16 @@ def rig_preflight(layer_dict: dict[str, np.ndarray], *,
         "available": sorted(name for name in required_anchors if name in final_anchors),
         "missing": sorted(name for name in required_anchors if name not in final_anchors),
     }
+    chest_neck_box = neck_bbox(probe, alpha_threshold=alpha_threshold)
+    chest_region = soft_morph.derive_upper_torso_soft_region(
+        probe.get(soft_morph.SOFT_MORPH_TAG), neck_box=chest_neck_box,
+        alpha_threshold=alpha_threshold,
+    )
+    checks["upper_torso_soft_morph"] = soft_morph.soft_morph_preflight(
+        probe.get(soft_morph.SOFT_MORPH_TAG), chest_region, frame_size=sample.shape[:2],
+        neck_box=chest_neck_box, occluder_alpha=chest_occluder_alpha(probe),
+        alpha_threshold=alpha_threshold,
+    )
     remainder_pixels = (int((np.asarray(body_remainder)[..., 3] > alpha_threshold).sum())
                         if body_remainder is not None else 0)
     checks["body_remainder"] = {
@@ -796,6 +807,33 @@ def neck_bbox(layer_dict: dict[str, np.ndarray], *,
     the two deform differently along the seam between them."""
     union = _union_alpha(layer_dict, _group_tags(layer_dict, GROUP_NECK), alpha_threshold)
     return _bbox(union) if union is not None else None
+
+
+def chest_occluder_alpha(layer_dict: dict[str, np.ndarray]) -> np.ndarray | None:
+    """Union alpha of whatever draws *over* `topwear` at rest -- crossed-arm
+    `handwear`, a `neckwear` layered on top, and anything like them.
+
+    A soft-morph lobe sitting entirely under one of these is invisible at
+    rest, but `topwear` still deforms underneath it; since the static prop
+    does not move with it, its edge can crack loose from the garment right
+    at the seam between them (see `soft_morph.soft_morph_preflight`, which
+    reads this as `occluder_alpha`). None when nothing draws over it, or when
+    `topwear` is not in the canonical z-order at all.
+    """
+    target = soft_morph.SOFT_MORPH_TAG
+    if target not in RIG_Z_ORDER:
+        return None
+    target_rank = RIG_Z_ORDER.index(target)
+    tags = [tag for tag in layer_dict
+            if tag != target and tag in RIG_Z_ORDER and RIG_Z_ORDER.index(tag) > target_rank
+            and group_for_tag(tag) in (GROUP_BODY, GROUP_NECK)]
+    if not tags:
+        return None
+    sample = next(iter(layer_dict.values()))
+    occluder = np.zeros(np.asarray(sample).shape[:2], dtype=np.float32)
+    for tag in tags:
+        occluder = np.maximum(occluder, _alpha_of(layer_dict[tag]))
+    return occluder
 
 
 def _weight_for(tag: str, group: str, box: tuple[int, int, int, int],
@@ -1045,6 +1083,13 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         "motion": json.loads(json.dumps(motion if motion is not None else DEFAULT_MOTION)),
         "rig_preflight": json.loads(json.dumps(preflight)),
     }
+    if "upper_torso_soft_morph" not in manifest["motion"]:
+        # Data-derived, not a static default: recomputed every run against
+        # this character's own `topwear` geometry, the way anchors are.
+        manifest["motion"]["upper_torso_soft_morph"] = soft_morph.upper_torso_soft_morph_spec(
+            working, frame_size=(canvas_h, canvas_w), neck_box=neck_box,
+            occluder_alpha=chest_occluder_alpha(working), alpha_threshold=alpha_threshold,
+        )
     if derived_report and derived_report.get("succeeded"):
         manifest["derived_semantics"] = {
             "eyewhite": json.loads(json.dumps(derived_report))
