@@ -10,6 +10,9 @@ requires-python = ">=3.10"
 license = "MIT"
 dependencies = ["numpy>=1.24", "opencv-python>=4.0", "Pillow>=9.0"]
 
+[project.gui-scripts]
+portrait-autorig-gui = "portrait_autorig.gui:main"
+
 [project.urls]
 Repository = "https://github.com/prentice7725/portrait-autorig"
 
