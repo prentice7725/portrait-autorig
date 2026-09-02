@@ -189,6 +189,13 @@ class PortraitAutorigApp:
             messagebox.showerror("Portrait AutoRig", str(exc))
             return
 
+        # Tk variables belong to the UI thread. Snapshot every option before the
+        # worker starts so the background compiler never touches tkinter state.
+        mode = self.mode.get()
+        legacy = self.legacy.get()
+        soften_back_hair = self.soften_back_hair.get()
+        recursive = self.recursive.get()
+
         self._busy = True
         self.build_button.configure(state="disabled")
         self.open_button.configure(state="disabled")
@@ -199,26 +206,34 @@ class PortraitAutorigApp:
 
         thread = threading.Thread(
             target=self._build_worker,
-            args=(input_path, output_path),
+            args=(input_path, output_path, mode, legacy, soften_back_hair, recursive),
             daemon=True,
         )
         thread.start()
 
-    def _build_worker(self, input_path: Path, output_path: Path) -> None:
+    def _build_worker(
+        self,
+        input_path: Path,
+        output_path: Path,
+        mode: str,
+        legacy: bool,
+        soften_back_hair: bool,
+        recursive: bool,
+    ) -> None:
         try:
-            if self.mode.get() == "single":
+            if mode == "single":
                 self._events.put(("progress_init", 1))
                 result = compile_portrait(
                     input_path,
                     output_path,
-                    legacy=self.legacy.get(),
-                    soften_back_hair=self.soften_back_hair.get(),
+                    legacy=legacy,
+                    soften_back_hair=soften_back_hair,
                 )
                 self._events.put(("result", result))
                 self._events.put(("progress", (1, 1, input_path.name)))
                 self._events.put(("done", [result]))
             else:
-                count = len(discover_portrait_bundles(input_path, recursive=self.recursive.get()))
+                count = len(discover_portrait_bundles(input_path, recursive=recursive))
                 if count == 0:
                     raise ValueError("선택한 폴더에서 .portrait 번들을 찾지 못했습니다.")
                 self._events.put(("progress_init", count))
@@ -234,9 +249,9 @@ class PortraitAutorigApp:
                 results = compile_batch(
                     input_path,
                     output_path,
-                    recursive=self.recursive.get(),
-                    legacy=self.legacy.get(),
-                    soften_back_hair=self.soften_back_hair.get(),
+                    recursive=recursive,
+                    legacy=legacy,
+                    soften_back_hair=soften_back_hair,
                     on_progress=on_progress,
                 )
                 self._events.put(("done", results))
