@@ -6,6 +6,35 @@ This repository consumes the versioned file contract produced by
 [`seethrough-portrait`](https://github.com/prentice7725/seethrough-portrait).
 It has no runtime or Python dependency on See-Through, torch, or diffusers.
 
+## Desktop GUI (recommended)
+
+On Windows, clone/install the project and then double-click:
+
+```text
+portrait_autorig_gui.pyw
+```
+
+The GUI supports:
+
+- single Portrait Bundle builds
+- batch builds for a folder of `*.portrait` bundles
+- automatic output paths (`A001.portrait` → sibling `A001.rig`)
+- optional recursive batch discovery
+- legacy input compatibility
+- optional back-hair motion softening
+- progress, per-portrait preflight/rest-fidelity status, and build logs
+- opening the generated output folder directly
+
+After installing the package, the same window is also registered as the
+`portrait-autorig-gui` GUI script. The GUI is intentionally a thin front-end;
+the reusable build workflow lives in `portrait_autorig/workflow.py` so later
+game deployment can use the same validated path without duplicating compiler
+logic.
+
+## Command line (automation / fallback)
+
+The existing command-line interface remains available for scripts and CI:
+
 ```powershell
 python -m portrait_autorig path\to\A001.portrait path\to\A001.rig
 ```
