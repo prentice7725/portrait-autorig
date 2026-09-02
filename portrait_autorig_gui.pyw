@@ -1,3 +1,4 @@
+#!python3.11
 from portrait_autorig.launcher_gui import main
 
 

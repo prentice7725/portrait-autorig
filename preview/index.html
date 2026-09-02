@@ -279,8 +279,11 @@ uniform float u_wire;
 uniform float u_alpha;
 varying vec2 v_uv;
 void main() {
-  if (u_wire > 0.5) { gl_FragColor = vec4(0.43, 0.66, 1.0, 0.5); return; }
-  gl_FragColor = texture2D(u_tex, v_uv) * vec4(1.0, 1.0, 1.0, u_alpha);
+  // Premultiplied output throughout: the wire overlay's RGB is pre-scaled by
+  // its own alpha, and a part fade scales every channel by u_alpha equally
+  // (not just alpha) so the blend stays correctly premultiplied at any fade.
+  if (u_wire > 0.5) { gl_FragColor = vec4(0.215, 0.33, 0.5, 0.5); return; }
+  gl_FragColor = texture2D(u_tex, v_uv) * u_alpha;
 }`;
 
 const state = {
@@ -561,7 +564,13 @@ function initGL(canvas) {
   if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
   gl.useProgram(prog);
   gl.enable(gl.BLEND);
-  gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+  // Premultiplied-alpha blend: RGB is already scaled by alpha (both in the
+  // uploaded texture and in the shader's own fade), so the source RGB factor
+  // is ONE, not SRC_ALPHA. This is what stops linear filtering from bleeding
+  // a fully-transparent border texel's undefined RGB into a part's edge --
+  // the seam that showed up between independently-cropped parts like neck and
+  // topwear.
+  gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   gl.disable(gl.DEPTH_TEST);  // draw order is the manifest's z, back to front
   return {
     gl, prog,
@@ -583,7 +592,7 @@ function makeTexture(gl, bitmap) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
   if (state.canMipmap) {
     gl.generateMipmap(gl.TEXTURE_2D);
