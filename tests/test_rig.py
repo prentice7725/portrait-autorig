@@ -400,13 +400,86 @@ class BuildRigTests(unittest.TestCase):
         manifest, images = build_rig(self.layers, body_remainder=self.remainder,
                                      frame_size=(CANVAS, CANVAS), run_id="r1",
                                      tag_version="v3")
-        self.assertEqual(manifest["version"], "0.1")
+        # build_rig constructs the v0.1 shape (parts/anchors/motion/...) and
+        # then upgrades it to v0.2 in place (PORTRAIT_AUTORIG_PRIOR_ART_
+        # ABSORPTION_PLAN v0.1 #7, #18): every v0.1 field survives, and
+        # parameters[]/deformers[]/drivers[] are added on top.
+        self.assertEqual(manifest["version"], "0.2")
         self.assertEqual(manifest["canvas"], {"width": CANVAS, "height": CANVAS})
         self.assertEqual(manifest["source"]["depth"], "table")
         self.assertTrue(manifest["parts"])
         for part in manifest["parts"]:
             self.assertIn(part["name"], images)
             self.assertEqual(part["image"], f"rig/images/{part['name']}.png")
+        self.assertTrue(manifest["parameters"])
+        self.assertTrue(manifest["deformers"])
+        self.assertEqual(manifest["drivers"], [])
+        deformer_kinds = {d["kind"] for d in manifest["deformers"]}
+        self.assertEqual(deformer_kinds,
+                         {"parallax_turn", "shell_turn", "weighted_rotation",
+                          "continuous_field", "eye_fold"})
+
+    def test_default_draw_order_matches_the_canonical_semantic_table(self):
+        # No draw_order supplied (every Portrait Bundle caller) reproduces
+        # today's ordering exactly -- draw_order != motion_depth, directive
+        # v0.2 #5, but with nothing supplied there is only ever one source.
+        manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS))
+        self.assertEqual(manifest["source"]["draw_order"], "table")
+        tags_by_z = [p["tag"] for p in sorted(manifest["parts"], key=lambda p: p["z"])]
+        expected = sorted(tags_by_z, key=lambda t: RIG_Z_ORDER.index(t) if t in RIG_Z_ORDER else -1)
+        self.assertEqual(tags_by_z, expected)
+
+    def test_explicit_draw_order_overrides_the_canonical_paint_order(self):
+        # A deliberately non-canonical order: topwear painted (and hence
+        # z-ordered) ahead of neck/head, the reverse of RIG_Z_ORDER.
+        order = ["topwear", "neck", "eyewhite", "face", "head", "back hair", "mouth"]
+        manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS), draw_order=order)
+        self.assertEqual(manifest["source"]["draw_order"], "assembly")
+        tags_by_z = [p["tag"] for p in sorted(manifest["parts"], key=lambda p: p["z"])]
+        self.assertLess(tags_by_z.index("topwear"), tags_by_z.index("neck"))
+        self.assertLess(tags_by_z.index("neck"), tags_by_z.index("head"))
+
+    def test_a_tag_draw_order_never_saw_inherits_its_parents_position(self):
+        # "eyewhite" (undivided) is what draw_order names; the compiled rig
+        # only ever has eyewhitel/eyewhiter (an AutoRig-only derivation
+        # Composer has no concept of), which must inherit "eyewhite"'s slot
+        # -- adjacent to "face", not silently dropped to the back.
+        order = ["back hair", "head", "face", "eyewhite", "neck", "topwear", "mouth"]
+        manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS), draw_order=order)
+        tags_by_z = [p["tag"] for p in sorted(manifest["parts"], key=lambda p: p["z"])]
+        self.assertNotIn("eyewhite", tags_by_z)  # replaced by its halves
+        self.assertIn("eyewhitel", tags_by_z)
+        self.assertIn("eyewhiter", tags_by_z)
+        self.assertLess(tags_by_z.index("face"), tags_by_z.index("eyewhitel"))
+        self.assertLess(tags_by_z.index("eyewhitel"), tags_by_z.index("neck"))
+
+    def test_a_tag_with_no_ancestor_in_draw_order_sorts_after_everything_authored(self):
+        order = ["neck", "topwear"]  # deliberately incomplete
+        manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS), draw_order=order)
+        tags_by_z = [p["tag"] for p in sorted(manifest["parts"], key=lambda p: p["z"])]
+        self.assertLess(tags_by_z.index("neck"), tags_by_z.index("topwear"))
+        for unlisted in ("head", "face", "back hair", "mouth"):
+            self.assertGreater(tags_by_z.index(unlisted), tags_by_z.index("topwear"))
+
+    def test_contour_tags_opts_a_part_into_the_contour_mesh_backend(self):
+        # absorption plan #8 (P1-A): grid stays the default everywhere else,
+        # only the opted-in tag's own part switches.
+        manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS),
+                                contour_tags=("face",))
+        by_tag = {part["tag"]: part for part in manifest["parts"]}
+        self.assertEqual(by_tag["face"]["mesh"]["kind"], "contour")
+        self.assertIn("vertices", by_tag["face"]["mesh"])
+        self.assertIn("triangles", by_tag["face"]["mesh"])
+        self.assertEqual(by_tag["head"]["mesh"]["kind"], "grid")
+
+    def test_contour_tags_does_not_change_output_for_unlisted_tags(self):
+        default_manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS))
+        contour_manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS),
+                                        contour_tags=("face",))
+        for tag in ("head", "neck", "topwear"):
+            default_part = next(p for p in default_manifest["parts"] if p["tag"] == tag)
+            contour_part = next(p for p in contour_manifest["parts"] if p["tag"] == tag)
+            self.assertEqual(default_part, contour_part)
 
     def test_undivided_eye_layer_is_replaced_by_its_halves(self):
         manifest, images = build_rig(self.layers, frame_size=(CANVAS, CANVAS))

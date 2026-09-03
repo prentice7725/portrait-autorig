@@ -1,16 +1,15 @@
 // Headless check of the rig preview's deformation math.
 //
-//   node webui/rig_preview/check_deformation.mjs webui/rig_preview/index.html
+//   node preview/check_deformation.mjs [preview/runtime.mjs]
 //
-// Pulls the <script> out of index.html, runs it against DOM stubs, and
-// exercises the pure functions. The preview is a single self-contained file
-// with no build step, so this is the only thing standing between a typo in the
-// weight math and a wrong answer to H1-H4 -- a rig that looks plausible while
-// deforming incorrectly is worse than one that visibly breaks.
-import { readFileSync } from "node:fs";
-
-const html = readFileSync(process.argv[2] || new URL("index.html", import.meta.url), "utf8");
-const src = html.slice(html.indexOf("<script>") + 8, html.lastIndexOf("</script>"));
+// Imports runtime.mjs -- the canonical deformation/build/animation module
+// index.html itself loads -- against DOM/browser-global stubs, and exercises
+// the pure functions (PORTRAIT_AUTORIG_PRIOR_ART_ABSORPTION_PLAN v0.1 #5,
+// #18, P0-C: runtime.mjs is imported directly, not string-sliced out of
+// index.html and `new Function`-evaluated). The preview has no build step,
+// so this is the only thing standing between a typo in the weight math and a
+// wrong answer to H1-H4 -- a rig that looks plausible while deforming
+// incorrectly is worse than one that visibly breaks.
 
 const controls = {};
 function control(id) {
@@ -26,26 +25,28 @@ function control(id) {
   }
   return controls[id];
 }
-const document = {
+// runtime.mjs is an ES module: it can only see globals, not injected
+// function parameters, so the stubs it reads at import time (event wiring,
+// the ?manifest= autoload) go on globalThis before the import runs.
+globalThis.document = {
   getElementById: control,
   createElement: () => control("_tmp" + Math.random()),
   addEventListener() {},
 };
-const performance = { now: () => 0 };
-const requestAnimationFrame = () => {};
-const location = { search: "" };
-const fetch = async () => { throw new Error("no fetch in harness"); };
-const createImageBitmap = async () => ({});
+globalThis.performance = { now: () => 0 };
+globalThis.requestAnimationFrame = () => {};
+globalThis.location = { search: "" };
+globalThis.fetch = async () => { throw new Error("no fetch in harness"); };
+globalThis.createImageBitmap = async () => ({});
 
-const api = new Function(
-  "document", "performance", "requestAnimationFrame", "location", "fetch",
-  "createImageBitmap", "URLSearchParams",
-  src + "\nreturn { weightAt, smoothstep, buildMesh, deform, state, startBlink, blinkAmount, EYE_TAGS, breathRamp, fitShells, shellDelta, SHELL_MAX_YAW, SHELL_MAX_PITCH, expressionSwap, opacityOf, SWAP_LO, SWAP_HI };",
-)(document, performance, requestAnimationFrame, location, fetch, createImageBitmap, URLSearchParams);
+const runtimeUrl = process.argv[2]
+  ? new URL(process.argv[2], `file://${process.cwd()}/`)
+  : new URL("runtime.mjs", import.meta.url);
+const Runtime = await import(runtimeUrl);
 
-const { weightAt, buildMesh, deform, state, startBlink, blinkAmount, breathRamp,
+const { weightAt, buildMesh, deform, state, scheduleBlink, startBlink, blinkAmount, breathRamp,
         fitShells, shellDelta, SHELL_MAX_YAW, SHELL_MAX_PITCH,
-        expressionSwap, opacityOf, SWAP_HI } = api;
+        expressionSwap, opacityOf, SWAP_HI, motionFromDeformers } = Runtime;
 
 let failures = 0;
 function check(name, cond, detail = "") {
@@ -62,6 +63,45 @@ check("midpoint is halfway", near(weightAt(grad, 150), 0.275));
 check("above the band clamps to top", near(weightAt(grad, 0), 0.55));
 check("below the band clamps to bottom", near(weightAt(grad, 999), 0.0));
 check("constant mode is flat", near(weightAt({ mode: "constant", value: 0.16 }, 12), 0.16));
+
+console.log("\ncontour mesh (P1-A, absorption plan #8)");
+{
+  // A minimal baked contour mesh: a right triangle at canvas (100,100)-
+  // (100,120)-(120,120), inside a part box of (100,100)-(140,140).
+  const contourPart = {
+    xyxy: [100, 100, 140, 140],
+    weight: { mode: "constant", value: 0.7 },
+    mesh: {
+      kind: "contour",
+      vertices: [[100, 100], [100, 120], [120, 120]],
+      triangles: [[0, 1, 2]],
+    },
+  };
+  const mesh = buildMesh(contourPart);
+  check("contour mesh keeps exactly the baked vertex count", mesh.rest.length / 2 === 3);
+  check("contour mesh keeps exactly the baked triangle", mesh.count === 3);
+  check("contour vertex 0 lands at its baked canvas position",
+        near(mesh.rest[0], 100) && near(mesh.rest[1], 100));
+  check("contour UV is derived from the part's own xyxy box",
+        near(mesh.uv[0], 0) && near(mesh.uv[1], 0)      // vertex 0: (100,100) -> (0,0)
+        && near(mesh.uv[2], 0) && near(mesh.uv[3], 0.5)  // vertex 1: (100,120) -> (0,0.5)
+        && near(mesh.uv[4], 0.5) && near(mesh.uv[5], 0.5));
+  check("contour mesh weight comes from the part's own weight spec, same as grid",
+        near(mesh.weight[0], 0.7) && near(mesh.weight[1], 0.7) && near(mesh.weight[2], 0.7));
+  check("contour wireframe has exactly the triangle's three edges",
+        mesh.wireCount === 6);  // 3 edges * 2 indices each, none shared to dedupe away
+
+  // A part with no mesh.kind (or a plain "grid" kind) is completely
+  // unaffected: same code path, same output, as every P0 test above proves.
+  const gridPart = {
+    xyxy: [100, 100, 140, 140],
+    weight: { mode: "constant", value: 0.7 },
+    mesh: { kind: "grid", cell: 20 },
+  };
+  const gridMesh = buildMesh(gridPart);
+  check("a grid-kind part is untouched by the contour path",
+        gridMesh.rest.length === (2 + 1) * (2 + 1) * 2);  // 40px / 20px cell -> 2x2 cells, 3x3 verts
+}
 
 // A minimal scene: one neck part with the manifest gradient, two head parts at
 // different depths, one eye part.
@@ -474,6 +514,62 @@ check("a head part swings sideways when tilted", Math.abs(tilted.dx) > 10,
       `dx=${tilted.dx.toFixed(2)}`);
 deform(neck, 0, { ...still, tiltRad: 10 * Math.PI / 180 });
 check("the bottom of the neck does not swing", near(shiftAt(neck, 700).dx, 0, 1e-9));
+
+console.log("\nP0-D: motion{} <-> deformers[] equivalence (absorption plan #7, #19)");
+{
+  const v01Motion = {
+    head_turn: { max_x: 0.8, max_y: 0.8 },
+    head_tilt: { max_deg: 2.0, pivot: "neck_pivot" },
+    breathing: { period_s: 4.0, amplitude_px: 3.0 },
+    blink: { close_s: 0.08, hold_s: 0.34, open_s: 0.16, interval_s: [1.6, 5.4],
+             lid_ratio: 0.85, lid_thickness: 0.18 },
+    upper_torso_soft_morph: { enabled: false, strength: 0 },
+  };
+  // Mirrors portrait_autorig.manifest.deformers_from_motion's synthesis
+  // exactly: each deformer's `config` is a verbatim copy of the v0.1
+  // motion sub-object it was derived from.
+  const deformers = [
+    { id: "head_turn_parallax", kind: "parallax_turn",
+      parameters: ["ParamAngleX", "ParamAngleY"], targets: { scope: "all" },
+      config: v01Motion.head_turn },
+    { id: "head_turn_shell", kind: "shell_turn",
+      parameters: ["ParamAngleX", "ParamAngleY"], targets: { group: "head" },
+      config: v01Motion.head_turn },
+    { id: "head_tilt", kind: "weighted_rotation",
+      parameters: ["ParamAngleZ"], targets: { scope: "all" },
+      config: v01Motion.head_tilt },
+    { id: "breathing", kind: "continuous_field",
+      parameters: ["ParamBreath"], targets: { scope: "all" },
+      config: v01Motion.breathing },
+    { id: "blink_l", kind: "eye_fold", parameters: ["ParamEyeLOpen"],
+      targets: { side: "l" }, config: v01Motion.blink },
+    { id: "blink_r", kind: "eye_fold", parameters: ["ParamEyeROpen"],
+      targets: { side: "r" }, config: v01Motion.blink },
+  ];
+  const v01Manifest = { motion: v01Motion };
+  const v02Manifest = { motion: v01Motion, deformers };
+
+  check("deformers[]-adapted motion matches v0.1 motion exactly",
+        JSON.stringify(motionFromDeformers(v02Manifest)) === JSON.stringify(v01Motion));
+  check("a manifest with no deformers[] falls back to its own motion{} unchanged",
+        JSON.stringify(motionFromDeformers(v01Manifest)) === JSON.stringify(v01Motion));
+
+  // scheduleBlink/startBlink read state.manifest.motion.blink directly, so
+  // this exercises the adapter through the actual consumer, not just the
+  // reconstructed object: the v0.2 (deformers[]-adapted) manifest must
+  // schedule identically to the v0.1 one for the same random draw.
+  const originalRandom = Math.random;
+  Math.random = () => 0.5;
+  state.manifest = v01Manifest;
+  scheduleBlink(0);
+  const scheduleV01 = state.blinkTimer;
+  state.manifest = v02Manifest;
+  scheduleBlink(0);
+  const scheduleV02 = state.blinkTimer;
+  Math.random = originalRandom;
+  check("blink scheduling matches between v0.1 motion{} and v0.2 deformers[]",
+        near(scheduleV01, scheduleV02, 1e-9), `${scheduleV01} vs ${scheduleV02}`);
+}
 
 console.log(failures ? `\n${failures} FAILED` : "\nall checks passed");
 process.exit(failures ? 1 : 0);

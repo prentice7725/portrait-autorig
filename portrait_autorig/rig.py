@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from typing import Any
 
 import cv2
@@ -17,6 +17,8 @@ from PIL import Image
 
 from . import soft_morph
 from .image import composite_layers, crop_to_alpha, rest_fidelity
+from .manifest import RIG_MANIFEST_VERSION_01, upgrade_manifest_v01_to_v02
+from .mesh import contour_mesh_spec, mesh_spec
 from .semantic import SEMANTIC_Z_ORDER
 
 __all__ = [
@@ -94,14 +96,12 @@ COLLAR_TAGS = frozenset({"topwear", "neckwear"})
 # makes a tilt read as a neck bending rather than a head sliding sideways.
 NECK_PIVOT_RATIO = 0.85
 
-# Uniform grid meshing, quoted against a 768px canvas and scaled from there.
-# Parts that deform along a gradient get the finer cell, since that is where a
-# coarse grid shows as faceting.
-MESH_REFERENCE_SIZE = 768
-MESH_CELL_PX = 42
-MESH_CELL_FINE_PX = 30
-
-MANIFEST_VERSION = "0.1"
+# Mesh cell sizing now lives in mesh.py. `MANIFEST_VERSION` is the version
+# this module's own Stage A-D construction below still builds (v0.1 shape,
+# byte-for-byte unchanged); `build_rig` upgrades that to v0.2 via
+# `manifest.upgrade_manifest_v01_to_v02` immediately before returning, so the
+# upgrade path is exercised by every caller rather than being opt-in.
+MANIFEST_VERSION = RIG_MANIFEST_VERSION_01
 RIG_SUBDIR = "rig"
 
 # `max_x` is measured, not chosen. Sweeping the turn on A-001 and counting the
@@ -866,12 +866,6 @@ def _weight_for(tag: str, group: str, box: tuple[int, int, int, int],
     return {"mode": "constant", "value": BODY_WEIGHT}
 
 
-def _mesh_cell(frame_size: tuple[int, int], fine: bool) -> int:
-    scale = max(int(frame_size[0]), int(frame_size[1])) / MESH_REFERENCE_SIZE
-    base = MESH_CELL_FINE_PX if fine else MESH_CELL_PX
-    return max(8, int(round(base * scale)))
-
-
 def render_rig_rest(parts: Collection[dict[str, Any]], images: dict[str, np.ndarray],
                     frame_size: tuple[int, int]) -> np.ndarray:
     """Composite cropped rig parts exactly as the runtime draws motion=0."""
@@ -893,6 +887,38 @@ def render_rig_rest(parts: Collection[dict[str, Any]], images: dict[str, np.ndar
     return composite_layers(full_layers, (canvas_h, canvas_w), order=tuple(ordered_tags))
 
 
+def _draw_rank(tag: str, draw_order: Sequence[str] | None,
+               depth_parent: dict[str, str]) -> tuple[int, int]:
+    """Paint-order sort key for one tag (`draw_order != motion_depth`).
+
+    With no `draw_order` supplied, this is exactly today's canonical
+    semantic table lookup -- the existing Portrait Bundle path is
+    untouched. With one supplied (Assembly Bundle input), a tag `draw_order`
+    itself lists ranks first; a tag it never saw -- a remainder split, an
+    eye split, a derived-eyewhite overlay, all AutoRig-only derivations
+    Composer has no concept of -- walks `depth_parent` up to whichever
+    ancestor *is* listed and inherits its rank, with the canonical table as
+    a tiebreak among several derived tags sharing one parent (so e.g.
+    `eyewhitel`/`eyewhiter` stay adjacent rather than landing in dict
+    iteration order). A tag with no listed ancestor at all sorts after
+    everything Composer authored, rather than being silently dropped to the
+    back or the front.
+    """
+    if draw_order is None:
+        return (RIG_Z_ORDER.index(tag) if tag in RIG_Z_ORDER else -1, 0)
+    lookup = tag
+    seen: set[str] = set()
+    while lookup not in draw_order:
+        parent = depth_parent.get(lookup, lookup)
+        if parent == lookup or parent in seen:
+            break
+        seen.add(lookup)
+        lookup = parent
+    if lookup in draw_order:
+        return (draw_order.index(lookup), RIG_Z_ORDER.index(tag) if tag in RIG_Z_ORDER else 0)
+    return (len(draw_order), RIG_Z_ORDER.index(tag) if tag in RIG_Z_ORDER else -1)
+
+
 def build_rig(layer_dict: dict[str, np.ndarray], *,
               original_rgba: np.ndarray | None = None,
               body_remainder: np.ndarray | None = None,
@@ -900,6 +926,8 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
               frame_size: tuple[int, int] | None = None,
               alpha_threshold: int = 10,
               gradient_tags: Collection[str] = (),
+              contour_tags: Collection[str] = (),
+              draw_order: Sequence[str] | None = None,
               run_id: str = "", tag_version: str = "",
               image_prefix: str = f"{RIG_SUBDIR}/images",
               motion: dict[str, Any] | None = None,
@@ -917,6 +945,26 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     `gradient_tags` forces a head-to-body vertical falloff onto tags that would
     otherwise follow the head rigidly; `("back hair",)` is the case the
     feasibility doc calls out.
+
+    `contour_tags` opts specific tags into the experimental contour mesh
+    backend (absorption plan #8, P1-A) instead of the grid default, for A/B
+    comparison against it (`preview/check_mesh_quality.mjs`, P1-B). A tag
+    whose alpha does not actually triangulate -- more than one disconnected
+    island, most commonly -- silently falls back to grid, exactly as if it
+    had not been listed; see `mesh.contour_mesh`.
+
+    `draw_order` is Composer's own authored paint order (`assembly.
+    AssemblyAsset.draw_order`) -- `draw_order != motion_depth`
+    (`PORTRAIT_AUTORIG_IMPLEMENTATION_DIRECTIVE_v0.2.md` #5, Master doc #7,
+    #23 invariant #5): `parts[].z` (paint order) follows it when given,
+    while `parts[].depth` (parallax strength) is still computed from
+    `_DEPTH_TABLE`/`depth_dict` exactly as always -- AutoRig's own motion
+    semantics never redefine Composer's draw order. A tag `draw_order`
+    never saw (a remainder split, an eye split, a derived-eyewhite overlay --
+    all AutoRig-only derivations Composer has no concept of) inherits its
+    parent's position instead of an arbitrary fallback; see `_draw_rank`.
+    None (the default, and every existing Portrait Bundle caller) reproduces
+    today's canonical-semantic-table ordering exactly.
     """
     working: dict[str, np.ndarray] = {}
     for tag, img in layer_dict.items():
@@ -936,7 +984,15 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     canonical_layers = dict(layer_dict)
     if body_remainder is not None:
         canonical_layers[BODY_REMAINDER] = np.asarray(body_remainder)
-    canonical_reference = composite_layers(canonical_layers, (canvas_h, canvas_w))
+    # With no draw_order this is composite_layers' own default
+    # (SEMANTIC_Z_ORDER) -- today's Portrait Bundle behaviour, unchanged.
+    # With one supplied, the canonical reference has to be composited in
+    # *that* order too, or rest_fidelity below would be comparing the rig's
+    # own draw_order-ordered rest render against a differently-ordered
+    # reference and could fail spuriously on a correctly-compiled rig.
+    canonical_order = (tuple(draw_order) if draw_order is not None else SEMANTIC_Z_ORDER)
+    canonical_reference = composite_layers(canonical_layers, (canvas_h, canvas_w),
+                                           order=canonical_order)
     if preflight is None:
         preflight = rig_preflight(layer_dict, original_rgba=original_rgba,
                                   body_remainder=body_remainder,
@@ -1038,9 +1094,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
                 depth = float(np.median(estimated[visible]))
         depths[tag] = round(float(depth), 4)
 
-    ordered = sorted(working, key=lambda tag: (
-        RIG_Z_ORDER.index(tag) if tag in RIG_Z_ORDER else -1
-    ))
+    ordered = sorted(working, key=lambda tag: _draw_rank(tag, draw_order, depth_parent))
 
     parts: list[dict[str, Any]] = []
     images: dict[str, np.ndarray] = {}
@@ -1063,9 +1117,12 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
             "z": z,
             "weight": weight,
             # Anything deforming along a gradient gets the finer cell: that is
-            # where a coarse grid shows up as faceting.
-            "mesh": {"cell": _mesh_cell((canvas_h, canvas_w),
-                                        fine=weight["mode"] == "gradient_y")},
+            # where a coarse grid shows up as faceting. Opted-in tags try the
+            # contour backend first and fall back to grid when it declines
+            # (multi-island alpha; see mesh.contour_mesh).
+            "mesh": ((tag in contour_tags
+                     and contour_mesh_spec(crop_img[..., 3], tuple(int(v) for v in xyxy)))
+                    or mesh_spec((canvas_h, canvas_w), fine=weight["mode"] == "gradient_y")),
         })
         if derived_report and derived_report.get("succeeded") and tag in derived_report["parts"]:
             parts[-1]["derived"] = True
@@ -1077,6 +1134,11 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
             "run_id": run_id,
             "tag_version": tag_version,
             "depth": "marigold" if depth_dict else "table",
+            # draw_order != motion_depth: which one decided parts[].z for
+            # this compile -- Composer's authored order, or AutoRig's own
+            # canonical semantic table (the Portrait Bundle path's only
+            # option, and every draw_order-less caller's default).
+            "draw_order": "assembly" if draw_order is not None else "table",
         },
         "anchors": anchors,
         "parts": parts,
@@ -1098,6 +1160,10 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     manifest["rest_fidelity"] = rest_fidelity(
         canonical_reference, rig_rest, alpha_threshold=alpha_threshold
     )
+    # Every v0.1 field constructed above (parts/anchors/motion/rest_fidelity/
+    # rig_preflight/derived_semantics/...) is preserved verbatim; this only
+    # adds parameters[]/deformers[]/drivers[] and bumps `version` to "0.2".
+    manifest = upgrade_manifest_v01_to_v02(manifest)
     return manifest, images
 
 
