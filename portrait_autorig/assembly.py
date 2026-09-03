@@ -69,6 +69,12 @@ class AssemblyAsset:
     draw_order: list[str]              # semantic tags, Composer's authored paint order
     rig_intent: dict[str, Any]
     variant_sets: dict[str, Any]
+    expressions: dict[str, Any]
+    # Composer members are LayerInstance ids; retain their positioned images
+    # and semantic tags even when inactive so runtime swapping is lossless.
+    instance_layers: dict[str, np.ndarray]
+    instance_to_tag: dict[str, str]
+    instance_draw_order: list[str]
     reference: np.ndarray              # Composer's own rendered reference.png
     source_id: str
 
@@ -155,17 +161,32 @@ def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
     canvas_layers: dict[str, Image.Image] = {}
     draw_order: list[str] = []
     visible_tags_in_order: list[str] = []
+    variant_sets = manifest.get("variant_sets") or {}
+    if not isinstance(variant_sets, dict):
+        raise ValueError("Assembly Bundle variant_sets must be an object")
+    for set_id, spec in variant_sets.items():
+        if not isinstance(spec, dict):
+            raise ValueError(f"VariantSet {set_id!r} must be an object")
+        if spec.get("mode", "exclusive") != "exclusive":
+            raise ValueError(f"VariantSet {set_id!r} has unsupported mode {spec.get('mode')!r}")
+    variant_member_ids = {
+        str(member)
+        for spec in variant_sets.values()
+        for member in (spec.get("members") or [])
+    }
+    instance_layers: dict[str, np.ndarray] = {}
+    instance_to_tag: dict[str, str] = {}
+    instance_draw_order: list[str] = []
     for inst_id in draw_order_ids:
         inst = instances.get(inst_id)
         if inst is None:
             raise ValueError(f"composition.draw_order references unknown instance {inst_id!r}")
-        if not inst.get("visible", True) or float(inst.get("opacity", 1.0)) <= 0.0:
-            continue
         asset = assets.get(inst["asset_ref"])
         if asset is None:
             raise ValueError(f"instance {inst_id!r} references unknown asset {inst['asset_ref']!r}")
         tag = str(asset["semantic"])
-        visible_tags_in_order.append(tag)
+        instance_to_tag[str(inst_id)] = tag
+        instance_draw_order.append(str(inst_id))
         image_path = layers_dir / f"{inst_id}.png"
         if not image_path.is_file():
             raise FileNotFoundError(f"layer image missing for instance {inst_id!r}: {image_path}")
@@ -177,12 +198,21 @@ def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
                 a = a.point(lambda v: round(v * opacity))
                 im = Image.merge("RGBA", (r, g, b, a))
             positioned, (x, y) = _position(im, inst.get("transform") or {})
+            if str(inst_id) in variant_member_ids:
+                full = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+                full.alpha_composite(positioned, dest=(x, y))
+                instance_layers[str(inst_id)] = np.array(full, dtype=np.uint8)
+            if (not inst.get("visible", True)
+                    or float(inst.get("opacity", 1.0)) <= 0.0
+                    or str(inst_id) in variant_member_ids):
+                continue
+            visible_tags_in_order.append(tag)
             if tag not in canvas_layers:
                 canvas_layers[tag] = Image.new("RGBA", (width, height), (0, 0, 0, 0))
                 draw_order.append(tag)
             canvas_layers[tag].alpha_composite(positioned, dest=(x, y))
 
-    if not canvas_layers:
+    if not canvas_layers and not instance_layers:
         raise ValueError("Assembly Bundle has no visible instances")
 
     # `rig.build_rig` (like every producer-facing part of this repo) has one
@@ -219,7 +249,11 @@ def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
         root=root, canvas=(width, height), layers=layers, body_remainder=body_remainder,
         draw_order=draw_order,
         rig_intent=manifest.get("rig_intent") or {},
-        variant_sets=manifest.get("variant_sets") or {},
+        variant_sets=variant_sets,
+        expressions=manifest.get("expressions") or {},
+        instance_layers=instance_layers,
+        instance_to_tag=instance_to_tag,
+        instance_draw_order=instance_draw_order,
         reference=reference,
         source_id=root.name,
     )

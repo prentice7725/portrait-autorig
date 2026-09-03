@@ -22,6 +22,7 @@ from .manifest import RIG_MANIFEST_VERSION_01, upgrade_manifest_v01_to_v02
 from .mesh import contour_mesh_spec, mesh_spec
 from .semantic import SEMANTIC_Z_ORDER
 from .topology import mesh_topology_hash
+from .variant import _part_name, compile_variant_bindings
 
 __all__ = [
     "GROUP_HEAD", "GROUP_NECK", "GROUP_BODY",
@@ -892,21 +893,22 @@ def render_rig_rest(parts: Collection[dict[str, Any]], images: dict[str, np.ndar
                     frame_size: tuple[int, int]) -> np.ndarray:
     """Composite cropped rig parts exactly as the runtime draws motion=0."""
     canvas_h, canvas_w = int(frame_size[0]), int(frame_size[1])
-    full_layers: dict[str, np.ndarray] = {}
-    ordered_tags: list[str] = []
+    # Use an ordered list rather than a tag->image dict: VariantSet members
+    # intentionally share a semantic tag but are separate runtime sprites.
+    canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
     for part in sorted(parts, key=lambda item: item["z"]):
+        if part.get("visible", True) is False:
+            continue
         image = images.get(part["name"])
         if image is None:
             raise ValueError(f"missing rig image for {part['name']!r}")
         x1, y1, x2, y2 = (int(value) for value in part["xyxy"])
         if image.shape != (y2 - y1, x2 - x1, 4):
             raise ValueError(f"rig crop shape disagrees with xyxy for {part['name']!r}")
-        full = np.zeros((canvas_h, canvas_w, 4), np.uint8)
-        full[y1:y2, x1:x2] = image
-        tag = str(part["tag"])
-        full_layers[tag] = full
-        ordered_tags.append(tag)
-    return composite_layers(full_layers, (canvas_h, canvas_w), order=tuple(ordered_tags))
+        full = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+        full.paste(Image.fromarray(image, mode="RGBA"), (x1, y1))
+        canvas.alpha_composite(full)
+    return np.array(canvas, dtype=np.uint8)
 
 
 def _draw_rank(tag: str, draw_order: Sequence[str] | None,
@@ -956,6 +958,11 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
               image_prefix: str = f"{RIG_SUBDIR}/images",
               motion: dict[str, Any] | None = None,
               preflight: dict[str, Any] | None = None,
+              variant_sets: dict[str, Any] | None = None,
+              expression_presets: dict[str, Any] | None = None,
+              variant_layers: dict[str, np.ndarray] | None = None,
+              instance_to_tag: dict[str, str] | None = None,
+              variant_draw_order: Sequence[str] | None = None,
               ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     """Stages A-D: turn `{tag: full-canvas RGBA}` into `(manifest, images)`.
 
@@ -1186,6 +1193,63 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         if derived_report and derived_report.get("succeeded") and tag in derived_report["parts"]:
             parts[-1]["derived"] = True
 
+    # Composer VariantSet members are compiled as separate runtime parts.  The
+    # Assembly reader excluded them from the flattened semantic layers, so the
+    # active member remains present in the canonical reference without being
+    # double-drawn by the ordinary semantic part.
+    variant_part_names: dict[str, str] = {}
+    if variant_sets:
+        if not variant_layers or not instance_to_tag:
+            raise ValueError("VariantSets require positioned instance layers and instance-to-tag mappings")
+        for spec in variant_sets.values():
+            for member in spec.get("members", []):
+                member = str(member)
+                if member not in variant_layers:
+                    raise ValueError(f"VariantSet member {member!r} has no layer image")
+                cropped = crop_to_alpha(variant_layers[member], alpha_threshold)
+                if cropped is None:
+                    raise ValueError(f"VariantSet member {member!r} has no visible pixels")
+                crop_img, xyxy = cropped
+                tag = instance_to_tag.get(member)
+                if tag is None:
+                    raise ValueError(f"VariantSet member {member!r} has no semantic tag")
+                name = _part_name(member)
+                if name in images:
+                    raise ValueError(f"VariantSet member {member!r} collides with a rig part name")
+                variant_part_names[member] = name
+                group = group_for_tag(tag)
+                weight = _weight_for(tag, group, tuple(xyxy), neck_box, gradient_tags)
+                part_mesh = mesh_spec((canvas_h, canvas_w), fine=weight["mode"] == "gradient_y")
+                part_mesh["topology_hash"] = mesh_topology_hash(part_mesh, tuple(int(v) for v in xyxy))
+                # Keep variants at their Composer semantic plane.  All members
+                # in one set are exclusive, so sharing this z is intentional.
+                base_z = next((p["z"] for p in parts if p["tag"] == tag),
+                              _draw_rank(tag, variant_draw_order or draw_order, {tag: tag})[0])
+                parts.append({
+                    "name": name, "tag": tag, "image": f"{image_prefix}/{name}.png" if image_prefix else f"{name}.png",
+                    "xyxy": [int(v) for v in xyxy], "group": group,
+                    "depth": round(float(_DEPTH_TABLE.get(tag, UNKNOWN_DEPTH)), 4),
+                    "z": float(base_z), "weight": weight, "mesh": part_mesh,
+                    "variant_member": member,
+                    "visible": False,
+                })
+                images[name] = crop_img
+
+        compiled_variants, compiled_presets, variant_deformers, variant_report = compile_variant_bindings(
+            variant_sets, expression_presets, instance_to_tag, variant_part_names
+        )
+        # Rest/reference validation uses Composer's authored `active` member;
+        # runtime is reset to VariantSet.default immediately after that check.
+        for set_id, spec in compiled_variants.items():
+            for member in spec["members"]:
+                part = next(p for p in parts if p.get("variant_member") == member)
+                part["visible"] = member == spec["active"]
+                part["variant_set"] = set_id
+    else:
+        compiled_variants, compiled_presets, variant_deformers, variant_report = {}, {}, [], {
+            "status": "disabled", "warnings": [], "errors": []
+        }
+
     manifest = {
         "version": MANIFEST_VERSION,
         "canvas": {"width": canvas_w, "height": canvas_h},
@@ -1237,15 +1301,27 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     manifest["rest_fidelity"] = rest_fidelity(
         canonical_reference, rig_rest, alpha_threshold=alpha_threshold
     )
+    # Composer's active member is reference-only.  The runtime initial state
+    # is the independent VariantSet.default contract.
+    for set_id, spec in compiled_variants.items():
+        for member in spec["members"]:
+            part = next(p for p in parts if p.get("variant_member") == member)
+            part["visible"] = member == spec["default"]
     # Capability Report (directive v0.2 #34-35, Master doc #19): what this
     # *compiled* rig can actually do, separate from whether the compile
     # itself succeeded (QA) -- derived from the final parts and preflight,
     # never re-run against the input.
-    manifest["capabilities"] = capability_report(parts, preflight)
+    manifest["capabilities"] = capability_report(parts, preflight, variant_report["status"])
     # Every v0.1 field constructed above (parts/anchors/motion/rest_fidelity/
     # rig_preflight/derived_semantics/...) is preserved verbatim; this only
     # adds parameters[]/deformers[]/drivers[] and bumps `version` to "0.2".
     manifest = upgrade_manifest_v01_to_v02(manifest)
+    if variant_deformers:
+        manifest["deformers"].extend(variant_deformers)
+    if compiled_variants:
+        manifest["variant_sets"] = compiled_variants
+        manifest["expression_presets"] = compiled_presets
+        manifest["variant_bindings"] = variant_report
     return manifest, images
 
 
