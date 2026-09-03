@@ -3,10 +3,12 @@ import unittest
 import numpy as np
 
 from portrait_autorig.image import crop_to_alpha
-from portrait_autorig.rig import build_rig, chest_occluder_alpha
+from portrait_autorig.rig import build_rig, chest_occluder_alpha, rig_preflight
 from portrait_autorig.soft_morph import (
-    DEFAULT_HORIZONTAL_PX, DEFAULT_VERTICAL_PX, MIN_COVERAGE_RATIO, SOFT_MORPH_TAG,
-    derive_upper_torso_soft_region, soft_morph_preflight,
+    DEFAULT_HORIZONTAL_PX, DEFAULT_VERTICAL_PX, MIN_COVERAGE_RATIO,
+    RESPONSE_PROFILE_CONFIG, SOFT_MORPH_TAG,
+    authored_upper_torso_soft_morph_spec, derive_upper_torso_soft_region,
+    find_authored_region, region_from_rig_intent, soft_morph_preflight,
     upper_torso_soft_morph_spec,
 )
 
@@ -357,3 +359,187 @@ class ChestOccluderAlphaTests(unittest.TestCase):
         layers = dict(portrait_layers())
         layers["bottomwear"] = rgba(TOPWEAR_BOX)
         self.assertIsNone(chest_occluder_alpha(layers))
+
+
+def authored_region(**overrides):
+    """The exact shape `portrait_composer.secondary_regions.add_upper_
+    torso_secondary` authors -- verified against real Composer output."""
+    region = {
+        "target": "topwear",
+        "geometry": {"kind": "two_lobe",
+                    "left": {"center": [0.39, 0.36], "radius": [0.24, 0.20]},
+                    "right": {"center": [0.61, 0.36], "radius": [0.24, 0.20]}},
+        "locks": {"center": 0.10, "neckline": 0.16, "shoulder": 0.08},
+        "exclusions": [],
+        "author_strength": 0.85,
+        "response_profile": "firm_bounce",
+        "enabled": True,
+    }
+    region.update(overrides)
+    return region
+
+
+class FindAuthoredRegionTests(unittest.TestCase):
+    def test_none_rig_intent_returns_none(self):
+        self.assertIsNone(find_authored_region(None))
+
+    def test_empty_rig_intent_returns_none(self):
+        self.assertIsNone(find_authored_region({}))
+
+    def test_finds_a_region_targeting_topwear(self):
+        rig_intent = {"regions": {"upper_torso_secondary": authored_region()}}
+        self.assertEqual(find_authored_region(rig_intent), authored_region())
+
+    def test_finds_a_region_targeting_the_topwear_with_arms_alias(self):
+        rig_intent = {"regions": {"x": authored_region(target="topwear_with_arms")}}
+        self.assertIsNotNone(find_authored_region(rig_intent))
+
+    def test_a_region_targeting_something_else_is_ignored(self):
+        rig_intent = {"regions": {"x": authored_region(target="handwear")}}
+        self.assertIsNone(find_authored_region(rig_intent))
+
+    def test_a_disabled_region_is_still_found(self):
+        # Callers decide what a disabled region means; resolution itself
+        # does not filter on enabled.
+        rig_intent = {"regions": {"x": authored_region(enabled=False)}}
+        self.assertIsNotNone(find_authored_region(rig_intent))
+
+
+class RegionFromRigIntentTests(unittest.TestCase):
+    def test_builds_the_preflight_shaped_region(self):
+        region = region_from_rig_intent(rgba(TOPWEAR_BOX), authored_region())
+        self.assertEqual(region["mode"], "two_lobe")
+        self.assertEqual(region["left"], authored_region()["geometry"]["left"])
+        self.assertEqual(region["right"], authored_region()["geometry"]["right"])
+        self.assertEqual(region["center_lock"], 0.10)
+        self.assertEqual(region["neckline_lock"], 0.16)
+        self.assertEqual(tuple(region["bbox"]), TOPWEAR_BOX)
+
+    def test_bbox_comes_from_the_real_alpha_not_the_authored_geometry(self):
+        # Composer's geometry never carries a bbox; AutoRig keeps deciding
+        # that from the actual compiled art (its own geometry safety).
+        smaller_box = (40, 80, 80, 110)
+        region = region_from_rig_intent(rgba(smaller_box), authored_region())
+        self.assertEqual(tuple(region["bbox"]), smaller_box)
+
+    def test_none_topwear_returns_none(self):
+        self.assertIsNone(region_from_rig_intent(None, authored_region()))
+
+    def test_none_region_returns_none(self):
+        self.assertIsNone(region_from_rig_intent(rgba(TOPWEAR_BOX), None))
+
+    def test_missing_geometry_returns_none(self):
+        broken = authored_region(geometry={})
+        self.assertIsNone(region_from_rig_intent(rgba(TOPWEAR_BOX), broken))
+
+
+class AuthoredUpperTorsoSoftMorphSpecTests(unittest.TestCase):
+    def test_ready_region_is_enabled_at_author_strength(self):
+        layers = portrait_layers()
+        spec = authored_upper_torso_soft_morph_spec(
+            authored_region(), layers, frame_size=(CANVAS, CANVAS))
+        self.assertTrue(spec["enabled"])
+        self.assertEqual(spec["status"], "READY")
+        self.assertAlmostEqual(spec["strength"], 0.85, places=3)
+        self.assertEqual(spec["source"], "assembly_rig_intent")
+
+    def test_author_disabled_is_always_strength_zero_even_if_geometry_is_ready(self):
+        layers = portrait_layers()
+        spec = authored_upper_torso_soft_morph_spec(
+            authored_region(enabled=False), layers, frame_size=(CANVAS, CANVAS))
+        self.assertFalse(spec["enabled"])
+        self.assertEqual(spec["strength"], 0.0)
+        self.assertEqual(spec["status"], "DISABLED")
+        self.assertIn("author_disabled", spec["status_reasons"])
+
+    def test_preflight_disabled_overrides_an_enabled_author(self):
+        # AutoRig's own safety check still governs even when the author
+        # said enabled=True -- geometry/deformation safety is not
+        # Composer's to override.
+        spec = authored_upper_torso_soft_morph_spec(
+            authored_region(), {"topwear": rgba((36, 72, 92, 78))},  # 6px tall: too short
+            frame_size=(CANVAS, CANVAS))
+        self.assertFalse(spec["enabled"])
+        self.assertEqual(spec["strength"], 0.0)
+        self.assertEqual(spec["status"], "DISABLED")
+
+    def test_response_profile_and_config_are_carried_through(self):
+        for profile in ("soft", "firm_bounce", "springy"):
+            spec = authored_upper_torso_soft_morph_spec(
+                authored_region(response_profile=profile), portrait_layers(),
+                frame_size=(CANVAS, CANVAS))
+            self.assertEqual(spec["response_profile"], profile)
+            self.assertEqual(spec["response_config"], RESPONSE_PROFILE_CONFIG[profile])
+
+    def test_unknown_response_profile_falls_back_to_soft(self):
+        spec = authored_upper_torso_soft_morph_spec(
+            authored_region(response_profile="not_a_real_profile"), portrait_layers(),
+            frame_size=(CANVAS, CANVAS))
+        self.assertEqual(spec["response_profile"], "soft")
+        self.assertEqual(spec["response_config"], RESPONSE_PROFILE_CONFIG["soft"])
+
+    def test_firm_bounce_max_displacement_is_smaller_than_soft(self):
+        # Absorption plan #17 / directive #17: firm_bounce != larger motion.
+        self.assertLess(RESPONSE_PROFILE_CONFIG["firm_bounce"]["max_displacement"],
+                        RESPONSE_PROFILE_CONFIG["soft"]["max_displacement"])
+
+
+class RigPreflightAuthoredRegionTests(unittest.TestCase):
+    """rig.rig_preflight's own upper_torso_soft_morph check, not just the
+    soft_morph.py functions it calls."""
+
+    def _layers(self):
+        return {
+            "head": rgba((10, 10, 90, 90)),
+            "face": rgba((20, 20, 80, 80)),
+            "neck": rgba((58, 56, 70, 72)),
+            "topwear": rgba(TOPWEAR_BOX),
+        }
+
+    def test_no_rig_intent_uses_the_auto_derived_guess(self):
+        preflight = rig_preflight(self._layers())
+        self.assertEqual(preflight["checks"]["upper_torso_soft_morph"]["status"], "READY")
+
+    def test_rig_intent_with_a_matching_region_uses_it(self):
+        rig_intent = {"regions": {"upper_torso_secondary": authored_region()}}
+        preflight = rig_preflight(self._layers(), rig_intent=rig_intent)
+        self.assertEqual(preflight["checks"]["upper_torso_soft_morph"]["status"], "READY")
+
+    def test_rig_intent_present_but_no_matching_region_is_disabled_not_guessed(self):
+        # Master doc invariant #11: an Assembly Bundle whose author did not
+        # author a region must not fall back to the auto-derived guess.
+        preflight = rig_preflight(self._layers(), rig_intent={})
+        self.assertEqual(preflight["checks"]["upper_torso_soft_morph"]["status"], "DISABLED")
+        self.assertIn("no_region", preflight["checks"]["upper_torso_soft_morph"]["reasons"])
+
+
+class BuildRigAuthoredRegionTests(unittest.TestCase):
+    def _layers(self):
+        return {
+            "head": rgba((10, 10, 90, 90)),
+            "face": rgba((20, 20, 80, 80)),
+            "neck": rgba((58, 56, 70, 72)),
+            "topwear": rgba(TOPWEAR_BOX),
+        }
+
+    def test_rig_intent_none_keeps_the_auto_derived_path(self):
+        manifest, _ = build_rig(self._layers(), frame_size=(CANVAS, CANVAS))
+        spec = manifest["motion"]["upper_torso_soft_morph"]
+        self.assertEqual(spec["source"], "topwear_geometry")
+
+    def test_rig_intent_with_authored_region_drives_the_spec(self):
+        rig_intent = {"regions": {"upper_torso_secondary": authored_region()}}
+        manifest, _ = build_rig(self._layers(), frame_size=(CANVAS, CANVAS), rig_intent=rig_intent)
+        spec = manifest["motion"]["upper_torso_soft_morph"]
+        self.assertEqual(spec["source"], "assembly_rig_intent")
+        self.assertEqual(spec["response_profile"], "firm_bounce")
+        self.assertTrue(spec["enabled"])
+        self.assertEqual(manifest["capabilities"]["upper_torso_secondary"], "ready")
+
+    def test_rig_intent_given_but_no_region_authored_disables_rather_than_guesses(self):
+        manifest, _ = build_rig(self._layers(), frame_size=(CANVAS, CANVAS), rig_intent={})
+        spec = manifest["motion"]["upper_torso_soft_morph"]
+        self.assertEqual(spec["source"], "assembly_rig_intent")
+        self.assertFalse(spec["enabled"])
+        self.assertEqual(spec["status"], "DISABLED")
+        self.assertEqual(manifest["capabilities"]["upper_torso_secondary"], "disabled")

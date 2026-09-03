@@ -34,6 +34,8 @@ import numpy as np
 __all__ = [
     "SOFT_MORPH_TAG", "derive_upper_torso_soft_region", "soft_morph_preflight",
     "upper_torso_soft_morph_spec",
+    "RESPONSE_PROFILES", "RESPONSE_PROFILE_CONFIG", "TARGET_ALIASES",
+    "find_authored_region", "region_from_rig_intent", "authored_upper_torso_soft_morph_spec",
 ]
 
 # The garment layer this deforms. Phase 1's scope is `topwear` alone -- see
@@ -185,7 +187,8 @@ def soft_morph_preflight(topwear: np.ndarray | None, region: dict[str, Any] | No
     covered lobe degrades instead of silently animating out of sight.
     """
     if topwear is None or region is None:
-        return {"status": "DISABLED", "confidence": 0.0, "reasons": ["no_topwear"]}
+        reason = "no_topwear" if topwear is None else "no_region"
+        return {"status": "DISABLED", "confidence": 0.0, "reasons": [reason]}
 
     x1, y1, x2, y2 = region["bbox"]
     width, height = x2 - x1, y2 - y1
@@ -301,4 +304,145 @@ def upper_torso_soft_morph_spec(layer_dict: dict[str, np.ndarray], *,
     if region is not None:
         spec["left"] = region["left"]
         spec["right"] = region["right"]
+    return spec
+
+
+# --- Authored region (Assembly Bundle RigIntent, v0.2) ---------------------
+#
+# Everything above this point is Phase 1's original alpha-guessing path,
+# unchanged, and stays the Portrait Bundle fallback (no RigIntent concept
+# exists there). `portrait-composer`'s C4 `secondary_regions.py` now
+# authors this exact region shape -- geometry/locks/author_strength/
+# response_profile/enabled -- so an Assembly Bundle compile must use *that*
+# instead of guessing (Master doc #23 invariant #11-12: Composer defines
+# WHERE/WHAT/response class, AutoRig computes HOW; "AutoRig가 auto region
+# 발명 안 함" once RigIntent exists to author one).
+
+# Composer's own logical label for the same physical surface this module
+# already calls `topwear` (Phase 1 scope: single tag, #5/#24 above) --
+# `PORTRAIT_COMPOSER_IMPLEMENTATION_DIRECTIVE_v0.2.md` #18 names
+# "topwear_with_arms" as its export-profile grouping label for exactly this
+# surface. Generalizing beyond one tag is future work.
+TARGET_ALIASES = frozenset({"topwear_with_arms", "topwear", SOFT_MORPH_TAG})
+
+RESPONSE_PROFILES = ("soft", "firm_bounce", "springy")
+
+# Directive v0.2 #16's schema-example numeric config, verbatim: AutoRig's
+# own data-driven preset per qualitative response_profile ID, never a
+# per-character hardcode. Production tuning is separate config/corpus
+# calibration -- this is the starting point, not the final word. #17:
+# firm_bounce != larger motion -- higher restoring force, shorter lag,
+# clear overshoot, faster rebound, smaller sustained wobble; its own
+# max_displacement is smaller than soft's, not larger. Not yet consumed by
+# any solver (P2); carried on the spec today so the eventual
+# UpperTorsoSecondaryDriver has real authored data waiting for it instead
+# of another migration.
+RESPONSE_PROFILE_CONFIG: dict[str, dict[str, float]] = {
+    "soft": {"stiffness": 0.45, "damping": 0.55, "overshoot": 0.20, "max_displacement": 1.00},
+    "firm_bounce": {"stiffness": 0.82, "damping": 0.36, "overshoot": 0.42, "max_displacement": 0.72},
+    "springy": {"stiffness": 0.64, "damping": 0.24, "overshoot": 0.55, "max_displacement": 0.90},
+}
+
+
+def find_authored_region(rig_intent: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The first RigIntent region (enabled or not -- callers decide what to
+    do with a disabled one) whose `target` names the surface this module's
+    Phase 1 scope can act on. None when there is no `rig_intent` at all, or
+    none of its regions target `topwear` -- both cases mean "AutoRig must
+    not invent a region" for that compile (see
+    `authored_upper_torso_soft_morph_spec`'s caller in `rig.py`), never a
+    reason to fall back to `derive_upper_torso_soft_region`'s guess."""
+    if not rig_intent:
+        return None
+    for region in (rig_intent.get("regions") or {}).values():
+        if region.get("target") in TARGET_ALIASES:
+            return region
+    return None
+
+
+def region_from_rig_intent(topwear: np.ndarray | None, region: dict[str, Any] | None, *,
+                           alpha_threshold: int = 10) -> dict[str, Any] | None:
+    """The `soft_morph_preflight`-shaped region dict built from a Composer-
+    authored RigIntent region -- same shape `derive_upper_torso_soft_region`
+    returns (`left`/`right`/`center_lock`/`neckline_lock`/`bbox`), only
+    where the center/radius/locks come from differs. `bbox` still comes
+    from the actual compiled `topwear` alpha, never from Composer's
+    normalized geometry alone -- AutoRig keeps owning geometry/deformation
+    *safety* (`soft_morph_preflight` runs unchanged against this), even
+    when it no longer owns *where* the lobes are centred.
+    """
+    if topwear is None or region is None:
+        return None
+    geometry = region.get("geometry") or {}
+    left, right = geometry.get("left"), geometry.get("right")
+    if not left or not right:
+        return None
+    box = _bbox(_alpha_of(topwear) > 0)
+    if box is None:
+        return None
+    locks = region.get("locks") or {}
+    return {
+        "mode": "two_lobe", "left": left, "right": right,
+        "center_lock": locks.get("center", CENTER_LOCK_WIDTH),
+        "neckline_lock": locks.get("neckline", NECKLINE_LOCK_WIDTH),
+        "bbox": list(box),
+    }
+
+
+def authored_upper_torso_soft_morph_spec(region: dict[str, Any],
+                                         layer_dict: dict[str, np.ndarray], *,
+                                         frame_size: tuple[int, int],
+                                         neck_box: tuple[int, int, int, int] | None = None,
+                                         occluder_alpha: np.ndarray | None = None,
+                                         alpha_threshold: int = 10) -> dict[str, Any]:
+    """The full `motion.upper_torso_soft_morph` manifest entry built from a
+    Composer-authored RigIntent region (`find_authored_region`) instead of
+    `upper_torso_soft_morph_spec`'s alpha guess. Folds `region["enabled"]`,
+    AutoRig's own `soft_morph_preflight` safety verdict, and the author's
+    own `author_strength` into `strength` the same way the auto-derived
+    path folds preflight confidence alone -- an author-disabled region, a
+    preflight DISABLED, or missing geometry/topwear are all exactly
+    strength 0.0, never a partial guess.
+    """
+    topwear = layer_dict.get(SOFT_MORPH_TAG)
+    region_geometry = region_from_rig_intent(topwear, region, alpha_threshold=alpha_threshold)
+    verdict = soft_morph_preflight(topwear, region_geometry, frame_size=frame_size,
+                                   neck_box=neck_box, occluder_alpha=occluder_alpha,
+                                   alpha_threshold=alpha_threshold)
+
+    author_enabled = bool(region.get("enabled", True))
+    author_strength = float(region.get("author_strength", 0.9))
+    if not author_enabled or verdict["status"] == "DISABLED":
+        enabled, strength = False, 0.0
+    elif verdict["status"] == "DEGRADED":
+        enabled, strength = True, verdict["confidence"] * author_strength
+    else:
+        enabled, strength = True, author_strength
+
+    response_profile = region.get("response_profile", "soft")
+    if response_profile not in RESPONSE_PROFILES:
+        response_profile = "soft"
+
+    spec: dict[str, Any] = {
+        "enabled": enabled,
+        "mode": "two_lobe",
+        "strength": round(float(strength), 3),
+        "horizontal_px": DEFAULT_HORIZONTAL_PX,
+        "vertical_px": DEFAULT_VERTICAL_PX,
+        "center_lock": (region_geometry or {}).get("center_lock", CENTER_LOCK_WIDTH),
+        "neckline_lock": (region_geometry or {}).get("neckline_lock", NECKLINE_LOCK_WIDTH),
+        "confidence": verdict["confidence"],
+        "source": "assembly_rig_intent",
+        "status": verdict["status"] if author_enabled else "DISABLED",
+        "response_profile": response_profile,
+        "response_config": dict(RESPONSE_PROFILE_CONFIG[response_profile]),
+    }
+    reasons = list(verdict.get("reasons") or [])
+    if not author_enabled:
+        reasons = ["author_disabled"] + reasons
+    if reasons:
+        spec["status_reasons"] = reasons
+    if region_geometry is not None:
+        spec["left"] = region_geometry["left"]
+        spec["right"] = region_geometry["right"]
     return spec

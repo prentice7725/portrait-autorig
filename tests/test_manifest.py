@@ -175,5 +175,73 @@ class EvaluationPhaseTests(unittest.TestCase):
         self.assertIn("not_a_real_phase", errors[0])
 
 
+def _authored_soft_morph_spec(**overrides):
+    spec = {
+        "enabled": True, "mode": "two_lobe", "strength": 0.85,
+        "horizontal_px": 2.0, "vertical_px": 0.6,
+        "center_lock": 0.10, "neckline_lock": 0.16,
+        "confidence": 1.0, "source": "assembly_rig_intent", "status": "READY",
+        "response_profile": "firm_bounce",
+        "response_config": {"stiffness": 0.82, "damping": 0.36, "overshoot": 0.42, "max_displacement": 0.72},
+        "left": {"center": [0.39, 0.36], "radius": [0.24, 0.20]},
+        "right": {"center": [0.61, 0.36], "radius": [0.24, 0.20]},
+    }
+    spec.update(overrides)
+    return spec
+
+
+class UpperTorsoSecondaryEntriesTests(unittest.TestCase):
+    def test_none_spec_produces_nothing(self):
+        self.assertEqual(manifest.upper_torso_secondary_entries(None), (None, None))
+
+    def test_disabled_spec_produces_nothing(self):
+        spec = _authored_soft_morph_spec(enabled=False)
+        self.assertEqual(manifest.upper_torso_secondary_entries(spec), (None, None))
+
+    def test_legacy_auto_derived_spec_produces_nothing(self):
+        # source == "topwear_geometry" (Portrait Bundle path) has no
+        # response_profile to reserve a driver for.
+        spec = _authored_soft_morph_spec(source="topwear_geometry")
+        self.assertEqual(manifest.upper_torso_secondary_entries(spec), (None, None))
+
+    def test_authored_enabled_spec_produces_a_local_soft_field_deformer(self):
+        deformer, _ = manifest.upper_torso_secondary_entries(_authored_soft_morph_spec())
+        self.assertIsNotNone(deformer)
+        self.assertEqual(deformer["kind"], "local_soft_field")
+        self.assertEqual(deformer["parameters"], ["ParamUpperTorsoSecondary"])
+        self.assertEqual(deformer["targets"], {"tag": "topwear"})
+        self.assertEqual(deformer["phase"], manifest.PHASE_SECONDARY)
+        self.assertIn(deformer["kind"], manifest.DEFORMER_KINDS)
+
+    def test_authored_enabled_spec_produces_an_upper_torso_secondary_driver(self):
+        _, driver = manifest.upper_torso_secondary_entries(_authored_soft_morph_spec())
+        self.assertIsNotNone(driver)
+        self.assertEqual(driver["kind"], "UpperTorsoSecondaryDriver")
+        self.assertEqual(driver["output"], "ParamUpperTorsoSecondary")
+        self.assertEqual(driver["response_profile"], "firm_bounce")
+        self.assertEqual(driver["response_config"]["max_displacement"], 0.72)
+        self.assertEqual(driver["phase"], manifest.PHASE_SECONDARY)
+        params = {i["parameter"] for i in driver["inputs"]}
+        self.assertIn("ParamBreath", params)
+        self.assertIn("ParamAngleY", params)
+
+    def test_upgrade_wires_the_entries_into_deformers_and_drivers(self):
+        v01 = _v01_manifest()
+        v01["motion"]["upper_torso_soft_morph"] = _authored_soft_morph_spec()
+        upgraded = manifest.upgrade_manifest_v01_to_v02(v01)
+        kinds = {d["kind"] for d in upgraded["deformers"]}
+        self.assertIn("local_soft_field", kinds)
+        self.assertEqual(len(upgraded["drivers"]), 1)
+        self.assertEqual(upgraded["drivers"][0]["kind"], "UpperTorsoSecondaryDriver")
+        param_ids = {p["id"] for p in upgraded["parameters"]}
+        self.assertIn("ParamUpperTorsoSecondary", param_ids)
+
+    def test_upgrade_without_an_authored_region_leaves_drivers_empty(self):
+        upgraded = manifest.upgrade_manifest_v01_to_v02(_v01_manifest())
+        self.assertEqual(upgraded["drivers"], [])
+        param_ids = {p["id"] for p in upgraded["parameters"]}
+        self.assertNotIn("ParamUpperTorsoSecondary", param_ids)
+
+
 if __name__ == "__main__":
     unittest.main()
