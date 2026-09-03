@@ -400,13 +400,24 @@ class BuildRigTests(unittest.TestCase):
         manifest, images = build_rig(self.layers, body_remainder=self.remainder,
                                      frame_size=(CANVAS, CANVAS), run_id="r1",
                                      tag_version="v3")
-        self.assertEqual(manifest["version"], "0.1")
+        # build_rig constructs the v0.1 shape (parts/anchors/motion/...) and
+        # then upgrades it to v0.2 in place (PORTRAIT_AUTORIG_PRIOR_ART_
+        # ABSORPTION_PLAN v0.1 #7, #18): every v0.1 field survives, and
+        # parameters[]/deformers[]/drivers[] are added on top.
+        self.assertEqual(manifest["version"], "0.2")
         self.assertEqual(manifest["canvas"], {"width": CANVAS, "height": CANVAS})
         self.assertEqual(manifest["source"]["depth"], "table")
         self.assertTrue(manifest["parts"])
         for part in manifest["parts"]:
             self.assertIn(part["name"], images)
             self.assertEqual(part["image"], f"rig/images/{part['name']}.png")
+        self.assertTrue(manifest["parameters"])
+        self.assertTrue(manifest["deformers"])
+        self.assertEqual(manifest["drivers"], [])
+        deformer_kinds = {d["kind"] for d in manifest["deformers"]}
+        self.assertEqual(deformer_kinds,
+                         {"parallax_turn", "shell_turn", "weighted_rotation",
+                          "continuous_field", "eye_fold"})
 
     def test_undivided_eye_layer_is_replaced_by_its_halves(self):
         manifest, images = build_rig(self.layers, frame_size=(CANVAS, CANVAS))

@@ -17,6 +17,8 @@ from PIL import Image
 
 from . import soft_morph
 from .image import composite_layers, crop_to_alpha, rest_fidelity
+from .manifest import RIG_MANIFEST_VERSION_01, upgrade_manifest_v01_to_v02
+from .mesh import mesh_spec
 from .semantic import SEMANTIC_Z_ORDER
 
 __all__ = [
@@ -94,14 +96,12 @@ COLLAR_TAGS = frozenset({"topwear", "neckwear"})
 # makes a tilt read as a neck bending rather than a head sliding sideways.
 NECK_PIVOT_RATIO = 0.85
 
-# Uniform grid meshing, quoted against a 768px canvas and scaled from there.
-# Parts that deform along a gradient get the finer cell, since that is where a
-# coarse grid shows as faceting.
-MESH_REFERENCE_SIZE = 768
-MESH_CELL_PX = 42
-MESH_CELL_FINE_PX = 30
-
-MANIFEST_VERSION = "0.1"
+# Mesh cell sizing now lives in mesh.py. `MANIFEST_VERSION` is the version
+# this module's own Stage A-D construction below still builds (v0.1 shape,
+# byte-for-byte unchanged); `build_rig` upgrades that to v0.2 via
+# `manifest.upgrade_manifest_v01_to_v02` immediately before returning, so the
+# upgrade path is exercised by every caller rather than being opt-in.
+MANIFEST_VERSION = RIG_MANIFEST_VERSION_01
 RIG_SUBDIR = "rig"
 
 # `max_x` is measured, not chosen. Sweeping the turn on A-001 and counting the
@@ -866,12 +866,6 @@ def _weight_for(tag: str, group: str, box: tuple[int, int, int, int],
     return {"mode": "constant", "value": BODY_WEIGHT}
 
 
-def _mesh_cell(frame_size: tuple[int, int], fine: bool) -> int:
-    scale = max(int(frame_size[0]), int(frame_size[1])) / MESH_REFERENCE_SIZE
-    base = MESH_CELL_FINE_PX if fine else MESH_CELL_PX
-    return max(8, int(round(base * scale)))
-
-
 def render_rig_rest(parts: Collection[dict[str, Any]], images: dict[str, np.ndarray],
                     frame_size: tuple[int, int]) -> np.ndarray:
     """Composite cropped rig parts exactly as the runtime draws motion=0."""
@@ -1064,8 +1058,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
             "weight": weight,
             # Anything deforming along a gradient gets the finer cell: that is
             # where a coarse grid shows up as faceting.
-            "mesh": {"cell": _mesh_cell((canvas_h, canvas_w),
-                                        fine=weight["mode"] == "gradient_y")},
+            "mesh": mesh_spec((canvas_h, canvas_w), fine=weight["mode"] == "gradient_y"),
         })
         if derived_report and derived_report.get("succeeded") and tag in derived_report["parts"]:
             parts[-1]["derived"] = True
@@ -1098,6 +1091,10 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     manifest["rest_fidelity"] = rest_fidelity(
         canonical_reference, rig_rest, alpha_threshold=alpha_threshold
     )
+    # Every v0.1 field constructed above (parts/anchors/motion/rest_fidelity/
+    # rig_preflight/derived_semantics/...) is preserved verbatim; this only
+    # adds parameters[]/deformers[]/drivers[] and bumps `version` to "0.2".
+    manifest = upgrade_manifest_v01_to_v02(manifest)
     return manifest, images
 
 

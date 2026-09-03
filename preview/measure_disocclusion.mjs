@@ -14,30 +14,35 @@
 // alpha coverage and the manifest's z order -- the same thing the preview
 // draws -- so no GPU and no colour heuristics are involved.
 //
-// The deformation is pulled out of index.html rather than reimplemented: a
-// measurement that disagrees with the page it is measuring is worthless.
+// The deformation is imported from runtime.mjs rather than reimplemented: a
+// measurement that disagrees with the page it is measuring is worthless
+// (PORTRAIT_AUTORIG_PRIOR_ART_ABSORPTION_PLAN v0.1 #5, #18, P0-C: runtime.mjs
+// is the canonical module index.html itself loads, imported directly here
+// instead of string-sliced out of index.html and `new Function`-evaluated).
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { inflateSync } from "node:zlib";
 
 /* ---------- the page's deformation, loaded as a module ---------- */
 
-const pageSrc = readFileSync(new URL("index.html", import.meta.url), "utf8");
-const script = pageSrc.slice(pageSrc.indexOf("<script>") + 8, pageSrc.lastIndexOf("</script>"));
 const stub = () => ({
   checked: false, value: "0", textContent: "", innerHTML: "",
   addEventListener() {}, append() {}, appendChild() {},
   classList: { add() {}, remove() {} }, click() {},
 });
-const documentStub = { getElementById: stub, createElement: stub, addEventListener() {} };
-const api = new Function(
-  "document", "performance", "requestAnimationFrame", "location", "fetch",
-  "createImageBitmap", "URLSearchParams",
-  script + ";return { buildMesh, deform, state, fitShells, SHELL_MAX_YAW, EYE_TAGS, LID_TAGS, HAIR_SHELL_TAGS };",
-)(documentStub, { now: () => 0 }, () => {}, { search: "" },
-  async () => { throw new Error("no fetch"); }, async () => ({}), URLSearchParams);
+// runtime.mjs is an ES module: it can only see globals, not injected
+// function parameters, so the stubs it reads at import time go on
+// globalThis before the import runs.
+globalThis.document = { getElementById: stub, createElement: stub, addEventListener() {} };
+globalThis.performance = { now: () => 0 };
+globalThis.requestAnimationFrame = () => {};
+globalThis.location = { search: "" };
+globalThis.fetch = async () => { throw new Error("no fetch"); };
+globalThis.createImageBitmap = async () => ({});
+
+const Runtime = await import(new URL("runtime.mjs", import.meta.url));
 const { buildMesh, deform, state, fitShells, SHELL_MAX_YAW,
-        EYE_TAGS, LID_TAGS, HAIR_SHELL_TAGS } = api;
+        EYE_TAGS, LID_TAGS, HAIR_SHELL_TAGS } = Runtime;
 
 /* ---------- PNG ---------- */
 
