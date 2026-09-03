@@ -13,7 +13,7 @@ from .rig import build_rig, rig_preflight, write_rig_project
 
 
 def compile_asset(asset: PortraitAsset, output_dir: str | os.PathLike[str], *,
-                  gradient_tags=()) -> str:
+                  gradient_tags=(), contour_tags=()) -> str:
     preflight = rig_preflight(asset.layers, original_rgba=asset.original,
                               body_remainder=asset.body_remainder)
     if preflight["status"] == "INCOMPATIBLE":
@@ -26,6 +26,7 @@ def compile_asset(asset: PortraitAsset, output_dir: str | os.PathLike[str], *,
         body_remainder=asset.body_remainder,
         frame_size=asset.original.shape[:2],
         gradient_tags=gradient_tags,
+        contour_tags=contour_tags,
         run_id=asset.source_id,
         tag_version=asset.tag_version,
         preflight=preflight,
@@ -42,11 +43,11 @@ def compile_asset(asset: PortraitAsset, output_dir: str | os.PathLike[str], *,
     return write_rig_project(str(output), "portrait", manifest, images)
 
 
-def compile_bundle(bundle_dir: str, output_dir: str, *, gradient_tags=()) -> str:
+def compile_bundle(bundle_dir: str, output_dir: str, *, gradient_tags=(), contour_tags=()) -> str:
     return compile_asset(load_portrait_bundle(bundle_dir), output_dir,
-                         gradient_tags=gradient_tags)
+                         gradient_tags=gradient_tags, contour_tags=contour_tags)
 
 
-def compile_legacy_run(run_dir: str, output_dir: str, *, gradient_tags=()) -> str:
+def compile_legacy_run(run_dir: str, output_dir: str, *, gradient_tags=(), contour_tags=()) -> str:
     return compile_asset(load_legacy_run(run_dir), output_dir,
-                         gradient_tags=gradient_tags)
+                         gradient_tags=gradient_tags, contour_tags=contour_tags)

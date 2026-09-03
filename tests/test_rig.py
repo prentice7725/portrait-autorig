@@ -419,6 +419,26 @@ class BuildRigTests(unittest.TestCase):
                          {"parallax_turn", "shell_turn", "weighted_rotation",
                           "continuous_field", "eye_fold"})
 
+    def test_contour_tags_opts_a_part_into_the_contour_mesh_backend(self):
+        # absorption plan #8 (P1-A): grid stays the default everywhere else,
+        # only the opted-in tag's own part switches.
+        manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS),
+                                contour_tags=("face",))
+        by_tag = {part["tag"]: part for part in manifest["parts"]}
+        self.assertEqual(by_tag["face"]["mesh"]["kind"], "contour")
+        self.assertIn("vertices", by_tag["face"]["mesh"])
+        self.assertIn("triangles", by_tag["face"]["mesh"])
+        self.assertEqual(by_tag["head"]["mesh"]["kind"], "grid")
+
+    def test_contour_tags_does_not_change_output_for_unlisted_tags(self):
+        default_manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS))
+        contour_manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS),
+                                        contour_tags=("face",))
+        for tag in ("head", "neck", "topwear"):
+            default_part = next(p for p in default_manifest["parts"] if p["tag"] == tag)
+            contour_part = next(p for p in contour_manifest["parts"] if p["tag"] == tag)
+            self.assertEqual(default_part, contour_part)
+
     def test_undivided_eye_layer_is_replaced_by_its_halves(self):
         manifest, images = build_rig(self.layers, frame_size=(CANVAS, CANVAS))
         names = {part["tag"] for part in manifest["parts"]}

@@ -64,6 +64,45 @@ check("above the band clamps to top", near(weightAt(grad, 0), 0.55));
 check("below the band clamps to bottom", near(weightAt(grad, 999), 0.0));
 check("constant mode is flat", near(weightAt({ mode: "constant", value: 0.16 }, 12), 0.16));
 
+console.log("\ncontour mesh (P1-A, absorption plan #8)");
+{
+  // A minimal baked contour mesh: a right triangle at canvas (100,100)-
+  // (100,120)-(120,120), inside a part box of (100,100)-(140,140).
+  const contourPart = {
+    xyxy: [100, 100, 140, 140],
+    weight: { mode: "constant", value: 0.7 },
+    mesh: {
+      kind: "contour",
+      vertices: [[100, 100], [100, 120], [120, 120]],
+      triangles: [[0, 1, 2]],
+    },
+  };
+  const mesh = buildMesh(contourPart);
+  check("contour mesh keeps exactly the baked vertex count", mesh.rest.length / 2 === 3);
+  check("contour mesh keeps exactly the baked triangle", mesh.count === 3);
+  check("contour vertex 0 lands at its baked canvas position",
+        near(mesh.rest[0], 100) && near(mesh.rest[1], 100));
+  check("contour UV is derived from the part's own xyxy box",
+        near(mesh.uv[0], 0) && near(mesh.uv[1], 0)      // vertex 0: (100,100) -> (0,0)
+        && near(mesh.uv[2], 0) && near(mesh.uv[3], 0.5)  // vertex 1: (100,120) -> (0,0.5)
+        && near(mesh.uv[4], 0.5) && near(mesh.uv[5], 0.5));
+  check("contour mesh weight comes from the part's own weight spec, same as grid",
+        near(mesh.weight[0], 0.7) && near(mesh.weight[1], 0.7) && near(mesh.weight[2], 0.7));
+  check("contour wireframe has exactly the triangle's three edges",
+        mesh.wireCount === 6);  // 3 edges * 2 indices each, none shared to dedupe away
+
+  // A part with no mesh.kind (or a plain "grid" kind) is completely
+  // unaffected: same code path, same output, as every P0 test above proves.
+  const gridPart = {
+    xyxy: [100, 100, 140, 140],
+    weight: { mode: "constant", value: 0.7 },
+    mesh: { kind: "grid", cell: 20 },
+  };
+  const gridMesh = buildMesh(gridPart);
+  check("a grid-kind part is untouched by the contour path",
+        gridMesh.rest.length === (2 + 1) * (2 + 1) * 2);  // 40px / 20px cell -> 2x2 cells, 3x3 verts
+}
+
 // A minimal scene: one neck part with the manifest gradient, two head parts at
 // different depths, one eye part.
 state.canvasW = 1000; state.canvasH = 1000;

@@ -380,25 +380,20 @@ export function shellDelta(shell, x, y, yaw, pitch, out = SHELL_OUT) {
   return out;
 }
 
-export function buildMesh(part) {
+/** Uniform grid: the P0 default, unchanged from before P1-A. Returns
+ *  `{pts, idx, wire}` -- `pts` as `{x, y, u, v}`, canvas-absolute position
+ *  plus the UV it was generated from (not re-derived from x/y, so this is
+ *  bit-for-bit the arithmetic buildMesh always did). */
+function gridVertexList(part) {
   const [x1, y1, x2, y2] = part.xyxy;
   const cell = Math.max(4, part.mesh.cell);
   const cols = Math.max(1, Math.round((x2 - x1) / cell));
   const rows = Math.max(1, Math.round((y2 - y1) / cell));
-  const rest = [], uv = [], weight = [], ramp = [];
-  const spec = part.weight;
-  const span = spec.mode === "gradient_y" ? spec.top - spec.bottom : 0;
+  const pts = [];
   for (let r = 0; r <= rows; r++) {
     for (let c = 0; c <= cols; c++) {
       const u = c / cols, v = r / rows;
-      const x = x1 + (x2 - x1) * u, y = y1 + (y2 - y1) * v;
-      const w = weightAt(spec, y);
-      rest.push(x, y);
-      uv.push(u, v);
-      weight.push(w);
-      // Where this vertex sits along its gradient, 0 at the bottom value and 1
-      // at the top, so a slider can re-aim the top without a rebuild.
-      ramp.push(span === 0 ? 0 : (w - spec.bottom) / span);
+      pts.push({ x: x1 + (x2 - x1) * u, y: y1 + (y2 - y1) * v, u, v });
     }
   }
   const idx = [], wire = [];
@@ -411,6 +406,55 @@ export function buildMesh(part) {
       if (c === cols - 1) wire.push(b, e);
       if (r === rows - 1) wire.push(d, e);
     }
+  }
+  return { pts, idx, wire };
+}
+
+/** Contour mesh (P1-A, absorption plan #8): `part.mesh.vertices`/`.triangles`
+ *  are baked at compile time (`mesh.contour_mesh` in the Python compiler) --
+ *  this only reads them and derives UV/wireframe from them, the same way
+ *  the grid path derives UV from its own procedural vertices. Wireframe
+ *  edges come from the triangle list directly (every triangle edge,
+ *  deduplicated) rather than grid row/col adjacency, so the debug overlay
+ *  shows the real triangulation, diagonals included. */
+function contourVertexList(part) {
+  const [x1, y1, x2, y2] = part.xyxy;
+  const width = x2 - x1, height = y2 - y1;
+  const pts = part.mesh.vertices.map(([x, y]) => ({
+    x, y,
+    u: width === 0 ? 0 : (x - x1) / width,
+    v: height === 0 ? 0 : (y - y1) / height,
+  }));
+  const idx = [];
+  for (const [a, b, c] of part.mesh.triangles) idx.push(a, b, c);
+  const seen = new Set();
+  const wire = [];
+  const addEdge = (a, b) => {
+    const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    wire.push(a, b);
+  };
+  for (const [a, b, c] of part.mesh.triangles) { addEdge(a, b); addEdge(b, c); addEdge(c, a); }
+  return { pts, idx, wire };
+}
+
+export function buildMesh(part) {
+  const isContour = part.mesh && part.mesh.kind === "contour"
+    && part.mesh.vertices && part.mesh.triangles;
+  const { pts, idx, wire } = isContour ? contourVertexList(part) : gridVertexList(part);
+
+  const rest = [], uv = [], weight = [], ramp = [];
+  const spec = part.weight;
+  const span = spec.mode === "gradient_y" ? spec.top - spec.bottom : 0;
+  for (const p of pts) {
+    const w = weightAt(spec, p.y);
+    rest.push(p.x, p.y);
+    uv.push(p.u, p.v);
+    weight.push(w);
+    // Where this vertex sits along its gradient, 0 at the bottom value and 1
+    // at the top, so a slider can re-aim the top without a rebuild.
+    ramp.push(span === 0 ? 0 : (w - spec.bottom) / span);
   }
   return {
     rest: new Float32Array(rest), uv: new Float32Array(uv),

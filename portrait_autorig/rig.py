@@ -18,7 +18,7 @@ from PIL import Image
 from . import soft_morph
 from .image import composite_layers, crop_to_alpha, rest_fidelity
 from .manifest import RIG_MANIFEST_VERSION_01, upgrade_manifest_v01_to_v02
-from .mesh import mesh_spec
+from .mesh import contour_mesh_spec, mesh_spec
 from .semantic import SEMANTIC_Z_ORDER
 
 __all__ = [
@@ -894,6 +894,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
               frame_size: tuple[int, int] | None = None,
               alpha_threshold: int = 10,
               gradient_tags: Collection[str] = (),
+              contour_tags: Collection[str] = (),
               run_id: str = "", tag_version: str = "",
               image_prefix: str = f"{RIG_SUBDIR}/images",
               motion: dict[str, Any] | None = None,
@@ -911,6 +912,13 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     `gradient_tags` forces a head-to-body vertical falloff onto tags that would
     otherwise follow the head rigidly; `("back hair",)` is the case the
     feasibility doc calls out.
+
+    `contour_tags` opts specific tags into the experimental contour mesh
+    backend (absorption plan #8, P1-A) instead of the grid default, for A/B
+    comparison against it (`preview/check_mesh_quality.mjs`, P1-B). A tag
+    whose alpha does not actually triangulate -- more than one disconnected
+    island, most commonly -- silently falls back to grid, exactly as if it
+    had not been listed; see `mesh.contour_mesh`.
     """
     working: dict[str, np.ndarray] = {}
     for tag, img in layer_dict.items():
@@ -1057,8 +1065,12 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
             "z": z,
             "weight": weight,
             # Anything deforming along a gradient gets the finer cell: that is
-            # where a coarse grid shows up as faceting.
-            "mesh": mesh_spec((canvas_h, canvas_w), fine=weight["mode"] == "gradient_y"),
+            # where a coarse grid shows up as faceting. Opted-in tags try the
+            # contour backend first and fall back to grid when it declines
+            # (multi-island alpha; see mesh.contour_mesh).
+            "mesh": ((tag in contour_tags
+                     and contour_mesh_spec(crop_img[..., 3], tuple(int(v) for v in xyxy)))
+                    or mesh_spec((canvas_h, canvas_w), fine=weight["mode"] == "gradient_y")),
         })
         if derived_report and derived_report.get("succeeded") and tag in derived_report["parts"]:
             parts[-1]["derived"] = True
