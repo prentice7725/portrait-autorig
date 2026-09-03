@@ -1,0 +1,190 @@
+"""Assembly Bundle v0.2 reader ("AutoRig Assembly input seam", Master doc
+`SEETHROUGH_COMPOSER_AUTORIG_RESPONSIBILITY_VERSIONUP_MASTER_v0.2.md` #22
+STEP 2).
+
+Reads what `portrait-composer` actually writes
+(`portrait_composer.bundle.write_assembly_bundle`), against that repo's real
+schema (`schemas/portrait-assembly-v0.2.schema.json`):
+
+    A001.assembly/
+        manifest.json
+        reference.png
+        layers/<instance_id>.png
+        expressions/, masks/, diagnostics/   (present, not yet read here)
+
+AutoRig reads (directive #4): canvas, final instances/layers, draw_order,
+the Assembly Reference, VariantSets, RigIntent, provenance. It must NOT
+read: donor originals, source decomposition choices, or bake choices --
+none of those live in an Assembly Bundle; Composer already resolved them.
+Concretely, that means the missing-eyewhite derivation `rig.py` can run for
+Portrait Bundle input (`original_rgba` comparison) never runs here: an
+Assembly Bundle has no "original photo" to compare against, and asking for
+one would be reading exactly the donor material this seam must not touch.
+
+This module owns only the seam: Assembly Bundle -> the same
+`{tag: full-canvas RGBA}` working set (plus an explicit `draw_order`) that
+`rig.build_rig` already consumes for Portrait Bundle input, so every
+existing Stage A-D derivation (remainder split, eye split, anchors, depth,
+weight, mesh) runs completely unchanged regardless of which bundle produced
+its input.
+
+Positioning (scale -> rotate -> translate, same resampling filters) mirrors
+`portrait_composer.render._positioned`/`_composite` exactly, so a rig
+compiled from an Assembly Bundle can be checked against that bundle's own
+`reference.png` (see `compiler.compile_assembly_asset`'s rest_fidelity
+check) the same way Portrait Bundle input is checked against its own
+canonical composite. This module does not import `portrait_composer`
+(Architecture Invariant #15, Master doc #23: a versioned bundle contract
+over a cross-repo private import) -- it reimplements the documented
+positioning contract instead.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+from PIL import Image
+
+__all__ = ["ASSEMBLY_FORMAT", "AssemblyAsset", "load_assembly_bundle"]
+
+ASSEMBLY_FORMAT = "portrait-assembly"
+
+
+@dataclass(frozen=True)
+class AssemblyAsset:
+    root: Path
+    canvas: tuple[int, int]            # (width, height)
+    layers: dict[str, np.ndarray]      # semantic tag -> full-canvas RGBA
+    body_remainder: np.ndarray | None
+    draw_order: list[str]              # semantic tags, Composer's authored paint order
+    rig_intent: dict[str, Any]
+    variant_sets: dict[str, Any]
+    reference: np.ndarray              # Composer's own rendered reference.png
+    source_id: str
+
+
+def _read_json(path: Path) -> dict:
+    with path.open(encoding="utf-8") as f:
+        value = json.load(f)
+    if not isinstance(value, dict):
+        raise ValueError(f"JSON object required: {path}")
+    return value
+
+
+def _position(img: Image.Image, transform: dict[str, Any]) -> tuple[Image.Image, tuple[int, int]]:
+    """`portrait_composer.render._positioned`, reimplemented against the
+    documented contract: scale (LANCZOS) -> rotate (BICUBIC, expand,
+    centre-adjusted) -> translate."""
+    w, h = img.size
+    scale_x = float(transform.get("scale_x", 1.0))
+    scale_y = float(transform.get("scale_y", 1.0))
+    if scale_x != 1.0 or scale_y != 1.0:
+        new_w, new_h = max(1, round(w * scale_x)), max(1, round(h * scale_y))
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+        w, h = new_w, new_h
+    ox, oy = 0, 0
+    rotation = float(transform.get("rotation", 0.0))
+    if rotation:
+        pre_w, pre_h = w, h
+        img = img.rotate(-rotation, expand=True, resample=Image.BICUBIC)
+        w, h = img.size
+        ox, oy = (w - pre_w) // 2, (h - pre_h) // 2
+    x = round(float(transform.get("x", 0.0))) - ox
+    y = round(float(transform.get("y", 0.0))) - oy
+    return img, (x, y)
+
+
+def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
+    """Read an Assembly Bundle directory into an `AssemblyAsset`.
+
+    Instances are composited in `composition.draw_order` (falling back to
+    `instances`' own insertion order when absent), skipping any instance
+    that is not `visible` or has `opacity <= 0` -- exactly
+    `portrait_composer.render._composite`'s own filter, so a VariantSet's
+    inactive members (already reflected in their `visible` flag by
+    Composer's own `variants.set_active`) are silently excluded here rather
+    than needing their own handling. More than one visible instance sharing
+    one semantic tag are composited together, in draw order, into that
+    tag's one layer -- this is what "draw order" means for two instances
+    that occupy the same semantic role.
+    """
+    root = Path(directory).resolve()
+    manifest_path = root / "manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"not an Assembly Bundle (missing manifest.json): {root}")
+    manifest = _read_json(manifest_path)
+    if manifest.get("format") != ASSEMBLY_FORMAT:
+        raise ValueError(f"not an Assembly Bundle: format={manifest.get('format')!r}")
+    version = str(manifest.get("version", ""))
+    if version.split(".", 1)[0] != "0":
+        raise ValueError(f"unsupported Assembly Bundle version: {version!r}")
+
+    composition = manifest.get("composition") or {}
+    canvas_info = composition.get("canvas") or {}
+    width, height = int(canvas_info.get("width", 0)), int(canvas_info.get("height", 0))
+    if width <= 0 or height <= 0:
+        raise ValueError("Assembly Bundle composition.canvas is missing or empty")
+    if canvas_info.get("coordinate_system", "top-left-y-down") != "top-left-y-down":
+        raise ValueError("unsupported coordinate system")
+    if (canvas_info.get("color_space", "srgb") != "srgb"
+            or canvas_info.get("alpha", "straight") != "straight"):
+        raise ValueError("Assembly Bundle must use sRGB straight-alpha images")
+
+    assets = manifest.get("assets") or {}
+    instances = manifest.get("instances") or {}
+    draw_order_ids = composition.get("draw_order") or list(instances)
+    layers_dir = root / "layers"
+
+    canvas_layers: dict[str, Image.Image] = {}
+    draw_order: list[str] = []
+    for inst_id in draw_order_ids:
+        inst = instances.get(inst_id)
+        if inst is None:
+            raise ValueError(f"composition.draw_order references unknown instance {inst_id!r}")
+        if not inst.get("visible", True) or float(inst.get("opacity", 1.0)) <= 0.0:
+            continue
+        asset = assets.get(inst["asset_ref"])
+        if asset is None:
+            raise ValueError(f"instance {inst_id!r} references unknown asset {inst['asset_ref']!r}")
+        tag = str(asset["semantic"])
+        image_path = layers_dir / f"{inst_id}.png"
+        if not image_path.is_file():
+            raise FileNotFoundError(f"layer image missing for instance {inst_id!r}: {image_path}")
+        with Image.open(image_path) as raw:
+            im = raw.convert("RGBA")
+            opacity = float(inst.get("opacity", 1.0))
+            if opacity < 1.0:
+                r, g, b, a = im.split()
+                a = a.point(lambda v: round(v * opacity))
+                im = Image.merge("RGBA", (r, g, b, a))
+            positioned, (x, y) = _position(im, inst.get("transform") or {})
+            if tag not in canvas_layers:
+                canvas_layers[tag] = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+                draw_order.append(tag)
+            canvas_layers[tag].alpha_composite(positioned, dest=(x, y))
+
+    if not canvas_layers:
+        raise ValueError("Assembly Bundle has no visible instances")
+
+    layers = {tag: np.array(img, dtype=np.uint8) for tag, img in canvas_layers.items()}
+    body_remainder = layers.pop("body_remainder", None)
+
+    reference_path = root / "reference.png"
+    if not reference_path.is_file():
+        raise FileNotFoundError(f"Assembly Bundle is missing its reference.png: {root}")
+    with Image.open(reference_path) as ref:
+        reference = np.array(ref.convert("RGBA"), dtype=np.uint8)
+
+    return AssemblyAsset(
+        root=root, canvas=(width, height), layers=layers, body_remainder=body_remainder,
+        draw_order=draw_order,
+        rig_intent=manifest.get("rig_intent") or {},
+        variant_sets=manifest.get("variant_sets") or {},
+        reference=reference,
+        source_id=root.name,
+    )

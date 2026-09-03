@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from typing import Any
 
 import cv2
@@ -887,6 +887,38 @@ def render_rig_rest(parts: Collection[dict[str, Any]], images: dict[str, np.ndar
     return composite_layers(full_layers, (canvas_h, canvas_w), order=tuple(ordered_tags))
 
 
+def _draw_rank(tag: str, draw_order: Sequence[str] | None,
+               depth_parent: dict[str, str]) -> tuple[int, int]:
+    """Paint-order sort key for one tag (`draw_order != motion_depth`).
+
+    With no `draw_order` supplied, this is exactly today's canonical
+    semantic table lookup -- the existing Portrait Bundle path is
+    untouched. With one supplied (Assembly Bundle input), a tag `draw_order`
+    itself lists ranks first; a tag it never saw -- a remainder split, an
+    eye split, a derived-eyewhite overlay, all AutoRig-only derivations
+    Composer has no concept of -- walks `depth_parent` up to whichever
+    ancestor *is* listed and inherits its rank, with the canonical table as
+    a tiebreak among several derived tags sharing one parent (so e.g.
+    `eyewhitel`/`eyewhiter` stay adjacent rather than landing in dict
+    iteration order). A tag with no listed ancestor at all sorts after
+    everything Composer authored, rather than being silently dropped to the
+    back or the front.
+    """
+    if draw_order is None:
+        return (RIG_Z_ORDER.index(tag) if tag in RIG_Z_ORDER else -1, 0)
+    lookup = tag
+    seen: set[str] = set()
+    while lookup not in draw_order:
+        parent = depth_parent.get(lookup, lookup)
+        if parent == lookup or parent in seen:
+            break
+        seen.add(lookup)
+        lookup = parent
+    if lookup in draw_order:
+        return (draw_order.index(lookup), RIG_Z_ORDER.index(tag) if tag in RIG_Z_ORDER else 0)
+    return (len(draw_order), RIG_Z_ORDER.index(tag) if tag in RIG_Z_ORDER else -1)
+
+
 def build_rig(layer_dict: dict[str, np.ndarray], *,
               original_rgba: np.ndarray | None = None,
               body_remainder: np.ndarray | None = None,
@@ -895,6 +927,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
               alpha_threshold: int = 10,
               gradient_tags: Collection[str] = (),
               contour_tags: Collection[str] = (),
+              draw_order: Sequence[str] | None = None,
               run_id: str = "", tag_version: str = "",
               image_prefix: str = f"{RIG_SUBDIR}/images",
               motion: dict[str, Any] | None = None,
@@ -919,6 +952,19 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     whose alpha does not actually triangulate -- more than one disconnected
     island, most commonly -- silently falls back to grid, exactly as if it
     had not been listed; see `mesh.contour_mesh`.
+
+    `draw_order` is Composer's own authored paint order (`assembly.
+    AssemblyAsset.draw_order`) -- `draw_order != motion_depth`
+    (`PORTRAIT_AUTORIG_IMPLEMENTATION_DIRECTIVE_v0.2.md` #5, Master doc #7,
+    #23 invariant #5): `parts[].z` (paint order) follows it when given,
+    while `parts[].depth` (parallax strength) is still computed from
+    `_DEPTH_TABLE`/`depth_dict` exactly as always -- AutoRig's own motion
+    semantics never redefine Composer's draw order. A tag `draw_order`
+    never saw (a remainder split, an eye split, a derived-eyewhite overlay --
+    all AutoRig-only derivations Composer has no concept of) inherits its
+    parent's position instead of an arbitrary fallback; see `_draw_rank`.
+    None (the default, and every existing Portrait Bundle caller) reproduces
+    today's canonical-semantic-table ordering exactly.
     """
     working: dict[str, np.ndarray] = {}
     for tag, img in layer_dict.items():
@@ -938,7 +984,15 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     canonical_layers = dict(layer_dict)
     if body_remainder is not None:
         canonical_layers[BODY_REMAINDER] = np.asarray(body_remainder)
-    canonical_reference = composite_layers(canonical_layers, (canvas_h, canvas_w))
+    # With no draw_order this is composite_layers' own default
+    # (SEMANTIC_Z_ORDER) -- today's Portrait Bundle behaviour, unchanged.
+    # With one supplied, the canonical reference has to be composited in
+    # *that* order too, or rest_fidelity below would be comparing the rig's
+    # own draw_order-ordered rest render against a differently-ordered
+    # reference and could fail spuriously on a correctly-compiled rig.
+    canonical_order = (tuple(draw_order) if draw_order is not None else SEMANTIC_Z_ORDER)
+    canonical_reference = composite_layers(canonical_layers, (canvas_h, canvas_w),
+                                           order=canonical_order)
     if preflight is None:
         preflight = rig_preflight(layer_dict, original_rgba=original_rgba,
                                   body_remainder=body_remainder,
@@ -1040,9 +1094,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
                 depth = float(np.median(estimated[visible]))
         depths[tag] = round(float(depth), 4)
 
-    ordered = sorted(working, key=lambda tag: (
-        RIG_Z_ORDER.index(tag) if tag in RIG_Z_ORDER else -1
-    ))
+    ordered = sorted(working, key=lambda tag: _draw_rank(tag, draw_order, depth_parent))
 
     parts: list[dict[str, Any]] = []
     images: dict[str, np.ndarray] = {}
@@ -1082,6 +1134,11 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
             "run_id": run_id,
             "tag_version": tag_version,
             "depth": "marigold" if depth_dict else "table",
+            # draw_order != motion_depth: which one decided parts[].z for
+            # this compile -- Composer's authored order, or AutoRig's own
+            # canonical semantic table (the Portrait Bundle path's only
+            # option, and every draw_order-less caller's default).
+            "draw_order": "assembly" if draw_order is not None else "table",
         },
         "anchors": anchors,
         "parts": parts,
