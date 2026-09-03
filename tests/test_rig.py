@@ -419,6 +419,26 @@ class BuildRigTests(unittest.TestCase):
                          {"parallax_turn", "shell_turn", "weighted_rotation",
                           "continuous_field", "eye_fold"})
 
+    def test_every_part_carries_a_frozen_mesh_topology_hash(self):
+        # directive v0.2 #11-12 (P0-G): generate mesh -> hash -> freeze.
+        manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS))
+        for part in manifest["parts"]:
+            self.assertIn("topology_hash", part["mesh"])
+            self.assertTrue(part["mesh"]["topology_hash"].startswith("sha256:"))
+
+    def test_manifest_has_an_evaluation_phase_contract(self):
+        manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS))
+        self.assertIn("evaluation", manifest)
+        self.assertIn("phases", manifest["evaluation"])
+        for deformer in manifest["deformers"]:
+            self.assertIn(deformer["phase"], manifest["evaluation"]["phases"])
+
+    def test_manifest_has_a_capability_report(self):
+        manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS))
+        self.assertIn("capabilities", manifest)
+        self.assertEqual(manifest["capabilities"]["head_turn"], "ready")
+        self.assertIn(manifest["capabilities"]["mouth_open"], {"ready", "degraded", "disabled"})
+
     def test_default_draw_order_matches_the_canonical_semantic_table(self):
         # No draw_order supplied (every Portrait Bundle caller) reproduces
         # today's ordering exactly -- draw_order != motion_depth, directive

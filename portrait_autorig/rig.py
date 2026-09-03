@@ -16,10 +16,12 @@ import numpy as np
 from PIL import Image
 
 from . import soft_morph
+from .capability import capability_report
 from .image import composite_layers, crop_to_alpha, rest_fidelity
 from .manifest import RIG_MANIFEST_VERSION_01, upgrade_manifest_v01_to_v02
 from .mesh import contour_mesh_spec, mesh_spec
 from .semantic import SEMANTIC_Z_ORDER
+from .topology import mesh_topology_hash
 
 __all__ = [
     "GROUP_HEAD", "GROUP_NECK", "GROUP_BODY",
@@ -1124,6 +1126,18 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         group = group_for_tag(tag)
         weight = _weight_for(tag, group, tuple(xyxy), neck_box, gradient_tags)
         images[name] = crop_img
+        # Anything deforming along a gradient gets the finer cell: that is
+        # where a coarse grid shows up as faceting. Opted-in tags try the
+        # contour backend first and fall back to grid when it declines
+        # (multi-island alpha; see mesh.contour_mesh).
+        part_mesh = ((tag in contour_tags
+                     and contour_mesh_spec(crop_img[..., 3], tuple(int(v) for v in xyxy)))
+                    or mesh_spec((canvas_h, canvas_w), fine=weight["mode"] == "gradient_y"))
+        # Topology freeze (directive v0.2 #11-12): generate mesh -> hash ->
+        # freeze. Downstream weights/keyforms/constraints/physics bindings
+        # (once they exist) invalidate on a hash mismatch rather than being
+        # silently reused; see topology.topology_changed.
+        part_mesh["topology_hash"] = mesh_topology_hash(part_mesh, tuple(int(v) for v in xyxy))
         parts.append({
             "name": name,
             "tag": tag,
@@ -1133,13 +1147,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
             "depth": depths[tag],
             "z": z,
             "weight": weight,
-            # Anything deforming along a gradient gets the finer cell: that is
-            # where a coarse grid shows up as faceting. Opted-in tags try the
-            # contour backend first and fall back to grid when it declines
-            # (multi-island alpha; see mesh.contour_mesh).
-            "mesh": ((tag in contour_tags
-                     and contour_mesh_spec(crop_img[..., 3], tuple(int(v) for v in xyxy)))
-                    or mesh_spec((canvas_h, canvas_w), fine=weight["mode"] == "gradient_y")),
+            "mesh": part_mesh,
         })
         if derived_report and derived_report.get("succeeded") and tag in derived_report["parts"]:
             parts[-1]["derived"] = True
@@ -1177,6 +1185,11 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     manifest["rest_fidelity"] = rest_fidelity(
         canonical_reference, rig_rest, alpha_threshold=alpha_threshold
     )
+    # Capability Report (directive v0.2 #34-35, Master doc #19): what this
+    # *compiled* rig can actually do, separate from whether the compile
+    # itself succeeded (QA) -- derived from the final parts and preflight,
+    # never re-run against the input.
+    manifest["capabilities"] = capability_report(parts, preflight)
     # Every v0.1 field constructed above (parts/anchors/motion/rest_fidelity/
     # rig_preflight/derived_semantics/...) is preserved verbatim; this only
     # adds parameters[]/deformers[]/drivers[] and bumps `version` to "0.2".
