@@ -1,12 +1,15 @@
 """Tests for assembly.py -- the Assembly Bundle v0.2 reader (Master doc
 STEP 2, "AutoRig Assembly input seam").
 
-Positioning is verified against real `portrait-composer` output directly in
-a manual smoke test (byte-exact vs `reference.png`, including a real
-translate+scale+rotate transform) rather than here, since that repo is not
-a dependency of this one. These tests cover the reader's own contract: the
-manifest shape it accepts, what it does with visibility/opacity/multi-
-instance tags, and what it rejects.
+`AssemblyBundleBuilder.write()`'s own reference.png is built with the exact
+same `_position` this module uses, so `PositioningTests` below checks the
+reader's positioning against it directly, including a real translate+scale+
+rotate transform. This has additionally been verified against real
+`portrait-composer` output (not just this file's own fixtures) in a manual
+smoke test: byte-exact vs its actual `reference.png`, portrait-composer's
+own `identity_assembly`/`write_assembly_bundle`. The rest of this file
+covers the reader's own contract: the manifest shape it accepts, what it
+does with visibility/opacity/multi-instance tags, and what it rejects.
 """
 
 from __future__ import annotations
@@ -19,7 +22,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from portrait_autorig.assembly import load_assembly_bundle
+from portrait_autorig.assembly import _position, load_assembly_bundle
+from portrait_autorig.image import composite_layers
 
 CANVAS = 40
 
@@ -82,18 +86,56 @@ class AssemblyBundleBuilder:
         }
         (self.root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         if not omit_reference:
-            # A plausible-enough reference: composite of everything visible,
-            # matching what render_reference would produce for these
-            # fixtures. Not exercised for pixel equality here (see module
-            # docstring) -- just needs to exist and be readable.
+            # Applies visible/opacity/transform exactly like `assembly.
+            # load_assembly_bundle` itself (reusing its own `_position`), so
+            # this fixture's reference.png is trustworthy ground truth for a
+            # rest_reference check even when an instance carries a real
+            # transform -- not just a plausible stand-in.
             ref = Image.new("RGBA", self.canvas, (0, 0, 0, 0))
-            for inst in self.instances.values():
+            for inst_id in self.draw_order:
+                inst = self.instances[inst_id]
                 if not inst["visible"] or inst["opacity"] <= 0:
                     continue
-                with Image.open(self.root / "layers" / f"{inst['id']}.png") as im:
-                    ref.alpha_composite(im.convert("RGBA"))
+                with Image.open(self.root / "layers" / f"{inst_id}.png") as raw:
+                    im = raw.convert("RGBA")
+                    opacity = inst["opacity"]
+                    if opacity < 1.0:
+                        r, g, b, a = im.split()
+                        a = a.point(lambda v: round(v * opacity))
+                        im = Image.merge("RGBA", (r, g, b, a))
+                    positioned, (x, y) = _position(im, inst["transform"])
+                    ref.alpha_composite(positioned, dest=(x, y))
             ref.save(self.root / "reference.png")
         return self.root
+
+
+class PositioningTests(unittest.TestCase):
+    """The reader's own composite reproduces the fixture's reference.png
+    exactly, including a real transform -- the property `rig.build_rig`'s
+    `rest_reference` check now depends on."""
+
+    def test_identity_transform_matches_reference_exactly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "A001.assembly"
+            builder = AssemblyBundleBuilder(root)
+            builder.add_instance("neck_i", semantic="neck", box=(10, 20, 30, 40))
+            builder.add_instance("topwear_i", semantic="topwear", box=(0, 15, 40, 40))
+            builder.write()
+            asset = load_assembly_bundle(root)
+        composite = composite_layers(asset.layers, asset.canvas[::-1], order=tuple(asset.draw_order))
+        self.assertTrue(np.array_equal(composite, asset.reference))
+
+    def test_translate_scale_rotate_transform_matches_reference_exactly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "A001.assembly"
+            builder = AssemblyBundleBuilder(root)
+            transform = {"x": 3.0, "y": -2.0, "scale_x": 1.3, "scale_y": 0.7, "rotation": 12.0}
+            builder.add_instance("neck_i", semantic="neck", box=(10, 20, 30, 40))
+            builder.add_instance("topwear_i", semantic="topwear", box=(2, 15, 38, 39), transform=transform)
+            builder.write()
+            asset = load_assembly_bundle(root)
+        composite = composite_layers(asset.layers, asset.canvas[::-1], order=tuple(asset.draw_order))
+        self.assertTrue(np.array_equal(composite, asset.reference))
 
 
 class LoadAssemblyBundleTests(unittest.TestCase):
@@ -229,6 +271,71 @@ class LoadAssemblyBundleTests(unittest.TestCase):
             builder.write(version="1.0")
             with self.assertRaises(ValueError):
                 load_assembly_bundle(root)
+
+    def test_minor_version_bump_is_rejected_not_just_major(self):
+        # Exact match, not a major-version prefix check: pre-1.0, 0.2 -> 0.3
+        # can be a breaking contract change.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "A001.assembly"
+            builder = AssemblyBundleBuilder(root)
+            builder.add_instance("neck_i", semantic="neck", box=(10, 20, 30, 40))
+            builder.write(version="0.3")
+            with self.assertRaises(ValueError):
+                load_assembly_bundle(root)
+
+    def test_missing_draw_order_is_rejected_not_invented(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "A001.assembly"
+            builder = AssemblyBundleBuilder(root)
+            builder.add_instance("neck_i", semantic="neck", box=(10, 20, 30, 40))
+            builder.write()
+            manifest_path = root / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["composition"]["draw_order"] = []
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_assembly_bundle(root)
+
+    def test_non_contiguous_same_semantic_instances_are_rejected(self):
+        # neck_i / neck2_i share "neck" but topwear_i is drawn between them
+        # -- flattening the two neck instances into one bitmap would lose
+        # exactly which side of topwear each one belongs on.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "A001.assembly"
+            builder = AssemblyBundleBuilder(root)
+            builder.add_instance("neck_i", semantic="neck", box=(10, 20, 20, 30))
+            builder.add_instance("topwear_i", semantic="topwear", box=(0, 25, 40, 40))
+            builder.add_instance("neck2_i", semantic="neck", box=(20, 20, 30, 30))
+            builder.write()
+            with self.assertRaises(ValueError):
+                load_assembly_bundle(root)
+
+    def test_contiguous_same_semantic_instances_are_accepted(self):
+        # Same shape as above, but the two "neck" instances are adjacent --
+        # nothing is lost by flattening them together.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "A001.assembly"
+            builder = AssemblyBundleBuilder(root)
+            builder.add_instance("neck_i", semantic="neck", box=(10, 20, 20, 30))
+            builder.add_instance("neck2_i", semantic="neck", box=(20, 20, 30, 30))
+            builder.add_instance("topwear_i", semantic="topwear", box=(0, 25, 40, 40))
+            builder.write()
+            asset = load_assembly_bundle(root)  # must not raise
+        self.assertEqual(set(asset.layers), {"neck", "topwear"})
+
+    def test_an_invisible_instance_between_same_semantic_instances_does_not_break_contiguity(self):
+        # The gap is only real if something *visible* was meant to draw
+        # between them; an invisible/zero-opacity instance in between must
+        # not trip the contiguity check.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "A001.assembly"
+            builder = AssemblyBundleBuilder(root)
+            builder.add_instance("neck_i", semantic="neck", box=(10, 20, 20, 30))
+            builder.add_instance("hidden_i", semantic="topwear", box=(0, 25, 40, 40), visible=False)
+            builder.add_instance("neck2_i", semantic="neck", box=(20, 20, 30, 30))
+            builder.write()
+            asset = load_assembly_bundle(root)  # must not raise
+        self.assertEqual(set(asset.layers), {"neck"})
 
     def test_missing_layer_image_raises(self):
         with tempfile.TemporaryDirectory() as tmp:

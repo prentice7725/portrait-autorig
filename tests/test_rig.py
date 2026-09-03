@@ -419,6 +419,26 @@ class BuildRigTests(unittest.TestCase):
                          {"parallax_turn", "shell_turn", "weighted_rotation",
                           "continuous_field", "eye_fold"})
 
+    def test_every_part_carries_a_frozen_mesh_topology_hash(self):
+        # directive v0.2 #11-12 (P0-G): generate mesh -> hash -> freeze.
+        manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS))
+        for part in manifest["parts"]:
+            self.assertIn("topology_hash", part["mesh"])
+            self.assertTrue(part["mesh"]["topology_hash"].startswith("sha256:"))
+
+    def test_manifest_has_an_evaluation_phase_contract(self):
+        manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS))
+        self.assertIn("evaluation", manifest)
+        self.assertIn("phases", manifest["evaluation"])
+        for deformer in manifest["deformers"]:
+            self.assertIn(deformer["phase"], manifest["evaluation"]["phases"])
+
+    def test_manifest_has_a_capability_report(self):
+        manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS))
+        self.assertIn("capabilities", manifest)
+        self.assertEqual(manifest["capabilities"]["head_turn"], "ready")
+        self.assertIn(manifest["capabilities"]["mouth_open"], {"ready", "degraded", "disabled"})
+
     def test_default_draw_order_matches_the_canonical_semantic_table(self):
         # No draw_order supplied (every Portrait Bundle caller) reproduces
         # today's ordering exactly -- draw_order != motion_depth, directive
@@ -460,6 +480,32 @@ class BuildRigTests(unittest.TestCase):
         self.assertLess(tags_by_z.index("neck"), tags_by_z.index("topwear"))
         for unlisted in ("head", "face", "back hair", "mouth"):
             self.assertGreater(tags_by_z.index(unlisted), tags_by_z.index("topwear"))
+
+    def test_rest_reference_none_keeps_the_self_recomposited_check(self):
+        manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS))
+        self.assertEqual(manifest["rest_fidelity"]["status"], "pass")
+
+    def test_rest_reference_matching_the_natural_composite_still_passes(self):
+        # A caller-supplied reference that agrees with what AutoRig would
+        # have recomposited itself changes nothing.
+        natural = composite_layers(self.layers, (CANVAS, CANVAS))
+        manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS), rest_reference=natural)
+        self.assertEqual(manifest["rest_fidelity"]["status"], "pass")
+
+    def test_rest_reference_overrides_the_internal_composite_and_can_fail(self):
+        # This is the actual point of the parameter (Assembly Truth, Master
+        # doc #2): a rest_reference that disagrees with the rig's own rest
+        # render must be able to fail the check, not be silently ignored in
+        # favour of a self-consistent internal recomposite.
+        wrong_reference = np.zeros((CANVAS, CANVAS, 4), dtype=np.uint8)  # fully transparent
+        manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS),
+                                rest_reference=wrong_reference)
+        self.assertEqual(manifest["rest_fidelity"]["status"], "fail")
+
+    def test_rest_reference_shape_mismatch_raises(self):
+        wrong_shape = np.zeros((CANVAS, CANVAS, 3), dtype=np.uint8)  # missing alpha channel
+        with self.assertRaises(ValueError):
+            build_rig(self.layers, frame_size=(CANVAS, CANVAS), rest_reference=wrong_shape)
 
     def test_contour_tags_opts_a_part_into_the_contour_mesh_backend(self):
         # absorption plan #8 (P1-A): grid stays the default everywhere else,

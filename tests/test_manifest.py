@@ -133,6 +133,47 @@ class DeformersFromMotionTests(unittest.TestCase):
         for d in manifest.deformers_from_motion(motion):
             self.assertIn(d["kind"], manifest.DEFORMER_KINDS)
 
+    def test_every_synthesized_deformer_carries_a_known_phase(self):
+        motion = {
+            "head_turn": {"max_x": 0.8, "max_y": 0.8},
+            "head_tilt": {"max_deg": 2.0},
+            "breathing": {"period_s": 4.0},
+            "blink": {"close_s": 0.08},
+        }
+        for d in manifest.deformers_from_motion(motion):
+            self.assertIn(d["phase"], manifest.EVALUATION_PHASES)
+
+
+class EvaluationPhaseTests(unittest.TestCase):
+    def test_phase_order_matches_the_directive_exactly(self):
+        # directive v0.2 #13: base, primary, corrective, secondary,
+        # constraints, visibility, render, in that fixed order.
+        self.assertEqual(manifest.EVALUATION_PHASES,
+                         ("base", "primary", "corrective", "secondary",
+                          "constraints", "visibility", "render"))
+
+    def test_evaluation_block_shape(self):
+        self.assertEqual(manifest.evaluation_block(), {"phases": list(manifest.EVALUATION_PHASES)})
+
+    def test_upgrade_adds_the_evaluation_block(self):
+        upgraded = manifest.upgrade_manifest_v01_to_v02(_v01_manifest())
+        self.assertEqual(upgraded["evaluation"], manifest.evaluation_block())
+
+    def test_validate_deformer_phases_accepts_well_formed_deformers(self):
+        deformers = manifest.deformers_from_motion({"breathing": {"period_s": 4.0}})
+        self.assertEqual(manifest.validate_deformer_phases(deformers), [])
+
+    def test_validate_deformer_phases_flags_a_missing_phase(self):
+        errors = manifest.validate_deformer_phases([{"id": "x", "kind": "gaze"}])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("x", errors[0])
+
+    def test_validate_deformer_phases_flags_an_unknown_phase(self):
+        errors = manifest.validate_deformer_phases(
+            [{"id": "x", "kind": "gaze", "phase": "not_a_real_phase"}])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("not_a_real_phase", errors[0])
+
 
 if __name__ == "__main__":
     unittest.main()

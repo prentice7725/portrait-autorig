@@ -50,9 +50,14 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-__all__ = ["ASSEMBLY_FORMAT", "AssemblyAsset", "load_assembly_bundle"]
+__all__ = ["ASSEMBLY_FORMAT", "ASSEMBLY_VERSION", "AssemblyAsset", "load_assembly_bundle"]
 
 ASSEMBLY_FORMAT = "portrait-assembly"
+# Exact match, not a major-version prefix check: pre-1.0, a minor bump
+# (0.2 -> 0.3) can freely be a breaking contract change (composer's own
+# schema pins `"version": {"const": "0.2"}`), so a 0.3 bundle must fail
+# loudly here rather than being read against the wrong field shapes.
+ASSEMBLY_VERSION = "0.2"
 
 
 @dataclass(frozen=True)
@@ -102,16 +107,16 @@ def _position(img: Image.Image, transform: dict[str, Any]) -> tuple[Image.Image,
 def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
     """Read an Assembly Bundle directory into an `AssemblyAsset`.
 
-    Instances are composited in `composition.draw_order` (falling back to
-    `instances`' own insertion order when absent), skipping any instance
-    that is not `visible` or has `opacity <= 0` -- exactly
-    `portrait_composer.render._composite`'s own filter, so a VariantSet's
-    inactive members (already reflected in their `visible` flag by
-    Composer's own `variants.set_active`) are silently excluded here rather
-    than needing their own handling. More than one visible instance sharing
-    one semantic tag are composited together, in draw order, into that
-    tag's one layer -- this is what "draw order" means for two instances
-    that occupy the same semantic role.
+    Instances are composited in `composition.draw_order` (required --
+    AutoRig never invents one), skipping any instance that is not `visible`
+    or has `opacity <= 0` -- exactly `portrait_composer.render._composite`'s
+    own filter, so a VariantSet's inactive members (already reflected in
+    their `visible` flag by Composer's own `variants.set_active`) are
+    silently excluded here rather than needing their own handling. More
+    than one visible instance sharing one semantic tag are composited
+    together, in draw order, into that tag's one layer -- but only when
+    Composer actually drew them contiguously; see the draw-order
+    contiguity check below for why a gap is a hard error instead.
     """
     root = Path(directory).resolve()
     manifest_path = root / "manifest.json"
@@ -121,8 +126,9 @@ def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
     if manifest.get("format") != ASSEMBLY_FORMAT:
         raise ValueError(f"not an Assembly Bundle: format={manifest.get('format')!r}")
     version = str(manifest.get("version", ""))
-    if version.split(".", 1)[0] != "0":
-        raise ValueError(f"unsupported Assembly Bundle version: {version!r}")
+    if version != ASSEMBLY_VERSION:
+        raise ValueError(f"unsupported Assembly Bundle version: {version!r} "
+                         f"(this reader only understands {ASSEMBLY_VERSION!r})")
 
     composition = manifest.get("composition") or {}
     canvas_info = composition.get("canvas") or {}
@@ -137,11 +143,18 @@ def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
 
     assets = manifest.get("assets") or {}
     instances = manifest.get("instances") or {}
-    draw_order_ids = composition.get("draw_order") or list(instances)
+    # Final draw_order is Composer's own authored contract (directive #7:
+    # AutoRig must not decide it) -- absent means the bundle is malformed,
+    # not an invitation to invent one from dict insertion order.
+    draw_order_ids = composition.get("draw_order")
+    if not draw_order_ids:
+        raise ValueError("Assembly Bundle composition.draw_order is missing or empty -- "
+                         "AutoRig does not invent a paint order")
     layers_dir = root / "layers"
 
     canvas_layers: dict[str, Image.Image] = {}
     draw_order: list[str] = []
+    visible_tags_in_order: list[str] = []
     for inst_id in draw_order_ids:
         inst = instances.get(inst_id)
         if inst is None:
@@ -152,6 +165,7 @@ def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
         if asset is None:
             raise ValueError(f"instance {inst_id!r} references unknown asset {inst['asset_ref']!r}")
         tag = str(asset["semantic"])
+        visible_tags_in_order.append(tag)
         image_path = layers_dir / f"{inst_id}.png"
         if not image_path.is_file():
             raise FileNotFoundError(f"layer image missing for instance {inst_id!r}: {image_path}")
@@ -170,6 +184,27 @@ def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
 
     if not canvas_layers:
         raise ValueError("Assembly Bundle has no visible instances")
+
+    # `rig.build_rig` (like every producer-facing part of this repo) has one
+    # image per *semantic tag*, not per instance -- flattening several
+    # visible instances that share one semantic into that one image is only
+    # lossless when Composer drew them contiguously (nothing else
+    # interleaved between them). A gap means some other tag was meant to sit
+    # between two same-semantic instances -- silently flattening them would
+    # destroy real draw-order information and could pass its own
+    # self-consistency check while actually being wrong. Hard reject instead
+    # of guessing; true instance-level rig support is future work.
+    for tag in dict.fromkeys(visible_tags_in_order):
+        first = visible_tags_in_order.index(tag)
+        last = len(visible_tags_in_order) - 1 - visible_tags_in_order[::-1].index(tag)
+        if any(other != tag for other in visible_tags_in_order[first:last + 1]):
+            raise ValueError(
+                f"semantic tag {tag!r} is not drawn contiguously in "
+                "composition.draw_order -- AutoRig cannot flatten non-adjacent "
+                "same-semantic instances into one layer without losing real "
+                "draw-order information (instance-level rig support does not "
+                "exist yet)"
+            )
 
     layers = {tag: np.array(img, dtype=np.uint8) for tag, img in canvas_layers.items()}
     body_remainder = layers.pop("body_remainder", None)

@@ -16,10 +16,12 @@ import numpy as np
 from PIL import Image
 
 from . import soft_morph
+from .capability import capability_report
 from .image import composite_layers, crop_to_alpha, rest_fidelity
 from .manifest import RIG_MANIFEST_VERSION_01, upgrade_manifest_v01_to_v02
 from .mesh import contour_mesh_spec, mesh_spec
 from .semantic import SEMANTIC_Z_ORDER
+from .topology import mesh_topology_hash
 
 __all__ = [
     "GROUP_HEAD", "GROUP_NECK", "GROUP_BODY",
@@ -928,6 +930,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
               gradient_tags: Collection[str] = (),
               contour_tags: Collection[str] = (),
               draw_order: Sequence[str] | None = None,
+              rest_reference: np.ndarray | None = None,
               run_id: str = "", tag_version: str = "",
               image_prefix: str = f"{RIG_SUBDIR}/images",
               motion: dict[str, Any] | None = None,
@@ -965,6 +968,16 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     parent's position instead of an arbitrary fallback; see `_draw_rank`.
     None (the default, and every existing Portrait Bundle caller) reproduces
     today's canonical-semantic-table ordering exactly.
+
+    `rest_reference`, when given, replaces the internally-recomposited
+    canonical reference `rest_fidelity` is checked against with this exact
+    array instead -- the Assembly path passes `AssemblyAsset.reference`
+    (Composer's own rendered `reference.png`), so the check is against the
+    real Assembly Truth (Master doc #2) rather than a composite rebuilt
+    from the same already-flattened per-tag layers the rig itself was
+    built from, which could agree with itself while both were still wrong
+    relative to what Composer actually authored. None (the default, and
+    every Portrait Bundle caller) keeps today's self-recomposited check.
     """
     working: dict[str, np.ndarray] = {}
     for tag, img in layer_dict.items():
@@ -990,9 +1003,15 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     # *that* order too, or rest_fidelity below would be comparing the rig's
     # own draw_order-ordered rest render against a differently-ordered
     # reference and could fail spuriously on a correctly-compiled rig.
-    canonical_order = (tuple(draw_order) if draw_order is not None else SEMANTIC_Z_ORDER)
-    canonical_reference = composite_layers(canonical_layers, (canvas_h, canvas_w),
-                                           order=canonical_order)
+    if rest_reference is not None:
+        canonical_reference = np.asarray(rest_reference)
+        if canonical_reference.shape != (canvas_h, canvas_w, 4):
+            raise ValueError(f"rest_reference shape {canonical_reference.shape} does not match "
+                             f"canvas {(canvas_h, canvas_w, 4)}")
+    else:
+        canonical_order = (tuple(draw_order) if draw_order is not None else SEMANTIC_Z_ORDER)
+        canonical_reference = composite_layers(canonical_layers, (canvas_h, canvas_w),
+                                               order=canonical_order)
     if preflight is None:
         preflight = rig_preflight(layer_dict, original_rgba=original_rgba,
                                   body_remainder=body_remainder,
@@ -1107,6 +1126,18 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         group = group_for_tag(tag)
         weight = _weight_for(tag, group, tuple(xyxy), neck_box, gradient_tags)
         images[name] = crop_img
+        # Anything deforming along a gradient gets the finer cell: that is
+        # where a coarse grid shows up as faceting. Opted-in tags try the
+        # contour backend first and fall back to grid when it declines
+        # (multi-island alpha; see mesh.contour_mesh).
+        part_mesh = ((tag in contour_tags
+                     and contour_mesh_spec(crop_img[..., 3], tuple(int(v) for v in xyxy)))
+                    or mesh_spec((canvas_h, canvas_w), fine=weight["mode"] == "gradient_y"))
+        # Topology freeze (directive v0.2 #11-12): generate mesh -> hash ->
+        # freeze. Downstream weights/keyforms/constraints/physics bindings
+        # (once they exist) invalidate on a hash mismatch rather than being
+        # silently reused; see topology.topology_changed.
+        part_mesh["topology_hash"] = mesh_topology_hash(part_mesh, tuple(int(v) for v in xyxy))
         parts.append({
             "name": name,
             "tag": tag,
@@ -1116,13 +1147,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
             "depth": depths[tag],
             "z": z,
             "weight": weight,
-            # Anything deforming along a gradient gets the finer cell: that is
-            # where a coarse grid shows up as faceting. Opted-in tags try the
-            # contour backend first and fall back to grid when it declines
-            # (multi-island alpha; see mesh.contour_mesh).
-            "mesh": ((tag in contour_tags
-                     and contour_mesh_spec(crop_img[..., 3], tuple(int(v) for v in xyxy)))
-                    or mesh_spec((canvas_h, canvas_w), fine=weight["mode"] == "gradient_y")),
+            "mesh": part_mesh,
         })
         if derived_report and derived_report.get("succeeded") and tag in derived_report["parts"]:
             parts[-1]["derived"] = True
@@ -1160,6 +1185,11 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     manifest["rest_fidelity"] = rest_fidelity(
         canonical_reference, rig_rest, alpha_threshold=alpha_threshold
     )
+    # Capability Report (directive v0.2 #34-35, Master doc #19): what this
+    # *compiled* rig can actually do, separate from whether the compile
+    # itself succeeded (QA) -- derived from the final parts and preflight,
+    # never re-run against the input.
+    manifest["capabilities"] = capability_report(parts, preflight)
     # Every v0.1 field constructed above (parts/anchors/motion/rest_fidelity/
     # rig_preflight/derived_semantics/...) is preserved verbatim; this only
     # adds parameters[]/deformers[]/drivers[] and bumps `version` to "0.2".

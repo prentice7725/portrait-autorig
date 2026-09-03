@@ -23,6 +23,9 @@ __all__ = [
     "DEFORMER_PARALLAX_TURN", "DEFORMER_SHELL_TURN", "DEFORMER_WEIGHTED_ROTATION",
     "DEFORMER_CONTINUOUS_FIELD", "DEFORMER_EYE_FOLD", "DEFORMER_GAZE",
     "DEFORMER_SPRITE_SWAP", "DEFORMER_KINDS",
+    "PHASE_BASE", "PHASE_PRIMARY", "PHASE_CORRECTIVE", "PHASE_SECONDARY",
+    "PHASE_CONSTRAINTS", "PHASE_VISIBILITY", "PHASE_RENDER", "EVALUATION_PHASES",
+    "evaluation_block", "validate_deformer_phases",
     "deformers_from_motion", "upgrade_manifest_v01_to_v02",
 ]
 
@@ -48,6 +51,47 @@ DEFORMER_KINDS = frozenset({
     DEFORMER_CONTINUOUS_FIELD, DEFORMER_EYE_FOLD, DEFORMER_GAZE, DEFORMER_SPRITE_SWAP,
 })
 
+# Explicit evaluation phases (directive v0.2 #13; Master doc #15). Every
+# deformer/driver/constraint declares which phase it runs in, in this fixed
+# order -- a rig runtime's own call order must never be the implicit
+# contract. P0-G locks the vocabulary and tags every synthesized deformer
+# with one; the runtime consuming *this* field (rather than the P0-D
+# motion{} adapter's hardcoded sequence) is later work -- see runtime.mjs's
+# module docstring for exactly where that stands today.
+PHASE_BASE = "base"
+PHASE_PRIMARY = "primary"
+PHASE_CORRECTIVE = "corrective"
+PHASE_SECONDARY = "secondary"
+PHASE_CONSTRAINTS = "constraints"
+PHASE_VISIBILITY = "visibility"
+PHASE_RENDER = "render"
+EVALUATION_PHASES: tuple[str, ...] = (
+    PHASE_BASE, PHASE_PRIMARY, PHASE_CORRECTIVE, PHASE_SECONDARY,
+    PHASE_CONSTRAINTS, PHASE_VISIBILITY, PHASE_RENDER,
+)
+
+
+def evaluation_block() -> dict[str, Any]:
+    """The manifest's `"evaluation"` entry: the canonical phase order every
+    deformer/driver/constraint's own `"phase"` field must be drawn from."""
+    return {"phases": list(EVALUATION_PHASES)}
+
+
+def validate_deformer_phases(deformers: list[dict[str, Any]]) -> list[str]:
+    """Every `deformers[]` entry's `"phase"` in one call: field missing, or
+    naming something outside `EVALUATION_PHASES`, one message per offender.
+    Empty means valid. `rig.build_rig` never produces an invalid phase
+    itself (`deformers_from_motion` always tags one); this is for an
+    external tool checking a hand-edited or foreign manifest."""
+    errors: list[str] = []
+    for deformer in deformers:
+        phase = deformer.get("phase")
+        if phase is None:
+            errors.append(f"deformer {deformer.get('id', '?')!r} has no \"phase\"")
+        elif phase not in EVALUATION_PHASES:
+            errors.append(f"deformer {deformer.get('id', '?')!r} has unknown phase {phase!r}")
+    return errors
+
 
 def deformers_from_motion(motion: dict[str, Any]) -> list[dict[str, Any]]:
     """Declarative `deformers[]` describing exactly what `motion{}` already
@@ -65,12 +109,12 @@ def deformers_from_motion(motion: dict[str, Any]) -> list[dict[str, Any]]:
         deformers.append({
             "id": "head_turn_parallax", "kind": DEFORMER_PARALLAX_TURN,
             "parameters": [PARAM_ANGLE_X, PARAM_ANGLE_Y],
-            "targets": {"scope": "all"}, "config": config,
+            "targets": {"scope": "all"}, "config": config, "phase": PHASE_PRIMARY,
         })
         deformers.append({
             "id": "head_turn_shell", "kind": DEFORMER_SHELL_TURN,
             "parameters": [PARAM_ANGLE_X, PARAM_ANGLE_Y],
-            "targets": {"group": "head"}, "config": config,
+            "targets": {"group": "head"}, "config": config, "phase": PHASE_PRIMARY,
         })
 
     head_tilt = motion.get("head_tilt")
@@ -78,7 +122,7 @@ def deformers_from_motion(motion: dict[str, Any]) -> list[dict[str, Any]]:
         deformers.append({
             "id": "head_tilt", "kind": DEFORMER_WEIGHTED_ROTATION,
             "parameters": [PARAM_ANGLE_Z],
-            "targets": {"scope": "all"}, "config": dict(head_tilt),
+            "targets": {"scope": "all"}, "config": dict(head_tilt), "phase": PHASE_PRIMARY,
         })
 
     breathing = motion.get("breathing")
@@ -86,7 +130,7 @@ def deformers_from_motion(motion: dict[str, Any]) -> list[dict[str, Any]]:
         deformers.append({
             "id": "breathing", "kind": DEFORMER_CONTINUOUS_FIELD,
             "parameters": [PARAM_BREATH],
-            "targets": {"scope": "all"}, "config": dict(breathing),
+            "targets": {"scope": "all"}, "config": dict(breathing), "phase": PHASE_PRIMARY,
         })
 
     blink = motion.get("blink")
@@ -95,7 +139,7 @@ def deformers_from_motion(motion: dict[str, Any]) -> list[dict[str, Any]]:
             deformers.append({
                 "id": f"blink_{side}", "kind": DEFORMER_EYE_FOLD,
                 "parameters": [param],
-                "targets": {"side": side}, "config": dict(blink),
+                "targets": {"side": side}, "config": dict(blink), "phase": PHASE_PRIMARY,
             })
 
     return deformers
@@ -121,4 +165,5 @@ def upgrade_manifest_v01_to_v02(manifest: dict[str, Any]) -> dict[str, Any]:
     # Real driver reservation (UpperTorsoSecondaryDriver, physics-connected
     # inputs, ...) is P1/P2; P0 leaves this empty rather than guessing.
     out["drivers"] = []
+    out["evaluation"] = evaluation_block()
     return out
