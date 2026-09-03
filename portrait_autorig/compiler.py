@@ -63,14 +63,18 @@ def compile_assembly_asset(asset: AssemblyAsset, output_dir: str | os.PathLike[s
     Portrait Bundle input; the differences are `original_rgba=None` (an
     Assembly Bundle has no donor photo to compare against -- the Assembly
     reader must not read one), `draw_order=asset.draw_order` (Composer's
-    authored paint order, not AutoRig's own canonical table), and
+    authored paint order, not AutoRig's own canonical table),
     `rest_reference=asset.reference` -- rest_fidelity is checked against
     Composer's own rendered `reference.png` (the real Assembly Truth, Master
     doc #2), not a composite rebuilt from the same layers the rig itself
-    was derived from.
+    was derived from -- and `rig_intent=asset.rig_intent`, which replaces
+    `upper_torso_soft_morph`'s alpha-guessed region with whatever Composer's
+    C4 authoring actually declared (or explicitly disables it, never a
+    guess, when nothing was authored).
     """
     preflight = rig_preflight(asset.layers, original_rgba=None,
-                              body_remainder=asset.body_remainder)
+                              body_remainder=asset.body_remainder,
+                              rig_intent=asset.rig_intent)
     if preflight["status"] == "INCOMPATIBLE":
         messages = "; ".join(item["message"] for item in preflight["warnings"])
         raise ValueError(f"Assembly Bundle is not rig-compatible: {messages}")
@@ -82,6 +86,7 @@ def compile_assembly_asset(asset: AssemblyAsset, output_dir: str | os.PathLike[s
         frame_size=(asset.canvas[1], asset.canvas[0]),
         draw_order=asset.draw_order,
         rest_reference=asset.reference,
+        rig_intent=asset.rig_intent,
         gradient_tags=gradient_tags,
         contour_tags=contour_tags,
         run_id=asset.source_id,

@@ -570,8 +570,20 @@ def derive_missing_eyewhite(original_rgba: np.ndarray,
 def rig_preflight(layer_dict: dict[str, np.ndarray], *,
                   original_rgba: np.ndarray | None = None,
                   body_remainder: np.ndarray | None = None,
+                  rig_intent: dict[str, Any] | None = None,
                   alpha_threshold: int = 10) -> dict[str, Any]:
-    """Assess rig readiness without re-judging static Portrait validity."""
+    """Assess rig readiness without re-judging static Portrait validity.
+
+    `rig_intent`, when given (Assembly Bundle input), is Composer's own
+    authored RigIntent (`assembly.AssemblyAsset.rig_intent`). Its presence
+    -- not just a matching region inside it -- is what tells
+    `upper_torso_soft_morph` checking to use `soft_morph.find_authored_
+    region` instead of `derive_upper_torso_soft_region`'s guess: an
+    Assembly Bundle whose author simply did not author a region is still
+    "AutoRig must not invent one" (Master doc #23 invariant #11), not a
+    reason to fall back to Portrait Bundle's legacy auto-derivation. `None`
+    (every Portrait Bundle caller) keeps today's auto-derivation exactly.
+    """
     available = {
         tag for tag, image in layer_dict.items()
         if image is not None and np.asarray(image).ndim == 3
@@ -659,10 +671,18 @@ def rig_preflight(layer_dict: dict[str, np.ndarray], *,
         "missing": sorted(name for name in required_anchors if name not in final_anchors),
     }
     chest_neck_box = neck_bbox(probe, alpha_threshold=alpha_threshold)
-    chest_region = soft_morph.derive_upper_torso_soft_region(
-        probe.get(soft_morph.SOFT_MORPH_TAG), neck_box=chest_neck_box,
-        alpha_threshold=alpha_threshold,
-    )
+    authored_region = soft_morph.find_authored_region(rig_intent)
+    if rig_intent is not None:
+        # Assembly path: authored region or nothing -- never a guess.
+        chest_region = soft_morph.region_from_rig_intent(
+            probe.get(soft_morph.SOFT_MORPH_TAG), authored_region,
+            alpha_threshold=alpha_threshold,
+        )
+    else:
+        chest_region = soft_morph.derive_upper_torso_soft_region(
+            probe.get(soft_morph.SOFT_MORPH_TAG), neck_box=chest_neck_box,
+            alpha_threshold=alpha_threshold,
+        )
     checks["upper_torso_soft_morph"] = soft_morph.soft_morph_preflight(
         probe.get(soft_morph.SOFT_MORPH_TAG), chest_region, frame_size=sample.shape[:2],
         neck_box=chest_neck_box, occluder_alpha=chest_occluder_alpha(probe),
@@ -931,6 +951,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
               contour_tags: Collection[str] = (),
               draw_order: Sequence[str] | None = None,
               rest_reference: np.ndarray | None = None,
+              rig_intent: dict[str, Any] | None = None,
               run_id: str = "", tag_version: str = "",
               image_prefix: str = f"{RIG_SUBDIR}/images",
               motion: dict[str, Any] | None = None,
@@ -978,6 +999,19 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     built from, which could agree with itself while both were still wrong
     relative to what Composer actually authored. None (the default, and
     every Portrait Bundle caller) keeps today's self-recomposited check.
+
+    `rig_intent`, when given (Assembly Bundle input, `AssemblyAsset.
+    rig_intent`), replaces `upper_torso_soft_morph`'s alpha-guessed region
+    with whatever Composer's C4 `secondary_regions.py` actually authored
+    (`soft_morph.find_authored_region`/`region_from_rig_intent`) -- geometry,
+    locks, author_strength, and response_profile all come from there, not
+    from `derive_upper_torso_soft_region`'s guess; a bundle whose author did
+    not author a region compiles with the field disabled rather than
+    falling back to a guess (Master doc #23 invariant #11). `soft_morph_
+    preflight` still runs unchanged against the authored geometry and the
+    real compiled art -- AutoRig keeps owning geometry/deformation safety
+    even though it no longer decides where the lobes are centred. None (the
+    default, every Portrait Bundle caller) keeps today's auto-derivation.
     """
     working: dict[str, np.ndarray] = {}
     for tag, img in layer_dict.items():
@@ -1014,7 +1048,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
                                                order=canonical_order)
     if preflight is None:
         preflight = rig_preflight(layer_dict, original_rgba=original_rgba,
-                                  body_remainder=body_remainder,
+                                  body_remainder=body_remainder, rig_intent=rig_intent,
                                   alpha_threshold=alpha_threshold)
     preflight = json.loads(json.dumps(preflight))
 
@@ -1171,12 +1205,30 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         "rig_preflight": json.loads(json.dumps(preflight)),
     }
     if "upper_torso_soft_morph" not in manifest["motion"]:
-        # Data-derived, not a static default: recomputed every run against
-        # this character's own `topwear` geometry, the way anchors are.
-        manifest["motion"]["upper_torso_soft_morph"] = soft_morph.upper_torso_soft_morph_spec(
-            working, frame_size=(canvas_h, canvas_w), neck_box=neck_box,
-            occluder_alpha=chest_occluder_alpha(working), alpha_threshold=alpha_threshold,
-        )
+        if rig_intent is not None:
+            # Assembly path: Composer's authored region, or explicitly
+            # disabled -- never `derive_upper_torso_soft_region`'s guess
+            # (Master doc #23 invariant #11).
+            authored_region = soft_morph.find_authored_region(rig_intent)
+            manifest["motion"]["upper_torso_soft_morph"] = (
+                soft_morph.authored_upper_torso_soft_morph_spec(
+                    authored_region, working, frame_size=(canvas_h, canvas_w),
+                    neck_box=neck_box, occluder_alpha=chest_occluder_alpha(working),
+                    alpha_threshold=alpha_threshold,
+                ) if authored_region is not None else {
+                    "enabled": False, "mode": "two_lobe", "strength": 0.0,
+                    "source": "assembly_rig_intent", "status": "DISABLED",
+                    "status_reasons": ["no_authored_region"],
+                }
+            )
+        else:
+            # Data-derived, not a static default: recomputed every run
+            # against this character's own `topwear` geometry, the way
+            # anchors are.
+            manifest["motion"]["upper_torso_soft_morph"] = soft_morph.upper_torso_soft_morph_spec(
+                working, frame_size=(canvas_h, canvas_w), neck_box=neck_box,
+                occluder_alpha=chest_occluder_alpha(working), alpha_threshold=alpha_threshold,
+            )
     if derived_report and derived_report.get("succeeded"):
         manifest["derived_semantics"] = {
             "eyewhite": json.loads(json.dumps(derived_report))

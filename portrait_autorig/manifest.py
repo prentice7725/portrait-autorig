@@ -14,19 +14,20 @@ from typing import Any
 
 from .parameters import (
     PARAM_ANGLE_X, PARAM_ANGLE_Y, PARAM_ANGLE_Z,
-    PARAM_BREATH, PARAM_EYE_L_OPEN, PARAM_EYE_R_OPEN,
-    standard_parameter_registry,
+    PARAM_BREATH, PARAM_EYE_L_OPEN, PARAM_EYE_R_OPEN, PARAM_UPPER_TORSO_SECONDARY,
+    parameter_descriptor, standard_parameter_registry,
 )
 
 __all__ = [
     "RIG_MANIFEST_VERSION_01", "RIG_MANIFEST_VERSION_02", "RIG_MANIFEST_VERSION",
     "DEFORMER_PARALLAX_TURN", "DEFORMER_SHELL_TURN", "DEFORMER_WEIGHTED_ROTATION",
     "DEFORMER_CONTINUOUS_FIELD", "DEFORMER_EYE_FOLD", "DEFORMER_GAZE",
-    "DEFORMER_SPRITE_SWAP", "DEFORMER_KINDS",
+    "DEFORMER_SPRITE_SWAP", "DEFORMER_LOCAL_SOFT_FIELD", "DEFORMER_KINDS",
+    "DRIVER_UPPER_TORSO_SECONDARY",
     "PHASE_BASE", "PHASE_PRIMARY", "PHASE_CORRECTIVE", "PHASE_SECONDARY",
     "PHASE_CONSTRAINTS", "PHASE_VISIBILITY", "PHASE_RENDER", "EVALUATION_PHASES",
     "evaluation_block", "validate_deformer_phases",
-    "deformers_from_motion", "upgrade_manifest_v01_to_v02",
+    "deformers_from_motion", "upper_torso_secondary_entries", "upgrade_manifest_v01_to_v02",
 ]
 
 RIG_MANIFEST_VERSION_01 = "0.1"
@@ -46,10 +47,20 @@ DEFORMER_CONTINUOUS_FIELD = "continuous_field"
 DEFORMER_EYE_FOLD = "eye_fold"
 DEFORMER_GAZE = "gaze"
 DEFORMER_SPRITE_SWAP = "sprite_swap"
+# local_soft_field (directive v0.2 #15, #18): the deformer kind
+# upper_torso_secondary (and any future authored secondary region) writes
+# its displacement through -- see upper_torso_secondary_entries.
+DEFORMER_LOCAL_SOFT_FIELD = "local_soft_field"
 DEFORMER_KINDS = frozenset({
     DEFORMER_PARALLAX_TURN, DEFORMER_SHELL_TURN, DEFORMER_WEIGHTED_ROTATION,
     DEFORMER_CONTINUOUS_FIELD, DEFORMER_EYE_FOLD, DEFORMER_GAZE, DEFORMER_SPRITE_SWAP,
+    DEFORMER_LOCAL_SOFT_FIELD,
 })
+
+# UpperTorsoSecondaryDriver (directive v0.2 #18-19): a driver *kind* name,
+# not a deformer -- drivers[] entries produce a parameter value (here
+# ParamUpperTorsoSecondary), deformers[] entries consume one.
+DRIVER_UPPER_TORSO_SECONDARY = "UpperTorsoSecondaryDriver"
 
 # Explicit evaluation phases (directive v0.2 #13; Master doc #15). Every
 # deformer/driver/constraint declares which phase it runs in, in this fixed
@@ -145,6 +156,51 @@ def deformers_from_motion(motion: dict[str, Any]) -> list[dict[str, Any]]:
     return deformers
 
 
+def upper_torso_secondary_entries(
+    spec: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """The declarative `local_soft_field` deformer + `UpperTorsoSecondaryDriver`
+    reservation for an authored, enabled `motion.upper_torso_soft_morph`
+    spec (`soft_morph.authored_upper_torso_soft_morph_spec`'s output) --
+    `(None, None)` for anything else: not authored, author-disabled,
+    preflight-disabled, or the legacy Portrait Bundle auto-derived spec
+    (`source == "topwear_geometry"`), which has no `response_profile` to
+    reserve a driver for.
+
+    Directive v0.2 #15, #18-19: Composer supplies the region and qualitative
+    response_profile; AutoRig compiles the deformer + driver *schema* here.
+    The driver's `inputs` mirror the directive's own example exactly
+    (`ParamBreath` translation, `ParamAngleY` angle) -- the actual spring
+    solver connecting them is P2, so this is a reservation, not a
+    computation.
+    """
+    if not spec or not spec.get("enabled") or spec.get("source") != "assembly_rig_intent":
+        return None, None
+    deformer = {
+        "id": "upper_torso_secondary_field", "kind": DEFORMER_LOCAL_SOFT_FIELD,
+        "parameters": [PARAM_UPPER_TORSO_SECONDARY],
+        "targets": {"tag": "topwear"},
+        "config": {
+            "left": spec.get("left"), "right": spec.get("right"),
+            "center_lock": spec.get("center_lock"), "neckline_lock": spec.get("neckline_lock"),
+            "horizontal_px": spec.get("horizontal_px"), "vertical_px": spec.get("vertical_px"),
+        },
+        "phase": PHASE_SECONDARY,
+    }
+    driver = {
+        "id": "upper_torso_secondary", "kind": DRIVER_UPPER_TORSO_SECONDARY,
+        "inputs": [
+            {"parameter": PARAM_BREATH, "mode": "translation", "weight": 1.0},
+            {"parameter": PARAM_ANGLE_Y, "mode": "angle", "weight": -0.25},
+        ],
+        "output": PARAM_UPPER_TORSO_SECONDARY,
+        "response_profile": spec.get("response_profile"),
+        "response_config": spec.get("response_config"),
+        "phase": PHASE_SECONDARY,
+    }
+    return deformer, driver
+
+
 def upgrade_manifest_v01_to_v02(manifest: dict[str, Any]) -> dict[str, Any]:
     """Upgrade a v0.1 rig manifest dict to v0.2, or pass an already-v0.2 one
     through unchanged (idempotent).
@@ -160,10 +216,13 @@ def upgrade_manifest_v01_to_v02(manifest: dict[str, Any]) -> dict[str, Any]:
         return manifest
     out = dict(manifest)
     out["version"] = RIG_MANIFEST_VERSION_02
+    motion = manifest.get("motion") or {}
     out["parameters"] = standard_parameter_registry()
-    out["deformers"] = deformers_from_motion(manifest.get("motion") or {})
-    # Real driver reservation (UpperTorsoSecondaryDriver, physics-connected
-    # inputs, ...) is P1/P2; P0 leaves this empty rather than guessing.
-    out["drivers"] = []
+    out["deformers"] = deformers_from_motion(motion)
+    soft_field, soft_driver = upper_torso_secondary_entries(motion.get("upper_torso_soft_morph"))
+    out["drivers"] = [soft_driver] if soft_driver else []
+    if soft_field:
+        out["deformers"].append(soft_field)
+        out["parameters"].append(parameter_descriptor(PARAM_UPPER_TORSO_SECONDARY, -1.0, 1.0, 0.0))
     out["evaluation"] = evaluation_block()
     return out
