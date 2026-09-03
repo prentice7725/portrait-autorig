@@ -461,6 +461,32 @@ class BuildRigTests(unittest.TestCase):
         for unlisted in ("head", "face", "back hair", "mouth"):
             self.assertGreater(tags_by_z.index(unlisted), tags_by_z.index("topwear"))
 
+    def test_rest_reference_none_keeps_the_self_recomposited_check(self):
+        manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS))
+        self.assertEqual(manifest["rest_fidelity"]["status"], "pass")
+
+    def test_rest_reference_matching_the_natural_composite_still_passes(self):
+        # A caller-supplied reference that agrees with what AutoRig would
+        # have recomposited itself changes nothing.
+        natural = composite_layers(self.layers, (CANVAS, CANVAS))
+        manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS), rest_reference=natural)
+        self.assertEqual(manifest["rest_fidelity"]["status"], "pass")
+
+    def test_rest_reference_overrides_the_internal_composite_and_can_fail(self):
+        # This is the actual point of the parameter (Assembly Truth, Master
+        # doc #2): a rest_reference that disagrees with the rig's own rest
+        # render must be able to fail the check, not be silently ignored in
+        # favour of a self-consistent internal recomposite.
+        wrong_reference = np.zeros((CANVAS, CANVAS, 4), dtype=np.uint8)  # fully transparent
+        manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS),
+                                rest_reference=wrong_reference)
+        self.assertEqual(manifest["rest_fidelity"]["status"], "fail")
+
+    def test_rest_reference_shape_mismatch_raises(self):
+        wrong_shape = np.zeros((CANVAS, CANVAS, 3), dtype=np.uint8)  # missing alpha channel
+        with self.assertRaises(ValueError):
+            build_rig(self.layers, frame_size=(CANVAS, CANVAS), rest_reference=wrong_shape)
+
     def test_contour_tags_opts_a_part_into_the_contour_mesh_backend(self):
         # absorption plan #8 (P1-A): grid stays the default everywhere else,
         # only the opted-in tag's own part switches.

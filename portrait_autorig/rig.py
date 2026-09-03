@@ -928,6 +928,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
               gradient_tags: Collection[str] = (),
               contour_tags: Collection[str] = (),
               draw_order: Sequence[str] | None = None,
+              rest_reference: np.ndarray | None = None,
               run_id: str = "", tag_version: str = "",
               image_prefix: str = f"{RIG_SUBDIR}/images",
               motion: dict[str, Any] | None = None,
@@ -965,6 +966,16 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     parent's position instead of an arbitrary fallback; see `_draw_rank`.
     None (the default, and every existing Portrait Bundle caller) reproduces
     today's canonical-semantic-table ordering exactly.
+
+    `rest_reference`, when given, replaces the internally-recomposited
+    canonical reference `rest_fidelity` is checked against with this exact
+    array instead -- the Assembly path passes `AssemblyAsset.reference`
+    (Composer's own rendered `reference.png`), so the check is against the
+    real Assembly Truth (Master doc #2) rather than a composite rebuilt
+    from the same already-flattened per-tag layers the rig itself was
+    built from, which could agree with itself while both were still wrong
+    relative to what Composer actually authored. None (the default, and
+    every Portrait Bundle caller) keeps today's self-recomposited check.
     """
     working: dict[str, np.ndarray] = {}
     for tag, img in layer_dict.items():
@@ -990,9 +1001,15 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     # *that* order too, or rest_fidelity below would be comparing the rig's
     # own draw_order-ordered rest render against a differently-ordered
     # reference and could fail spuriously on a correctly-compiled rig.
-    canonical_order = (tuple(draw_order) if draw_order is not None else SEMANTIC_Z_ORDER)
-    canonical_reference = composite_layers(canonical_layers, (canvas_h, canvas_w),
-                                           order=canonical_order)
+    if rest_reference is not None:
+        canonical_reference = np.asarray(rest_reference)
+        if canonical_reference.shape != (canvas_h, canvas_w, 4):
+            raise ValueError(f"rest_reference shape {canonical_reference.shape} does not match "
+                             f"canvas {(canvas_h, canvas_w, 4)}")
+    else:
+        canonical_order = (tuple(draw_order) if draw_order is not None else SEMANTIC_Z_ORDER)
+        canonical_reference = composite_layers(canonical_layers, (canvas_h, canvas_w),
+                                               order=canonical_order)
     if preflight is None:
         preflight = rig_preflight(layer_dict, original_rgba=original_rgba,
                                   body_remainder=body_remainder,
