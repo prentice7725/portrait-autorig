@@ -39,7 +39,8 @@ def _eye_capability(tags: set[str], side: str) -> str:
     return DISABLED
 
 
-def capability_report(parts: list[dict[str, Any]], preflight: dict[str, Any]) -> dict[str, str]:
+def capability_report(parts: list[dict[str, Any]], preflight: dict[str, Any],
+                      variant_status: str | None = None) -> dict[str, str]:
     """The manifest's `"capabilities"` block. Values are `READY`/`DEGRADED`/
     `DISABLED`/`UNSUPPORTED` (directive #34); `rig.build_rig` calls this
     once `parts[]` and `preflight` are both final."""
@@ -76,5 +77,10 @@ def capability_report(parts: list[dict[str, Any]], preflight: dict[str, Any]) ->
     report["upper_torso_secondary"] = {
         "READY": READY, "DEGRADED": DEGRADED, "DISABLED": DISABLED,
     }.get(soft_status, DISABLED)
+
+    # Variant binding is compiler capability plus this character's authored
+    # sets.  The caller supplies the binding result so this report never
+    # re-derives or second-guesses the compile.
+    report["expression_variants"] = variant_status if variant_status is not None else DISABLED
 
     return report

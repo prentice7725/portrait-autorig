@@ -99,6 +99,15 @@ and faint alpha edges are retained during cropping. A `fail` result aborts the
 compile; a missing semantic derivation that changes the rest pose is rolled
 back and reported as `DEGRADED`.
 
+Assembly Bundle `variant_sets` compile to explicit `sprite_swap` entries in
+the Rig Manifest's `visibility` phase. Composer instance ids remain in
+`member_bindings` with their semantic tag and generated rig part. Runtime
+starts from each set's `default`; Composer's `active` member is used only for
+reference-pose validation and differing values produce a warning.
+`expression_presets` atomically select members from multiple sets. The initial
+transition policies are `discrete` and explicitly authored `crossfade`; an
+invalid member mapping fails compilation.
+
 Open [`preview/index.html`](preview/index.html) in a browser and select the Rig
 Bundle directory to test head turn, tilt, breath, blink, and gaze.
 

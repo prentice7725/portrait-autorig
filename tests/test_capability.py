@@ -78,7 +78,7 @@ class CapabilityReportTests(unittest.TestCase):
     def test_report_has_every_directive_example_key(self):
         report = capability_report([_part("head"), _part("mouth")], _preflight())
         for key in ("head_turn", "blink_l", "blink_r", "mouth_open",
-                   "hair_secondary", "upper_torso_secondary"):
+                   "hair_secondary", "upper_torso_secondary", "expression_variants"):
             self.assertIn(key, report)
 
 

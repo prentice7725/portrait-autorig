@@ -47,6 +47,7 @@ const Runtime = await import(runtimeUrl);
 const { weightAt, buildMesh, deform, state, scheduleBlink, startBlink, blinkAmount, breathRamp,
         fitShells, shellDelta, SHELL_MAX_YAW, SHELL_MAX_PITCH,
         expressionSwap, opacityOf, SWAP_HI, motionFromDeformers } = Runtime;
+const { applyVariantSet, applyExpressionPreset, evaluateVisibilityPhase } = Runtime;
 
 let failures = 0;
 function check(name, cond, detail = "") {
@@ -505,6 +506,45 @@ check("with art the replaced eye only closes as far as the swap point",
         deform(eye, 0, { ...still, blink: { l: 1, r: 0 } });
         return held < shiftAt(eye, 280).dy;
       })());
+
+console.log("\nVariantSet runtime binding (P0-F2)");
+{
+  const savedManifest = state.manifest;
+  const savedParts = state.parts;
+  state.manifest = {
+    variant_sets: {
+      mouth: {
+        mode: "exclusive", default: "mouth_neutral", active: "mouth_neutral",
+        members: ["mouth_neutral", "mouth_open"], transition: "discrete",
+        member_bindings: {
+          mouth_neutral: { instance_id: "mouth_neutral", tag: "mouth", part: "variant_mouth_neutral" },
+          mouth_open: { instance_id: "mouth_open", tag: "mouth", part: "variant_mouth_open" },
+        },
+      },
+      eyes: {
+        mode: "exclusive", default: "eyes_open", active: "eyes_open",
+        members: ["eyes_open", "eyes_annoyed"], transition: "discrete",
+        member_bindings: {
+          eyes_open: { instance_id: "eyes_open", tag: "eyes", part: "variant_eyes_open" },
+          eyes_annoyed: { instance_id: "eyes_annoyed", tag: "eyes", part: "variant_eyes_annoyed" },
+        },
+      },
+    },
+    expression_presets: { annoyed: { variants: { mouth: "mouth_open", eyes: "eyes_annoyed" } } },
+    deformers: [{ kind: "sprite_swap", phase: "visibility" }],
+  };
+  state.parts = ["variant_mouth_neutral", "variant_mouth_open", "variant_eyes_open", "variant_eyes_annoyed"]
+    .map((name) => ({ spec: { name }, visible: true }));
+  applyVariantSet("mouth", "mouth_open");
+  check("exclusive swap shows exactly one member", state.parts[0].visible === false && state.parts[1].visible === true);
+  applyExpressionPreset("annoyed");
+  check("ExpressionPreset applies multiple sets together",
+        state.parts[1].visible && state.parts[3].visible && !state.parts[2].visible);
+  check("visibility phase returns sprite swap entries",
+        evaluateVisibilityPhase(0).length === 1);
+  state.manifest = savedManifest;
+  state.parts = savedParts;
+}
 
 console.log("\ntilt about the neck pivot");
 state.blinkPhase = null;

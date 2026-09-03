@@ -90,6 +90,11 @@ def compile_assembly_asset(asset: AssemblyAsset, output_dir: str | os.PathLike[s
         gradient_tags=gradient_tags,
         contour_tags=contour_tags,
         run_id=asset.source_id,
+        variant_sets=asset.variant_sets,
+        expression_presets=asset.expressions,
+        variant_layers=asset.instance_layers,
+        instance_to_tag=asset.instance_to_tag,
+        variant_draw_order=[asset.instance_to_tag[i] for i in asset.instance_draw_order],
         preflight=preflight,
     )
     if manifest["rest_fidelity"]["status"] == "fail":

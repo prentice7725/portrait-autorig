@@ -182,8 +182,80 @@ export const state = {
   canMipmap: false,
   collarOverride: null,   // null = use whatever the manifest baked in
   shells: null,           // fitted in build(); null disables the shell path
+  variantSets: {},
+  variantSelections: {},
+  variantFades: {},
   t0: performance.now(),
 };
+
+/** Runtime binding for Composer VariantSets (P0-F2).  Composer instance ids
+ * are resolved through manifest.member_bindings; no semantic-name guessing is
+ * performed here. */
+export function applyVariantSet(setId, memberId, options = {}) {
+  const spec = state.manifest && (state.manifest.variant_sets || {})[setId];
+  if (!spec || !spec.members.includes(memberId)) {
+    throw new Error(`unknown VariantSet member: ${setId}/${memberId}`);
+  }
+  const transition = options.transition || spec.transition || "discrete";
+  if (transition !== "discrete" && transition !== "crossfade") {
+    throw new Error(`unsupported VariantSet transition: ${transition}`);
+  }
+  const names = spec.members.map((id) => spec.member_bindings[id]?.part).filter(Boolean);
+  const byName = new Map(state.parts.map((p) => [p.spec.name, p]));
+  if (names.length !== spec.members.length || names.some((name) => !byName.has(name))) {
+    throw new Error(`VariantSet ${setId} has an incomplete member binding`);
+  }
+  const previous = state.variantSelections[setId] ?? spec.default;
+  state.variantSelections[setId] = memberId;
+  if (transition === "crossfade" && previous !== memberId) {
+    state.variantFades[setId] = {
+      from: previous, to: memberId, start: performance.now(),
+      duration: Math.max(1, Number(options.duration_ms ?? 120)),
+    };
+    for (const id of spec.members) byName.get(spec.member_bindings[id].part).visible = true;
+  } else {
+    delete state.variantFades[setId];
+    for (const id of spec.members) {
+      byName.get(spec.member_bindings[id].part).visible = id === memberId;
+    }
+  }
+  return { set: setId, member: memberId, transition };
+}
+
+/** Apply all selections as one validated transaction. */
+export function applyExpressionPreset(presetId, options = {}) {
+  const preset = state.manifest && (state.manifest.expression_presets || {})[presetId];
+  if (!preset || !preset.variants) throw new Error(`unknown ExpressionPreset: ${presetId}`);
+  const selections = Object.entries(preset.variants);
+  for (const [setId, memberId] of selections) {
+    const spec = (state.manifest.variant_sets || {})[setId];
+    if (!spec || !spec.members.includes(memberId)) {
+      throw new Error(`ExpressionPreset ${presetId} selects invalid member ${setId}/${memberId}`);
+    }
+  }
+  const result = [];
+  for (const [setId, memberId] of selections) result.push(applyVariantSet(setId, memberId, options));
+  return result;
+}
+
+/** Consume visibility-phase sprite_swap entries and finish expired fades. */
+export function evaluateVisibilityPhase(now = performance.now()) {
+  for (const [setId, fade] of Object.entries(state.variantFades)) {
+    if (now - fade.start >= fade.duration) applyVariantSet(setId, fade.to, { transition: "discrete" });
+  }
+  return (state.manifest?.deformers || []).filter(
+    (d) => d.kind === "sprite_swap" && d.phase === "visibility");
+}
+
+/** Phase entry point used by the preview/runtime.  Non-visibility phases
+ * remain declarative until their existing deformation adapters consume them;
+ * visibility is fully live in P0-F2. */
+export function evaluatePhase(phase, now = performance.now()) {
+  const allowed = state.manifest?.evaluation?.phases;
+  if (allowed && !allowed.includes(phase)) throw new Error(`unknown evaluation phase: ${phase}`);
+  if (phase === "visibility") return evaluateVisibilityPhase(now);
+  return (state.manifest?.deformers || []).filter((d) => d.phase === phase);
+}
 
 /* ---------- loading ---------- */
 
@@ -728,7 +800,7 @@ export function build(manifest, images) {
     const eyeAnchor = side === "l" ? anchors.eye_left : side === "r" ? anchors.eye_right : null;
     const box = opening[side || ""] || part.xyxy;
     return {
-      spec: part, mesh, visible: true,
+      spec: part, mesh, visible: part.visible !== false,
       tex: makeTexture(gl, images.get(part.name)),
       buf: { pos: gl.createBuffer(), uv: gl.createBuffer(),
              idx: gl.createBuffer(), wire: gl.createBuffer() },
@@ -754,6 +826,20 @@ export function build(manifest, images) {
         ? buildSoftMorphWeights(part, mesh, softSpec, chestOccluders) : null,
     };
   });
+
+  state.variantSets = manifest.variant_sets || {};
+  state.variantSelections = {};
+  state.variantFades = {};
+  for (const [setId, spec] of Object.entries(state.variantSets)) {
+    state.variantSelections[setId] = spec.default;
+    // The manifest marks the default member visible; enforce it here too so
+    // old runtimes loading a hand-edited manifest cannot show two members.
+    for (const member of spec.members || []) {
+      const partName = spec.member_bindings?.[member]?.part;
+      const part = state.parts.find((p) => p.spec.name === partName);
+      if (part) part.visible = member === spec.default;
+    }
+  }
 
   // Who owns which feature. A pack part answers to one key; the parts it
   // stands in for answer to the same one, so a single number drives both sides
@@ -936,6 +1022,20 @@ export function blinkAmount(now) {
 /** How opaque a part is this frame. Only the expression pack moves this: with
  *  no pack every part draws at 1, which is the v0.1 rig. */
 export function opacityOf(part, motion) {
+  if (part.spec && part.spec.variant_set) {
+    const setId = part.spec.variant_set;
+    const spec = state.variantSets[setId];
+    const member = part.spec.variant_member;
+    const fade = state.variantFades[setId];
+    if (fade && spec) {
+      const amount = Math.max(0, Math.min(1, (motion.now - fade.start) / fade.duration));
+      if (amount >= 1) return member === fade.to ? 1 : 0;
+      if (member === fade.from) return 1 - amount;
+      if (member === fade.to) return amount;
+      return 0;
+    }
+    return spec && state.variantSelections[setId] === member ? 1 : 0;
+  }
   if (!motion.swap) return 1;
   if (part.expression) {
     const key = part.expression.kind === "mouth" ? "mouth" : part.expression.side;
@@ -1053,6 +1153,7 @@ export function frame(now) {
   const t = (now - state.t0) / 1000;
   const dt = Math.min(0.1, (now - (state.lastFrame || now)) / 1000);
   state.lastFrame = now;
+  evaluatePhase("visibility", now);
 
   if (document.getElementById("autoIdle").checked) {
     // Two incommensurable periods so the loop never visibly repeats, and the
@@ -1103,6 +1204,7 @@ export function frame(now) {
   const softMorphAmount = Math.max(0, breathSin) + Math.min(0, breathSin) * SOFT_MORPH_DEFLATE_SCALE;
 
   const motion = {
+    now,
     turnX: state.turnX, turnY: state.turnY,
     tiltRad: state.tiltDeg * Math.PI / 180,
     shell: state.shell,
@@ -1243,4 +1345,3 @@ document.getElementById("winkL").addEventListener("click",
   () => startBlink(performance.now(), ["l"]));
 document.getElementById("winkR").addEventListener("click",
   () => startBlink(performance.now(), ["r"]));
-

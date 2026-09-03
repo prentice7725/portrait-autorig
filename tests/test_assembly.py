@@ -240,6 +240,27 @@ class LoadAssemblyBundleTests(unittest.TestCase):
         self.assertIn("mouth", asset.variant_sets)
         self.assertEqual(asset.rig_intent, {"regions": {}, "attachments": {}, "deformation_scopes": {}})
 
+    def test_variant_members_keep_positioned_images_and_instance_mapping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "A001.assembly"
+            builder = AssemblyBundleBuilder(root)
+            builder.add_instance("base_i", semantic="head", box=(5, 5, 30, 30))
+            builder.add_instance("mouth_neutral_i", semantic="mouth", box=(10, 20, 20, 24), visible=True)
+            builder.add_instance("mouth_open_i", semantic="mouth", box=(10, 20, 22, 25), visible=False)
+            builder.write()
+            manifest_path = root / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["variant_sets"] = {
+                "mouth": {"mode": "exclusive", "default": "mouth_neutral_i",
+                          "active": "mouth_neutral_i",
+                          "members": ["mouth_neutral_i", "mouth_open_i"]}
+            }
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            asset = load_assembly_bundle(root)
+        self.assertEqual(asset.instance_to_tag["mouth_open_i"], "mouth")
+        self.assertEqual(set(asset.instance_layers), {"mouth_neutral_i", "mouth_open_i"})
+        self.assertEqual(asset.expressions, {})
+
     def test_reference_png_is_read(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "A001.assembly"
