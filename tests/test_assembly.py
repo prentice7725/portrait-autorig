@@ -152,6 +152,19 @@ class LoadAssemblyBundleTests(unittest.TestCase):
         self.assertEqual(asset.draw_order, ["neck", "topwear"])
         self.assertEqual(asset.source_id, "A001.assembly")
 
+    def test_preserves_composer_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "A001.assembly"
+            builder = AssemblyBundleBuilder(root)
+            builder.add_instance("neck_i", semantic="neck", box=(10, 20, 30, 40))
+            builder.write()
+            manifest_path = root / "manifest.json"
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            payload["provenance"] = {"composer": "2.1.0", "seed": "A002"}
+            manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+            asset = load_assembly_bundle(root)
+        self.assertEqual(asset.provenance, {"composer": "2.1.0", "seed": "A002"})
+
     def test_invisible_instance_is_excluded(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "A001.assembly"

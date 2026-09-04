@@ -48,6 +48,7 @@ const { weightAt, buildMesh, deform, state, scheduleBlink, startBlink, blinkAmou
         fitShells, shellDelta, SHELL_MAX_YAW, SHELL_MAX_PITCH,
         expressionSwap, opacityOf, SWAP_HI, motionFromDeformers } = Runtime;
 const { applyVariantSet, applyExpressionPreset, evaluateVisibilityPhase } = Runtime;
+const { evaluateAllPhases } = Runtime;
 
 let failures = 0;
 function check(name, cond, detail = "") {
@@ -554,6 +555,64 @@ check("a head part swings sideways when tilted", Math.abs(tilted.dx) > 10,
       `dx=${tilted.dx.toFixed(2)}`);
 deform(neck, 0, { ...still, tiltRad: 10 * Math.PI / 180 });
 check("the bottom of the neck does not swing", near(shiftAt(neck, 700).dx, 0, 1e-9));
+
+console.log("\ngaze and visibility curves (P0-H)");
+{
+  const savedManifest = state.manifest, savedParts = state.parts;
+  const savedParameters = state.parameters, savedOpening = state.eyeOpening;
+  state.manifest = {
+    anchors: { eye_left: [460, 300], eye_right: [540, 300] },
+    parameters: [{ id: "ParamEyeBallX", min: -1, max: 1, default: 0 },
+                 { id: "ParamEyeBallY", min: -1, max: 1, default: 0 }],
+    deformers: [{ id: "gaze", kind: "gaze", phase: "primary",
+                  parameters: ["ParamEyeBallX", "ParamEyeBallY"],
+                  config: { max_x: 0.25, max_y: 0.2, safe_margin: 0.08 } }],
+    evaluation: { phases: ["base", "primary", "corrective", "secondary", "constraints", "visibility", "render"] },
+  };
+  state.parameters = { ParamEyeBallX: 1, ParamEyeBallY: 0 };
+  state.eyeOpening = { l: [440, 280, 480, 320], r: [520, 280, 560, 320] };
+  const iris = part({ tag: "iridesl", group: "head", depth: 0.3, xyxy: [450, 290, 470, 310],
+                      mesh: { cell: 10 }, weight: { mode: "constant", value: 1 } });
+  const white = part({ tag: "eyewhitel", group: "head", depth: 0.31, xyxy: [440, 280, 480, 320],
+                       mesh: { cell: 10 }, weight: { mode: "constant", value: 1 } });
+  deform(iris, 0, { ...still, gaze: state.manifest.deformers[0].config });
+  deform(white, 0, { ...still, gaze: state.manifest.deformers[0].config });
+  check("gaze moves independent iris only", shiftAt(iris, 300).dx > 0 && near(shiftAt(white, 300).dx, 0));
+  const curveManifest = {
+    parameters: [{ id: "ParamEyeLOpen", min: 0, max: 1, default: 0.5 }],
+    deformers: [
+      { id: "curve_a", kind: "visibility_curve", phase: "visibility",
+        parameter: "ParamEyeLOpen", targets: ["eyewhitel"],
+        points: [{ value: 0, alpha: 1 }, { value: 1, alpha: 0 }] },
+      { id: "curve_b", kind: "visibility_curve", phase: "visibility",
+        parameter: "ParamEyeLOpen", targets: ["eyewhitel"],
+        points: [{ value: 0, alpha: 1 }, { value: 1, alpha: 0.5 }] },
+    ],
+    evaluation: { phases: ["visibility"] },
+  };
+  state.manifest = curveManifest;
+  state.parameters = { ParamEyeLOpen: 0.5 };
+  const curvePart = { spec: { name: "eye_white", tag: "eyewhitel" } };
+  check("visibility curves multiply", near(opacityOf(curvePart, {}), 0.375));
+  state.manifest = savedManifest; state.parts = savedParts;
+  state.parameters = savedParameters; state.eyeOpening = savedOpening;
+}
+
+console.log("\ncentral phase evaluator (P0-H)");
+{
+  const savedManifest = state.manifest;
+  state.manifest = {
+    evaluation: { phases: ["base", "primary", "corrective", "secondary", "constraints", "visibility", "render"] },
+    drivers: [{ id: "driver_secondary", phase: "secondary" }],
+    deformers: [{ id: "deformer_primary", kind: "gaze", phase: "primary" },
+                { id: "deformer_visibility", kind: "visibility_curve", phase: "visibility" }],
+    constraints: [{ id: "constraint_one", phase: "constraints" }],
+  };
+  const trace = evaluateAllPhases(0, {});
+  check("phase evaluator follows manifest order",
+        JSON.stringify(trace) === JSON.stringify(state.manifest.evaluation.phases));
+  state.manifest = savedManifest;
+}
 
 console.log("\nP0-D: motion{} <-> deformers[] equivalence (absorption plan #7, #19)");
 {

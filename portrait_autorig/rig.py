@@ -122,6 +122,9 @@ DEFAULT_MOTION: dict[str, Any] = {
     # squint; a real lid comes down onto the lower one.
     "blink": {"close_s": 0.08, "hold_s": 0.34, "open_s": 0.16,
               "interval_s": [1.6, 5.4], "lid_ratio": 0.85, "lid_thickness": 0.18},
+    # Conservative eye-ball travel.  This is a normalized local range; the
+    # runtime clamps it to each eye opening so it cannot escape the socket.
+    "gaze": {"max_x": 0.22, "max_y": 0.14, "safe_margin": 0.08},
 }
 
 
@@ -663,6 +666,12 @@ def rig_preflight(layer_dict: dict[str, np.ndarray], *,
         "required": True,
         "bilateral_anchors": bilateral_anchors,
     }
+    gaze_tags = {tag for tag in probe if tag in {"iridesl", "iridesr", "irides", "eyel", "eyer", "eyes"}}
+    checks["gaze"] = {
+        "required": False,
+        "available": ("ready" if {"iridesl", "iridesr"}.issubset(gaze_tags)
+                       else "degraded" if gaze_tags else "disabled"),
+    }
     final_anchors = detect_anchors(probe, sample.shape[:2], alpha_threshold=alpha_threshold)
     required_anchors = ("face_center", "eye_left", "eye_right", "mouth",
                         "neck_pivot", "body_pivot")
@@ -963,6 +972,9 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
               variant_layers: dict[str, np.ndarray] | None = None,
               instance_to_tag: dict[str, str] | None = None,
               variant_draw_order: Sequence[str] | None = None,
+              provenance: dict[str, Any] | None = None,
+              source_instance_ids: dict[str, str] | None = None,
+              visibility_curves: Sequence[dict[str, Any]] | None = None,
               ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     """Stages A-D: turn `{tag: full-canvas RGBA}` into `(manifest, images)`.
 
@@ -1179,7 +1191,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         # (once they exist) invalidate on a hash mismatch rather than being
         # silently reused; see topology.topology_changed.
         part_mesh["topology_hash"] = mesh_topology_hash(part_mesh, tuple(int(v) for v in xyxy))
-        parts.append({
+        part_spec = {
             "name": name,
             "tag": tag,
             "image": f"{image_prefix}/{name}.png" if image_prefix else f"{name}.png",
@@ -1189,7 +1201,10 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
             "z": z,
             "weight": weight,
             "mesh": part_mesh,
-        })
+        }
+        if source_instance_ids and tag in source_instance_ids:
+            part_spec["source_instance_id"] = source_instance_ids[tag]
+        parts.append(part_spec)
         if derived_report and derived_report.get("succeeded") and tag in derived_report["parts"]:
             parts[-1]["derived"] = True
 
@@ -1231,6 +1246,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
                     "depth": round(float(_DEPTH_TABLE.get(tag, UNKNOWN_DEPTH)), 4),
                     "z": float(base_z), "weight": weight, "mesh": part_mesh,
                     "variant_member": member,
+                    "source_instance_id": member,
                     "visible": False,
                 })
                 images[name] = crop_img
@@ -1250,6 +1266,9 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
             "status": "disabled", "warnings": [], "errors": []
         }
 
+    motion_payload = json.loads(json.dumps(motion if motion is not None else DEFAULT_MOTION))
+    if visibility_curves:
+        motion_payload["visibility_curves"] = json.loads(json.dumps(list(visibility_curves)))
     manifest = {
         "version": MANIFEST_VERSION,
         "canvas": {"width": canvas_w, "height": canvas_h},
@@ -1265,9 +1284,14 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         },
         "anchors": anchors,
         "parts": parts,
-        "motion": json.loads(json.dumps(motion if motion is not None else DEFAULT_MOTION)),
+        "motion": motion_payload,
         "rig_preflight": json.loads(json.dumps(preflight)),
     }
+    if provenance is not None:
+        # Provenance is a Composer-owned opaque payload.  AutoRig forwards it
+        # verbatim and only adds operation provenance for derived semantics.
+        manifest["source"]["provenance"] = json.loads(json.dumps(provenance))
+        manifest["provenance"] = json.loads(json.dumps(provenance))
     if "upper_torso_soft_morph" not in manifest["motion"]:
         if rig_intent is not None:
             # Assembly path: Composer's authored region, or explicitly

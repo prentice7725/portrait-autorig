@@ -120,6 +120,26 @@ class DeformersFromMotionTests(unittest.TestCase):
         for d in deformers:
             self.assertEqual(d["kind"], "eye_fold")
 
+    def test_gaze_becomes_primary_deformer(self):
+        deformers = manifest.deformers_from_motion({"gaze": {"max_x": 0.2}})
+        self.assertEqual(len(deformers), 1)
+        self.assertEqual(deformers[0]["kind"], "gaze")
+        self.assertEqual(deformers[0]["phase"], "primary")
+        self.assertEqual(deformers[0]["parameters"], ["ParamEyeBallX", "ParamEyeBallY"])
+        self.assertEqual(deformers[0]["config"]["max_x"], 0.2)
+        self.assertIn("max_y", deformers[0]["config"])
+
+    def test_visibility_curves_are_visibility_deformers(self):
+        deformers = manifest.deformers_from_motion({
+            "visibility_curves": [{
+                "parameter": "ParamEyeLOpen", "targets": ["eyewhitel"],
+                "points": [{"value": 0.0, "alpha": 1.0}, {"value": 1.0, "alpha": 0.0}],
+            }],
+        })
+        self.assertEqual(len(deformers), 1)
+        self.assertEqual(deformers[0]["kind"], "visibility_curve")
+        self.assertEqual(deformers[0]["phase"], "visibility")
+
     def test_missing_motion_keys_yield_no_matching_deformer(self):
         self.assertEqual(manifest.deformers_from_motion({}), [])
 

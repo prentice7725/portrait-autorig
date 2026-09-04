@@ -58,6 +58,14 @@ class CapabilityReportTests(unittest.TestCase):
         self.assertEqual(capability_report([_part("mouth")], _preflight())["mouth_open"], READY)
         self.assertEqual(capability_report([_part("head")], _preflight())["mouth_open"], DISABLED)
 
+    def test_gaze_capability_prefers_independent_iris_parts(self):
+        self.assertEqual(
+            capability_report([_part("iridesl"), _part("iridesr")], _preflight())["gaze"],
+            READY,
+        )
+        self.assertEqual(capability_report([_part("eyes")], _preflight())["gaze"], DEGRADED)
+        self.assertEqual(capability_report([_part("face")], _preflight())["gaze"], DISABLED)
+
     def test_hair_secondary_is_always_unsupported(self):
         # Strand physics (P2) does not exist in this compiler at all yet --
         # UNSUPPORTED regardless of whether hair parts compiled.
@@ -78,7 +86,7 @@ class CapabilityReportTests(unittest.TestCase):
     def test_report_has_every_directive_example_key(self):
         report = capability_report([_part("head"), _part("mouth")], _preflight())
         for key in ("head_turn", "blink_l", "blink_r", "mouth_open",
-                   "hair_secondary", "upper_torso_secondary", "expression_variants"):
+                   "hair_secondary", "upper_torso_secondary", "expression_variants", "gaze"):
             self.assertIn(key, report)
 
 

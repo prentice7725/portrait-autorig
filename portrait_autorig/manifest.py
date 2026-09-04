@@ -14,7 +14,8 @@ from typing import Any
 
 from .parameters import (
     PARAM_ANGLE_X, PARAM_ANGLE_Y, PARAM_ANGLE_Z,
-    PARAM_BREATH, PARAM_EYE_L_OPEN, PARAM_EYE_R_OPEN, PARAM_UPPER_TORSO_SECONDARY,
+    PARAM_BREATH, PARAM_EYE_L_OPEN, PARAM_EYE_R_OPEN, PARAM_EYEBALL_X, PARAM_EYEBALL_Y,
+    PARAM_UPPER_TORSO_SECONDARY,
     parameter_descriptor, standard_parameter_registry,
 )
 
@@ -22,7 +23,7 @@ __all__ = [
     "RIG_MANIFEST_VERSION_01", "RIG_MANIFEST_VERSION_02", "RIG_MANIFEST_VERSION",
     "DEFORMER_PARALLAX_TURN", "DEFORMER_SHELL_TURN", "DEFORMER_WEIGHTED_ROTATION",
     "DEFORMER_CONTINUOUS_FIELD", "DEFORMER_EYE_FOLD", "DEFORMER_GAZE",
-    "DEFORMER_SPRITE_SWAP", "DEFORMER_LOCAL_SOFT_FIELD", "DEFORMER_KINDS",
+    "DEFORMER_SPRITE_SWAP", "DEFORMER_VISIBILITY_CURVE", "DEFORMER_LOCAL_SOFT_FIELD", "DEFORMER_KINDS",
     "DRIVER_UPPER_TORSO_SECONDARY",
     "PHASE_BASE", "PHASE_PRIMARY", "PHASE_CORRECTIVE", "PHASE_SECONDARY",
     "PHASE_CONSTRAINTS", "PHASE_VISIBILITY", "PHASE_RENDER", "EVALUATION_PHASES",
@@ -47,6 +48,7 @@ DEFORMER_CONTINUOUS_FIELD = "continuous_field"
 DEFORMER_EYE_FOLD = "eye_fold"
 DEFORMER_GAZE = "gaze"
 DEFORMER_SPRITE_SWAP = "sprite_swap"
+DEFORMER_VISIBILITY_CURVE = "visibility_curve"
 # local_soft_field (directive v0.2 #15, #18): the deformer kind
 # upper_torso_secondary (and any future authored secondary region) writes
 # its displacement through -- see upper_torso_secondary_entries.
@@ -54,6 +56,7 @@ DEFORMER_LOCAL_SOFT_FIELD = "local_soft_field"
 DEFORMER_KINDS = frozenset({
     DEFORMER_PARALLAX_TURN, DEFORMER_SHELL_TURN, DEFORMER_WEIGHTED_ROTATION,
     DEFORMER_CONTINUOUS_FIELD, DEFORMER_EYE_FOLD, DEFORMER_GAZE, DEFORMER_SPRITE_SWAP,
+    DEFORMER_VISIBILITY_CURVE,
     DEFORMER_LOCAL_SOFT_FIELD,
 })
 
@@ -66,9 +69,8 @@ DRIVER_UPPER_TORSO_SECONDARY = "UpperTorsoSecondaryDriver"
 # deformer/driver/constraint declares which phase it runs in, in this fixed
 # order -- a rig runtime's own call order must never be the implicit
 # contract. P0-G locks the vocabulary and tags every synthesized deformer
-# with one; the runtime consuming *this* field (rather than the P0-D
-# motion{} adapter's hardcoded sequence) is later work -- see runtime.mjs's
-# module docstring for exactly where that stands today.
+# with one; P0-H's runtime evaluates the declared list in this order while
+# retaining the motion{} adapter for v0.1 compatibility.
 PHASE_BASE = "base"
 PHASE_PRIMARY = "primary"
 PHASE_CORRECTIVE = "corrective"
@@ -152,6 +154,33 @@ def deformers_from_motion(motion: dict[str, Any]) -> list[dict[str, Any]]:
                 "parameters": [param],
                 "targets": {"side": side}, "config": dict(blink), "phase": PHASE_PRIMARY,
             })
+
+    gaze = motion.get("gaze")
+    if gaze:
+        config = dict(gaze)
+        config.setdefault("max_x", 0.22)
+        config.setdefault("max_y", 0.14)
+        config.setdefault("safe_margin", 0.08)
+        deformers.append({
+            "id": "gaze", "kind": DEFORMER_GAZE,
+            "parameters": [PARAM_EYEBALL_X, PARAM_EYEBALL_Y],
+            "targets": {"tags": ["iridesl", "iridesr", "irides", "eyel", "eyer", "eyes"]},
+            "config": config, "phase": PHASE_PRIMARY,
+        })
+
+    curves = motion.get("visibility_curves") or motion.get("visibility_curve")
+    if isinstance(curves, dict):
+        curves = [curves]
+    if isinstance(curves, list):
+        for index, curve in enumerate(curves):
+            if not isinstance(curve, dict):
+                continue
+            item = dict(curve)
+            item.setdefault("targets", item.get("target", []))
+            item.setdefault("phase", PHASE_VISIBILITY)
+            item.setdefault("id", f"visibility_curve_{index}")
+            item["kind"] = DEFORMER_VISIBILITY_CURVE
+            deformers.append(item)
 
     return deformers
 

@@ -50,7 +50,8 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-__all__ = ["ASSEMBLY_FORMAT", "ASSEMBLY_VERSION", "AssemblyAsset", "load_assembly_bundle"]
+__all__ = ["ASSEMBLY_FORMAT", "ASSEMBLY_VERSION", "ASSEMBLY_SCHEMA_PIN",
+           "AssemblyAsset", "load_assembly_bundle"]
 
 ASSEMBLY_FORMAT = "portrait-assembly"
 # Exact match, not a major-version prefix check: pre-1.0, a minor bump
@@ -58,6 +59,7 @@ ASSEMBLY_FORMAT = "portrait-assembly"
 # schema pins `"version": {"const": "0.2"}`), so a 0.3 bundle must fail
 # loudly here rather than being read against the wrong field shapes.
 ASSEMBLY_VERSION = "0.2"
+ASSEMBLY_SCHEMA_PIN = f"{ASSEMBLY_FORMAT}@{ASSEMBLY_VERSION}"
 
 
 @dataclass(frozen=True)
@@ -77,6 +79,7 @@ class AssemblyAsset:
     instance_draw_order: list[str]
     reference: np.ndarray              # Composer's own rendered reference.png
     source_id: str
+    provenance: dict[str, Any]
 
 
 def _read_json(path: Path) -> dict:
@@ -256,4 +259,5 @@ def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
         instance_draw_order=instance_draw_order,
         reference=reference,
         source_id=root.name,
+        provenance=manifest.get("provenance") or {},
     )
