@@ -20,7 +20,7 @@ from .rig import build_rig, rig_preflight, write_rig_project
 
 def compile_asset(asset: PortraitAsset, output_dir: str | os.PathLike[str], *,
                   gradient_tags=(), contour_tags=(), island_policy="separate",
-                  clip_masks=(), boundary_stitches=()) -> str:
+                  clip_masks=(), boundary_stitches=(), physics=None) -> str:
     preflight = rig_preflight(asset.layers, original_rgba=asset.original,
                               body_remainder=asset.body_remainder)
     if preflight["status"] == "INCOMPATIBLE":
@@ -37,6 +37,7 @@ def compile_asset(asset: PortraitAsset, output_dir: str | os.PathLike[str], *,
         island_policy=island_policy,
         clip_masks=clip_masks,
         boundary_stitches=boundary_stitches,
+        physics=physics,
         run_id=asset.source_id,
         tag_version=asset.tag_version,
         preflight=preflight,
@@ -54,24 +55,24 @@ def compile_asset(asset: PortraitAsset, output_dir: str | os.PathLike[str], *,
 
 
 def compile_bundle(bundle_dir: str, output_dir: str, *, gradient_tags=(), contour_tags=(), island_policy="separate",
-                   clip_masks=(), boundary_stitches=()) -> str:
+                   clip_masks=(), boundary_stitches=(), physics=None) -> str:
     return compile_asset(load_portrait_bundle(bundle_dir), output_dir,
                          gradient_tags=gradient_tags, contour_tags=contour_tags,
                          island_policy=island_policy, clip_masks=clip_masks,
-                         boundary_stitches=boundary_stitches)
+                         boundary_stitches=boundary_stitches, physics=physics)
 
 
 def compile_legacy_run(run_dir: str, output_dir: str, *, gradient_tags=(), contour_tags=(), island_policy="separate",
-                       clip_masks=(), boundary_stitches=()) -> str:
+                       clip_masks=(), boundary_stitches=(), physics=None) -> str:
     return compile_asset(load_legacy_run(run_dir), output_dir,
                          gradient_tags=gradient_tags, contour_tags=contour_tags,
                          island_policy=island_policy, clip_masks=clip_masks,
-                         boundary_stitches=boundary_stitches)
+                         boundary_stitches=boundary_stitches, physics=physics)
 
 
 def compile_assembly_asset(asset: AssemblyAsset, output_dir: str | os.PathLike[str], *,
                            gradient_tags=(), contour_tags=(), island_policy="separate",
-                           clip_masks=(), boundary_stitches=()) -> str:
+                           clip_masks=(), boundary_stitches=(), physics=None) -> str:
     """Compile an Assembly Bundle v0.2 (`assembly.load_assembly_bundle`) into
     a Rig Bundle -- the "AutoRig Assembly input seam" (Master doc #22 STEP
     2). Every Stage A-D derivation in `build_rig` (remainder split, eye
@@ -119,6 +120,7 @@ def compile_assembly_asset(asset: AssemblyAsset, output_dir: str | os.PathLike[s
         island_policy=island_policy,
         clip_masks=clip_masks,
         boundary_stitches=boundary_stitches,
+        physics=physics,
         run_id=asset.source_id,
         variant_sets=asset.variant_sets,
         expression_presets=asset.expressions,
@@ -151,8 +153,8 @@ def compile_assembly_asset(asset: AssemblyAsset, output_dir: str | os.PathLike[s
 
 def compile_assembly_bundle(bundle_dir: str, output_dir: str, *,
                             gradient_tags=(), contour_tags=(), island_policy="separate",
-                            clip_masks=(), boundary_stitches=()) -> str:
+                            clip_masks=(), boundary_stitches=(), physics=None) -> str:
     return compile_assembly_asset(load_assembly_bundle(bundle_dir), output_dir,
                                   gradient_tags=gradient_tags, contour_tags=contour_tags,
                                   island_policy=island_policy, clip_masks=clip_masks,
-                                  boundary_stitches=boundary_stitches)
+                                  boundary_stitches=boundary_stitches, physics=physics)

@@ -146,7 +146,14 @@ P1은 위 항목과 parity/QA gate를 충족하여 `CLOSED/FROZEN` 상태입니�
   motion-aware density(P1-D), strand topology, clip-mask contract, N-way
   boundary-stitch contract, strand partition QA, constraints-phase dispatch 및
   GPU pixel-level clip/stencil backend
-- 다음: deterministic physics와 spring/damping 계열(P2)
+- P2 진행: deterministic fixed-step core(`resetPhysics`, `warmupPhysics`,
+  `stepPhysicsFixed`), non-finite rollback, `StrandSpringDriver`,
+  `UpperTorsoSecondaryDriver`와 `soft`/`firm_bounce`/`springy` profiles를
+  추가했고, opt-in `physics` manifest block과 preview fixed-tick loop에
+  연결했습니다. strand/torso output은 secondary geometry operation으로
+  적용됩니다. physics manifest preflight와 capture reset/warmup golden QA도
+  추가했습니다. 남은 P2는 corpus 기반 production driver tuning입니다.
+  프로파일 envelope는 `node preview/check_physics_tuning.mjs`로 재현할 수 있습니다.
 
 테스트 의존성에는 원본 Composer schema를 직접 검증하기 위한 `jsonschema`가 포함되어
 있으며, 일반 runtime은 외부 Composer 또는 `seethrough_engine`를 import하지 않습니다.

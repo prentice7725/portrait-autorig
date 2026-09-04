@@ -1,0 +1,89 @@
+from __future__ import annotations
+
+import math
+import unittest
+
+import numpy as np
+
+from portrait_autorig.physics import (
+    DeterministicSpring, PhysicsMaterial, StrandSpringDriver,
+    UpperTorsoSecondaryDriver, validate_physics_spec,
+)
+from portrait_autorig.rig import build_rig
+from portrait_autorig.manifest import physics_deformer_entries
+
+
+class DeterministicPhysicsTests(unittest.TestCase):
+    def test_fixed_steps_are_reproducible(self):
+        kwargs = {"rest": 0.0, "material": PhysicsMaterial(stiffness=20, damping=5)}
+        a = DeterministicSpring(**kwargs)
+        b = DeterministicSpring(**kwargs)
+        a.stepPhysicsFixed(30, target=1.0)
+        b.stepPhysicsFixed(30, target=1.0)
+        self.assertEqual(a.snapshot(), b.snapshot())
+
+    def test_reset_and_warmup_restore_a_known_state(self):
+        spring = DeterministicSpring(rest=2.0)
+        spring.stepPhysicsFixed(10, target=5.0)
+        spring.resetPhysics()
+        self.assertEqual(spring.value, 2.0)
+        self.assertEqual(spring.velocity, 0.0)
+        warmed = spring.warmupPhysics(0.25, target=5.0)
+        self.assertTrue(math.isfinite(warmed.value))
+        self.assertNotEqual(warmed.value, 2.0)
+
+    def test_non_finite_state_rolls_back_and_degrades(self):
+        spring = DeterministicSpring(material=PhysicsMaterial(stiffness=1e308, damping=0))
+        before = spring.snapshot()
+        result = spring.stepPhysicsFixed(1, target=1e308)
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.diagnostic, "non_finite_rollback")
+        self.assertEqual((result.value, result.velocity), (before.value, before.velocity))
+
+    def test_invalid_material_is_rejected(self):
+        with self.assertRaises(ValueError):
+            PhysicsMaterial(mass=0)
+
+    def test_strand_driver_is_id_stable_and_exposes_all_outputs(self):
+        strands = [{"strand_id": "left", "length": 2}, {"strand_id": "right", "length": 4}]
+        a = StrandSpringDriver(strands)
+        b = StrandSpringDriver(strands)
+        out_a = a.stepPhysicsFixed(10, target=1.0)
+        out_b = b.stepPhysicsFixed(10, target=1.0)
+        self.assertEqual(out_a, out_b)
+        self.assertEqual(set(out_a), {"left", "right"})
+        self.assertNotEqual(out_a["left"].value, out_a["right"].value)
+
+    def test_torso_driver_profiles_are_explicit(self):
+        driver = UpperTorsoSecondaryDriver(profile="firm_bounce")
+        driver.resetPhysics()
+        result = driver.stepPhysicsFixed(5, breath=1.0, angle_y=0.2)
+        self.assertTrue(math.isfinite(result.value))
+        with self.assertRaises(ValueError):
+            UpperTorsoSecondaryDriver(profile="unknown")
+
+    def test_physics_block_is_opt_in_and_preserved_in_manifest(self):
+        head = np.zeros((12, 12, 4), dtype=np.uint8)
+        head[2:10, 2:10, 3] = 255
+        spec = {"config": {"update_hz": 60},
+                "strand_driver": {"enabled": True, "strands": [{"strand_id": "s"}]}}
+        manifest, _ = build_rig({"head": head}, frame_size=(12, 12), physics=spec)
+        self.assertEqual(manifest["physics"], spec)
+        self.assertEqual([item["kind"] for item in manifest["deformers"] if item["phase"] == "secondary"][-1:],
+                         ["strand_spring"])
+
+    def test_physics_deformer_entries_are_opt_in(self):
+        entries = physics_deformer_entries({
+            "strand_driver": {"strands": [{"strand_id": "s"}]},
+            "upper_torso_driver": {"profile": "soft"},
+        })
+        self.assertEqual([entry["kind"] for entry in entries],
+                         ["strand_spring", "upper_torso_physics"])
+
+    def test_invalid_manifest_physics_is_rejected_before_runtime(self):
+        errors = validate_physics_spec({
+            "config": {"update_hz": 0},
+            "strand_driver": {"strands": [{"strand_id": "s"}, {"strand_id": "s"}]},
+            "upper_torso_driver": {"profile": "nope"},
+        })
+        self.assertEqual(len(errors), 3)

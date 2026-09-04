@@ -16,6 +16,9 @@ must not silently become defaults.
 | derived eyewhite fallback | ACTIVE | only when canonical `eyewhite` is missing and rest-fidelity/confidence checks pass | provenance is recorded; failed derivation leaves the canonical head untouched |
 | clip-mask crop UV | ACTIVE | source alpha is sampled from the source part's canvas `xyxy` crop | outside-source pixels are zeroed in the fragment shader |
 | boundary stitch tolerance | ACTIVE | skip correction when member spread is within `tolerance_px` | avoids changing a matching rest pose; N-way weighted average otherwise |
+| P2 spring integrator | ACTIVE | semi-implicit Euler at `update_hz=60` | fixed-step parity and non-finite rollback tests |
+| strand phase offset | EXPERIMENTAL | deterministic SHA-256-derived offset, ±0.01 | stable per `strand_id`; no global randomness |
+| torso response profiles | EXPERIMENTAL | `soft`, `firm_bounce`, `springy` material presets | explicit profile selection; no default manifest activation yet |
 
 ## Status vocabulary
 
@@ -24,5 +27,4 @@ must not silently become defaults.
 - `REJECTED`: tested and intentionally not used.
 - `REPLACED`: superseded by a named rule; retained for historical traceability.
 
-P2 physics constants and spring response profiles are intentionally not listed
-as active AutoRig behavior until their deterministic runtime is implemented.
+P2 drivers remain opt-in until they are connected to the manifest/runtime path.
