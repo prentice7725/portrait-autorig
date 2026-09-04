@@ -127,6 +127,24 @@ export const DEFAULT_EVALUATION_PHASES = [
   "base", "primary", "corrective", "secondary", "constraints", "visibility", "render",
 ];
 
+// Phase dispatch is the runtime seam.  Deformers describe *what* is active;
+// these handlers decide which phase consumes each kind.  The legacy `deform`
+// function remains the geometry backend called by the render loop, rather
+// than being the place where a fixed invocation order defines semantics.
+export const PHASE_DEFORMER_HANDLERS = {
+  gaze(deformer, context) {
+    if (context.motion && deformer.config) {
+      context.motion.gaze = { ...(context.motion.gaze || {}), ...deformer.config };
+    }
+  },
+  sprite_swap(deformer, context) {
+    (context.visibility || (context.visibility = [])).push(deformer.id);
+  },
+  visibility_curve(deformer, context) {
+    (context.visibility || (context.visibility = [])).push(deformer.id);
+  },
+};
+
 // An expression pack (M4.1) carries drawings the decomposition cannot produce:
 // a shut eye, an open mouth. Where one exists it *owns* the feature while it is
 // showing, and the parts it stands in for fade out under it.
@@ -193,6 +211,7 @@ export const state = {
   gazeTargets: [],
   eyeOpening: { l: null, r: null },
   phaseTrace: [],
+  phaseDispatch: {},
   t0: performance.now(),
 };
 
@@ -339,6 +358,11 @@ export function evaluateDrivers(phase, context = {}) {
 export function evaluateDeformers(phase, context = {}) {
   const entries = (state.manifest?.deformers || []).filter((d) => d.phase === phase);
   context.executedDeformers = (context.executedDeformers || []).concat(entries.map((d) => d.id));
+  state.phaseDispatch[phase] = entries.map((d) => ({ id: d.id, kind: d.kind }));
+  for (const deformer of entries) {
+    const handler = PHASE_DEFORMER_HANDLERS[deformer.kind];
+    if (handler) handler(deformer, context);
+  }
   if (phase === "visibility") evaluateVisibilityPhase(context.now ?? performance.now());
   return entries;
 }
@@ -346,6 +370,8 @@ export function evaluateDeformers(phase, context = {}) {
 export function evaluateConstraints(phase, context = {}) {
   const entries = (state.manifest?.constraints || []).filter((d) => (d.phase || "constraints") === phase);
   context.executedConstraints = (context.executedConstraints || []).concat(entries.map((d) => d.id));
+  state.phaseDispatch[phase] = (state.phaseDispatch[phase] || []).concat(
+    entries.map((d) => ({ id: d.id, kind: d.kind || "constraint" })));
   return entries;
 }
 
@@ -364,6 +390,7 @@ export function evaluatePhase(phase, now = performance.now(), context = {}) {
 
 export function evaluateAllPhases(now = performance.now(), context = {}) {
   state.phaseTrace = [];
+  state.phaseDispatch = {};
   const phases = state.manifest?.evaluation?.phases || DEFAULT_EVALUATION_PHASES;
   for (const phase of phases) evaluatePhase(phase, now, context);
   return state.phaseTrace.slice();

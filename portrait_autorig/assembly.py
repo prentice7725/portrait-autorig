@@ -44,14 +44,17 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from PIL import Image
 
-__all__ = ["ASSEMBLY_FORMAT", "ASSEMBLY_VERSION", "ASSEMBLY_SCHEMA_PIN",
-           "AssemblyAsset", "load_assembly_bundle"]
+__all__ = ["ASSEMBLY_FORMAT", "ASSEMBLY_VERSION", "ASSEMBLY_SCHEMA_VENDOR",
+           "ASSEMBLY_SCHEMA_COMMIT", "ASSEMBLY_SCHEMA_ID", "ASSEMBLY_SCHEMA_PIN",
+           "ASSEMBLY_SCHEMA_PATH", "AssemblyAsset", "validate_assembly_manifest",
+           "load_assembly_bundle"]
 
 ASSEMBLY_FORMAT = "portrait-assembly"
 # Exact match, not a major-version prefix check: pre-1.0, a minor bump
@@ -59,7 +62,14 @@ ASSEMBLY_FORMAT = "portrait-assembly"
 # schema pins `"version": {"const": "0.2"}`), so a 0.3 bundle must fail
 # loudly here rather than being read against the wrong field shapes.
 ASSEMBLY_VERSION = "0.2"
-ASSEMBLY_SCHEMA_PIN = f"{ASSEMBLY_FORMAT}@{ASSEMBLY_VERSION}"
+# The schema is vendored from Composer rather than imported at runtime.  The
+# commit is part of the input seam, so a future Composer schema change cannot
+# silently alter what AutoRig accepts.
+ASSEMBLY_SCHEMA_VENDOR = "portrait-composer"
+ASSEMBLY_SCHEMA_COMMIT = "682f25e"
+ASSEMBLY_SCHEMA_ID = "portrait-assembly-v0.2"
+ASSEMBLY_SCHEMA_PIN = f"{ASSEMBLY_SCHEMA_VENDOR}@{ASSEMBLY_SCHEMA_COMMIT}:{ASSEMBLY_SCHEMA_ID}"
+ASSEMBLY_SCHEMA_PATH = Path(__file__).with_name("schemas") / "portrait-assembly-v0.2.schema.json"
 
 
 @dataclass(frozen=True)
@@ -88,6 +98,104 @@ def _read_json(path: Path) -> dict:
     if not isinstance(value, dict):
         raise ValueError(f"JSON object required: {path}")
     return value
+
+
+def _schema_errors(manifest: Any) -> list[str]:
+    """Validate the vendored Composer v0.2 structural contract.
+
+    This deliberately stays dependency-free: the package must be able to
+    preflight a bundle before optional tooling is installed.  Unknown fields
+    remain allowed so Composer can add non-breaking metadata without making
+    the AutoRig seam a second schema owner.
+    """
+    errors: list[str] = []
+    if not isinstance(manifest, dict):
+        return ["manifest must be a JSON object"]
+    if manifest.get("format") != ASSEMBLY_FORMAT:
+        errors.append(f"format must be {ASSEMBLY_FORMAT!r}")
+    if str(manifest.get("version", "")) != ASSEMBLY_VERSION:
+        errors.append(f"version must be {ASSEMBLY_VERSION!r}")
+    for key in ("assets", "instances", "composition"):
+        if not isinstance(manifest.get(key), dict):
+            errors.append(f"{key} must be an object")
+    composition = manifest.get("composition")
+    if isinstance(composition, dict):
+        order = composition.get("draw_order")
+        if not isinstance(order, list) or not order:
+            errors.append("composition.draw_order must be a non-empty array")
+        canvas = composition.get("canvas")
+        if not isinstance(canvas, dict):
+            errors.append("composition.canvas must be an object")
+        else:
+            for key in ("width", "height"):
+                value = canvas.get(key)
+                if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+                    errors.append(f"composition.canvas.{key} must be positive")
+    assets = manifest.get("assets")
+    instances = manifest.get("instances")
+    if isinstance(assets, dict):
+        for asset_id, asset in assets.items():
+            if not isinstance(asset, dict):
+                errors.append(f"asset {asset_id!r} must be an object")
+            elif not isinstance(asset.get("semantic"), str) or not asset.get("semantic"):
+                errors.append(f"asset {asset_id!r} must have semantic")
+    if isinstance(assets, dict) and isinstance(instances, dict):
+        for instance_id, inst in instances.items():
+            if not isinstance(inst, dict):
+                errors.append(f"instance {instance_id!r} must be an object")
+                continue
+            asset_ref = inst.get("asset_ref")
+            if not isinstance(asset_ref, str) or not asset_ref:
+                errors.append(f"instance {instance_id!r} must have asset_ref")
+            elif not isinstance(assets.get(asset_ref), dict):
+                errors.append(f"instance {instance_id!r} references unknown asset {asset_ref!r}")
+    if isinstance(assets, dict) and isinstance(instances, dict) and isinstance(composition, dict):
+        order = composition.get("draw_order")
+        if isinstance(order, list):
+            for instance_id in order:
+                inst = instances.get(instance_id)
+                if not isinstance(inst, dict):
+                    errors.append(f"draw_order references invalid instance {instance_id!r}")
+                    continue
+                asset_ref = inst.get("asset_ref")
+                if not isinstance(asset_ref, str) or not asset_ref:
+                    errors.append(f"instance {instance_id!r} must have asset_ref")
+                elif not isinstance(assets.get(asset_ref), dict):
+                    errors.append(f"instance {instance_id!r} references unknown asset {asset_ref!r}")
+    # Composer may optionally echo this pin in the manifest.  If present it
+    # is an assertion, never a field AutoRig has to invent for old bundles.
+    schema_ref = manifest.get("schema") or manifest.get("schema_ref")
+    if isinstance(schema_ref, dict):
+        vendor = schema_ref.get("vendor")
+        commit = schema_ref.get("commit") or schema_ref.get("upstream_commit")
+        if vendor is not None and vendor != ASSEMBLY_SCHEMA_VENDOR:
+            errors.append(f"schema vendor must be {ASSEMBLY_SCHEMA_VENDOR!r}")
+        if commit is not None and commit != ASSEMBLY_SCHEMA_COMMIT:
+            errors.append(f"schema upstream commit must be {ASSEMBLY_SCHEMA_COMMIT!r}")
+    return errors
+
+
+@lru_cache(maxsize=1)
+def _vendored_schema_metadata() -> dict[str, Any]:
+    """Load and pin the checked-in schema descriptor before accepting input."""
+    try:
+        schema = _read_json(ASSEMBLY_SCHEMA_PATH)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"vendored Assembly schema is unavailable: {ASSEMBLY_SCHEMA_PATH}") from exc
+    upstream = schema.get("x-upstream") or {}
+    if (upstream.get("vendor") != ASSEMBLY_SCHEMA_VENDOR
+            or upstream.get("commit") != ASSEMBLY_SCHEMA_COMMIT
+            or upstream.get("schema_id") != ASSEMBLY_SCHEMA_ID):
+        raise RuntimeError("vendored Assembly schema metadata does not match the pinned Composer commit")
+    return schema
+
+
+def validate_assembly_manifest(manifest: dict[str, Any]) -> None:
+    """Raise a concise error when an Assembly manifest violates the vendored schema."""
+    _vendored_schema_metadata()
+    errors = _schema_errors(manifest)
+    if errors:
+        raise ValueError("Assembly Bundle schema validation failed: " + "; ".join(errors))
 
 
 def _position(img: Image.Image, transform: dict[str, Any]) -> tuple[Image.Image, tuple[int, int]]:
@@ -132,6 +240,7 @@ def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
     if not manifest_path.is_file():
         raise FileNotFoundError(f"not an Assembly Bundle (missing manifest.json): {root}")
     manifest = _read_json(manifest_path)
+    validate_assembly_manifest(manifest)
     if manifest.get("format") != ASSEMBLY_FORMAT:
         raise ValueError(f"not an Assembly Bundle: format={manifest.get('format')!r}")
     version = str(manifest.get("version", ""))

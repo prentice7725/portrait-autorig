@@ -9,7 +9,9 @@ from pathlib import Path
 from PIL import Image
 
 from .assembly import (
-    ASSEMBLY_FORMAT, ASSEMBLY_SCHEMA_PIN, ASSEMBLY_VERSION,
+    ASSEMBLY_FORMAT, ASSEMBLY_SCHEMA_COMMIT, ASSEMBLY_SCHEMA_ID,
+    ASSEMBLY_SCHEMA_PATH, ASSEMBLY_SCHEMA_PIN, ASSEMBLY_SCHEMA_VENDOR,
+    ASSEMBLY_VERSION,
     AssemblyAsset, load_assembly_bundle,
 )
 from .bundle import PortraitAsset, load_legacy_run, load_portrait_bundle
@@ -115,6 +117,10 @@ def compile_assembly_asset(asset: AssemblyAsset, output_dir: str | os.PathLike[s
     )
     manifest["source"]["assembly_schema"] = {
         "format": ASSEMBLY_FORMAT, "version": ASSEMBLY_VERSION,
+        "vendor": ASSEMBLY_SCHEMA_VENDOR,
+        "upstream_commit": ASSEMBLY_SCHEMA_COMMIT,
+        "schema_id": ASSEMBLY_SCHEMA_ID,
+        "schema_file": ASSEMBLY_SCHEMA_PATH.name,
         "pin": ASSEMBLY_SCHEMA_PIN,
     }
     if manifest["rest_fidelity"]["status"] == "fail":

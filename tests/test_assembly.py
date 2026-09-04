@@ -22,7 +22,11 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from portrait_autorig.assembly import _position, load_assembly_bundle
+from portrait_autorig.assembly import (
+    ASSEMBLY_SCHEMA_COMMIT, ASSEMBLY_SCHEMA_ID, ASSEMBLY_SCHEMA_PATH,
+    ASSEMBLY_SCHEMA_PIN, ASSEMBLY_SCHEMA_VENDOR, _position,
+    load_assembly_bundle, validate_assembly_manifest,
+)
 from portrait_autorig.image import composite_layers
 
 CANVAS = 40
@@ -139,6 +143,40 @@ class PositioningTests(unittest.TestCase):
 
 
 class LoadAssemblyBundleTests(unittest.TestCase):
+    def test_composer_schema_vendor_is_pinned(self):
+        self.assertEqual(ASSEMBLY_SCHEMA_VENDOR, "portrait-composer")
+        self.assertEqual(ASSEMBLY_SCHEMA_COMMIT, "682f25e")
+        self.assertEqual(ASSEMBLY_SCHEMA_ID, "portrait-assembly-v0.2")
+        self.assertIn(ASSEMBLY_SCHEMA_COMMIT, ASSEMBLY_SCHEMA_PIN)
+        schema = json.loads(ASSEMBLY_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(schema["x-upstream"]["commit"], ASSEMBLY_SCHEMA_COMMIT)
+        self.assertEqual(schema["x-upstream"]["vendor"], ASSEMBLY_SCHEMA_VENDOR)
+
+    def test_schema_validation_rejects_missing_instance_asset_ref(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "A001.assembly"
+            builder = AssemblyBundleBuilder(root)
+            builder.add_instance("neck_i", semantic="neck", box=(10, 20, 30, 40))
+            builder.write()
+            path = root / "manifest.json"
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            del manifest["instances"]["neck_i"]["asset_ref"]
+            with self.assertRaisesRegex(ValueError, "schema validation"):
+                validate_assembly_manifest(manifest)
+
+    def test_schema_pin_mismatch_is_rejected_when_composer_echoes_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "A001.assembly"
+            builder = AssemblyBundleBuilder(root)
+            builder.add_instance("neck_i", semantic="neck", box=(10, 20, 30, 40))
+            builder.write()
+            path = root / "manifest.json"
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            manifest["schema"] = {"vendor": ASSEMBLY_SCHEMA_VENDOR, "commit": "deadbee"}
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "upstream commit"):
+                load_assembly_bundle(root)
+
     def test_reads_canvas_tags_and_draw_order(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "A001.assembly"
