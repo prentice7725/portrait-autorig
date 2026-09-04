@@ -627,6 +627,25 @@ console.log("\ncentral phase evaluator (P0-H)");
   state.manifest = savedManifest;
 }
 
+console.log("\nphase relocation regression (eye_fold -> secondary)");
+{
+  const savedManifest = state.manifest;
+  state.manifest = {
+    anchors: { neck_pivot: [500, 700] },
+    evaluation: { phases: ["secondary"] },
+    deformers: [{ id: "blink_secondary", kind: "eye_fold", phase: "secondary" }],
+  };
+  const context = { motion: {} };
+  evaluateAllPhases(0, context);
+  deform(eye, 0, { ...still, blink: { l: 1, r: 0 } });
+  check("eye_fold executes from its declared secondary phase",
+        shiftAt(eye, 280).dy > 30, `dy=${shiftAt(eye, 280).dy}`);
+  check("relocated eye_fold is recorded in secondary dispatch",
+        state.phaseDispatch.secondary?.[0]?.id === "blink_secondary");
+  state.manifest = savedManifest;
+  state.frameOperations = null;
+}
+
 console.log("\nP0-D: motion{} <-> deformers[] equivalence (absorption plan #7, #19)");
 {
   const v01Motion = {

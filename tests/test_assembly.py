@@ -15,15 +15,18 @@ does with visibility/opacity/multi-instance tags, and what it rejects.
 from __future__ import annotations
 
 import json
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
+from jsonschema import Draft202012Validator
 from PIL import Image
 
 from portrait_autorig.assembly import (
     ASSEMBLY_SCHEMA_COMMIT, ASSEMBLY_SCHEMA_ID, ASSEMBLY_SCHEMA_PATH,
+    ASSEMBLY_SCHEMA_SHA256,
     ASSEMBLY_SCHEMA_PIN, ASSEMBLY_SCHEMA_VENDOR, _position,
     load_assembly_bundle, validate_assembly_manifest,
 )
@@ -148,9 +151,21 @@ class LoadAssemblyBundleTests(unittest.TestCase):
         self.assertEqual(ASSEMBLY_SCHEMA_COMMIT, "682f25e")
         self.assertEqual(ASSEMBLY_SCHEMA_ID, "portrait-assembly-v0.2")
         self.assertIn(ASSEMBLY_SCHEMA_COMMIT, ASSEMBLY_SCHEMA_PIN)
+        raw = ASSEMBLY_SCHEMA_PATH.read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), ASSEMBLY_SCHEMA_SHA256)
+        schema = json.loads(raw.decode("utf-8"))
+        self.assertEqual(schema["$id"], "https://portrait-composer/schemas/portrait-assembly-v0.2.schema.json")
+
+    def test_fixture_validates_against_exact_vendored_composer_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "A001.assembly"
+            builder = AssemblyBundleBuilder(root)
+            builder.add_instance("neck_i", semantic="neck", box=(10, 20, 30, 40))
+            builder.write()
+            manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
         schema = json.loads(ASSEMBLY_SCHEMA_PATH.read_text(encoding="utf-8"))
-        self.assertEqual(schema["x-upstream"]["commit"], ASSEMBLY_SCHEMA_COMMIT)
-        self.assertEqual(schema["x-upstream"]["vendor"], ASSEMBLY_SCHEMA_VENDOR)
+        errors = sorted(Draft202012Validator(schema).iter_errors(manifest), key=lambda e: list(e.path))
+        self.assertEqual(errors, [], "fixture must satisfy Composer's vendored schema")
 
     def test_schema_validation_rejects_missing_instance_asset_ref(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -164,7 +179,7 @@ class LoadAssemblyBundleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "schema validation"):
                 validate_assembly_manifest(manifest)
 
-    def test_schema_pin_mismatch_is_rejected_when_composer_echoes_it(self):
+    def test_schema_extension_is_rejected_by_exact_composer_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "A001.assembly"
             builder = AssemblyBundleBuilder(root)
@@ -172,9 +187,9 @@ class LoadAssemblyBundleTests(unittest.TestCase):
             builder.write()
             path = root / "manifest.json"
             manifest = json.loads(path.read_text(encoding="utf-8"))
-            manifest["schema"] = {"vendor": ASSEMBLY_SCHEMA_VENDOR, "commit": "deadbee"}
+            manifest["schema"] = {"vendor": ASSEMBLY_SCHEMA_VENDOR, "commit": "682f25e"}
             path.write_text(json.dumps(manifest), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "upstream commit"):
+            with self.assertRaisesRegex(ValueError, "schema validation"):
                 load_assembly_bundle(root)
 
     def test_reads_canvas_tags_and_draw_order(self):
