@@ -608,9 +608,22 @@ console.log("\ncentral phase evaluator (P0-H)");
                 { id: "deformer_visibility", kind: "visibility_curve", phase: "visibility" }],
     constraints: [{ id: "constraint_one", phase: "constraints" }],
   };
-  const trace = evaluateAllPhases(0, {});
+  const dispatchContext = { motion: {} };
+  const trace = evaluateAllPhases(0, dispatchContext);
   check("phase evaluator follows manifest order",
         JSON.stringify(trace) === JSON.stringify(state.manifest.evaluation.phases));
+  check("primary deformer is dispatched in primary",
+        state.phaseDispatch.primary?.[0]?.id === "deformer_primary");
+  check("visibility deformer is dispatched in visibility",
+        state.phaseDispatch.visibility?.[0]?.id === "deformer_visibility");
+  check("secondary driver is dispatched in secondary",
+        dispatchContext.executedDrivers?.[0] === "driver_secondary");
+  check("constraint is dispatched in constraints",
+        dispatchContext.executedConstraints?.[0] === "constraint_one"
+        && state.phaseDispatch.constraints?.[0]?.id === "constraint_one");
+  check("phase handlers run before the geometry backend",
+        Array.isArray(dispatchContext.executedDeformers)
+        && dispatchContext.executedDeformers.join(",") === "deformer_primary,deformer_visibility");
   state.manifest = savedManifest;
 }
 
@@ -650,6 +663,9 @@ console.log("\nP0-D: motion{} <-> deformers[] equivalence (absorption plan #7, #
 
   check("deformers[]-adapted motion matches v0.1 motion exactly",
         JSON.stringify(motionFromDeformers(v02Manifest)) === JSON.stringify(v01Motion));
+  const reordered = { motion: v01Motion, deformers: [...deformers].reverse() };
+  check("deformer declaration order does not change motion parity",
+        JSON.stringify(motionFromDeformers(reordered)) === JSON.stringify(v01Motion));
   check("a manifest with no deformers[] falls back to its own motion{} unchanged",
         JSON.stringify(motionFromDeformers(v01Manifest)) === JSON.stringify(v01Motion));
 

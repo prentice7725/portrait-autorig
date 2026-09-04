@@ -22,5 +22,8 @@ test = ["pytest>=7"]
 [tool.setuptools]
 packages = ["portrait_autorig"]
 
+[tool.setuptools.package-data]
+portrait_autorig = ["schemas/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

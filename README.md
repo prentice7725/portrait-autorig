@@ -103,6 +103,12 @@ rig part를 포함한 `member_bindings`에 그대로 보존됩니다. Runtime은
 authoring API는 exclusive VariantSet과 preset을 작성하고, crossfade 선택은 manifest
 계약을 통해 전달됩니다. 잘못된 member mapping은 compile을 실패시킵니다.
 
+Assembly 입력 계약은 Composer `portrait-assembly-v0.2` 스키마를
+upstream commit `682f25e`에 고정해 vendoring합니다
+([vendored schema](portrait_autorig/schemas/portrait-assembly-v0.2.schema.json)).
+Assembly load 시 format/version, canvas, draw order, instance→asset 참조를
+검증하며, manifest가 선택적으로 적은 schema vendor/commit이 다르면 즉시 거부합니다.
+
 P0-H에서 `ParamEyeBallX/Y`는 독립 `iridesl`/`iridesr`를 우선 움직이는 보수적인
 `gaze` deformer로 컴파일됩니다. 독립 iris가 없고 coarse eye layer만 있으면
 Capability Report가 `degraded`로 기록됩니다. `visibility_curve`는 대상 part의
