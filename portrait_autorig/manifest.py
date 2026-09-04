@@ -247,14 +247,9 @@ def physics_deformer_entries(spec: dict[str, Any] | None) -> list[dict[str, Any]
             "config": {"driver": "strand", "output": "motion.physics.strand"},
             "phase": PHASE_SECONDARY,
         })
-    torso = spec.get("upper_torso_driver")
-    if torso and torso.get("enabled", True):
-        entries.append({
-            "id": "upper_torso_physics", "kind": DEFORMER_UPPER_TORSO_PHYSICS,
-            "targets": {"tag": "topwear"},
-            "config": {"driver": "torso", "output": "motion.physics.torso"},
-            "phase": PHASE_SECONDARY,
-        })
+    # Upper-torso physics deliberately does not get a second geometry
+    # deformer. Its output is consumed by the existing authored
+    # `local_soft_field`, preserving two-lobe weights and locks.
     return entries
 
 

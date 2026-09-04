@@ -133,12 +133,14 @@ P1 mesh 경로는 `contour_tags`로 선택할 수 있으며 disconnected alpha�
 
 Contour hair part에는 선택적으로 `strand_topology`가 붙습니다. 이 기록은
 connected mesh component, prominent bottom tip, 그리고 합이 1이 되도록 정규화한
-overlapping curtain-column weight를 포함하며 P2 물리 계산은 수행하지 않습니다.
+overlapping curtain-column weight를 포함합니다. topology 생성 자체는 물리를
+수행하지 않으며, opt-in `physics.strand_driver`가 해당 topology를 secondary
+단계에서 소비합니다.
 `portrait_autorig.constraints`의 `clip_mask_spec`와 `boundary_stitch_spec`은
 각각 source→targets mask와 2개 이상 참여자를 갖는 N-way stitch를 검증해
 `constraints` manifest contract로 내보냅니다.
 
-현재 P1 상태는 다음과 같습니다.
+현재 P1/P2 상태는 다음과 같습니다.
 
 P1은 위 항목과 parity/QA gate를 충족하여 `CLOSED/FROZEN` 상태입니다.
 
@@ -150,10 +152,50 @@ P1은 위 항목과 parity/QA gate를 충족하여 `CLOSED/FROZEN` 상태입니�
   `stepPhysicsFixed`), non-finite rollback, `StrandSpringDriver`,
   `UpperTorsoSecondaryDriver`와 `soft`/`firm_bounce`/`springy` profiles를
   추가했고, opt-in `physics` manifest block과 preview fixed-tick loop에
-  연결했습니다. strand/torso output은 secondary geometry operation으로
+  연결했습니다. `translation`/`angle`/`velocity`/`acceleration`/`impulse`
+  input mode를 지원합니다. strand output은 `strand_spring` secondary
+  operation으로 hair topology에 적용되고, torso output은 별도 uniform 이동
+  없이 Composer-authored `local_soft_field`의 lobe/lock weights를 통해
   적용됩니다. physics manifest preflight와 capture reset/warmup golden QA도
-  추가했습니다. 남은 P2는 corpus 기반 production driver tuning입니다.
-  프로파일 envelope는 `node preview/check_physics_tuning.mjs`로 재현할 수 있습니다.
+  추가했습니다. 남은 P2는 계약을 바꾸지 않는 corpus 기반 production driver
+  tuning이며, 현재 profile 값은 `EXPERIMENTAL`로 관리합니다. 프로파일 envelope는
+  `node preview/check_physics_tuning.mjs`로 재현할 수 있습니다.
+
+Physics는 manifest에서 명시적으로 opt-in합니다. 예시는 다음과 같습니다.
+
+```json
+{
+  "physics": {
+    "config": { "update_hz": 60, "reference_scale": 768 },
+    "strand_driver": {
+      "input_mode": "translation",
+      "strands": [
+        { "strand_id": "strand_0", "length": 2, "mass": 1, "geometry_factor": 1 }
+      ]
+    },
+    "upper_torso_driver": {
+      "input_mode": "translation",
+      "profile": "soft",
+      "translation_gain": 1.0,
+      "angle_gain": 0.25
+    }
+  }
+}
+```
+
+`upper_torso_driver`의 결과는 기존 `local_soft_field`에 합쳐지므로
+two-lobe/center/neckline/shoulder lock과 author strength가 유지됩니다. physics
+block이 없거나 driver가 비활성화되면 기존 rest reference 경로를 그대로 사용합니다.
+
+주요 회귀 검증은 다음 명령으로 재현할 수 있습니다.
+
+```powershell
+python -m pytest -q
+node preview/check_deformation.mjs
+node preview/check_reference_parity.mjs
+node preview/check_capture_physics.mjs
+node preview/check_physics_tuning.mjs
+```
 
 테스트 의존성에는 원본 Composer schema를 직접 검증하기 위한 `jsonschema`가 포함되어
 있으며, 일반 runtime은 외부 Composer 또는 `seethrough_engine`를 import하지 않습니다.

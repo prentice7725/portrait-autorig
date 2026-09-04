@@ -77,8 +77,19 @@ class DeterministicPhysicsTests(unittest.TestCase):
             "strand_driver": {"strands": [{"strand_id": "s"}]},
             "upper_torso_driver": {"profile": "soft"},
         })
-        self.assertEqual([entry["kind"] for entry in entries],
-                         ["strand_spring", "upper_torso_physics"])
+        self.assertEqual([entry["kind"] for entry in entries], ["strand_spring"])
+
+    def test_zero_physics_keeps_the_exact_rest_reference(self):
+        head = np.zeros((12, 12, 4), dtype=np.uint8)
+        head[2:10, 2:10, :3] = [120, 90, 80]
+        head[2:10, 2:10, 3] = 255
+        manifest, _ = build_rig(
+            {"head": head}, frame_size=(12, 12),
+            physics={"upper_torso_driver": {"enabled": True, "profile": "soft"}},
+        )
+        self.assertEqual(manifest["rest_fidelity"]["status"], "pass")
+        self.assertNotIn("upper_torso_physics",
+                         [entry["kind"] for entry in manifest["deformers"]])
 
     def test_invalid_manifest_physics_is_rejected_before_runtime(self):
         errors = validate_physics_spec({
@@ -87,3 +98,12 @@ class DeterministicPhysicsTests(unittest.TestCase):
             "upper_torso_driver": {"profile": "nope"},
         })
         self.assertEqual(len(errors), 3)
+
+    def test_driver_input_modes_are_explicit(self):
+        for mode in ("translation", "angle", "velocity", "acceleration", "impulse"):
+            driver = UpperTorsoSecondaryDriver(input_mode=mode)
+            driver.resetPhysics()
+            result = driver.stepPhysicsFixed(1, breath=1.0, angle_y=0.0)
+            self.assertTrue(math.isfinite(result.value))
+        with self.assertRaises(ValueError):
+            UpperTorsoSecondaryDriver(input_mode="angular_velocity")

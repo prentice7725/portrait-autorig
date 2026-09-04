@@ -52,6 +52,9 @@ export function createPhysicsState({ rest = 0, stiffness = 18, damping = 6, mass
 export function createStrandSpringDriver(strands, options = {}) {
   const base = { stiffness: options.stiffness ?? 18, damping: options.damping ?? 6,
     mass: options.mass ?? 1, config: options.config || {} };
+  const inputMode = options.input_mode || "translation";
+  if (!["translation", "angle", "velocity", "acceleration", "impulse"].includes(inputMode))
+    throw new Error(`unknown strand input mode: ${inputMode}`);
   const springs = new Map();
   for (const strand of strands || []) {
     const id = String(strand.strand_id ?? strand.id ?? "");
@@ -66,23 +69,50 @@ export function createStrandSpringDriver(strands, options = {}) {
       mass: base.mass * mass, config: base.config,
     }) });
   }
-  const resetPhysics = () => Object.fromEntries([...springs].map(([id, item]) => [id, item.physics.resetPhysics()]));
-  const warmupPhysics = (seconds, target = 0) => Object.fromEntries([...springs].map(([id, item]) =>
-    [id, item.physics.warmupPhysics(seconds, target + item.offset)]));
-  const stepPhysicsFixed = (count = 1, target = 0) => Object.fromEntries([...springs].map(([id, item]) =>
-    [id, item.physics.stepPhysicsFixed(count, target * item.geometry + item.offset)]));
+  let previousInput = 0, previousVelocity = 0;
+  const resetPhysics = () => {
+    previousInput = 0; previousVelocity = 0;
+    return Object.fromEntries([...springs].map(([id, item]) => [id, item.physics.resetPhysics()]));
+  };
+  const stepPhysicsFixed = (count = 1, target = 0) => {
+    const dt = 1 / (Number(base.config.update_hz || 60));
+    const velocity = (target - previousInput) / dt;
+    const acceleration = (velocity - previousVelocity) / dt;
+    const interpreted = { translation: target, angle: target, velocity,
+      acceleration, impulse: target - previousInput }[inputMode];
+    previousInput = target; previousVelocity = velocity;
+    return Object.fromEntries([...springs].map(([id, item]) =>
+      [id, item.physics.stepPhysicsFixed(count, interpreted * item.geometry + item.offset)]));
+  };
+  const warmupPhysics = (seconds, target = 0) => {
+    resetPhysics();
+    return Object.fromEntries([...springs].map(([id, item]) =>
+      [id, item.physics.warmupPhysics(seconds, target + item.offset)]));
+  };
   return { resetPhysics, warmupPhysics, stepPhysicsFixed };
 }
 
 export function createUpperTorsoSecondaryDriver({ profile = "soft", translationGain = 1,
-                                                  angleGain = 0.25, config = {} } = {}) {
+                                                  angleGain = 0.25, inputMode = "translation",
+                                                  config = {} } = {}) {
   const materials = { soft: [12, 5], firm_bounce: [24, 3.5], springy: [16, 1.8] };
   if (!materials[profile]) throw new Error(`unknown torso response profile: ${profile}`);
+  if (!["translation", "angle", "velocity", "acceleration", "impulse"].includes(inputMode))
+    throw new Error(`unknown torso input mode: ${inputMode}`);
   const spring = createPhysicsState({ stiffness: materials[profile][0], damping: materials[profile][1], config });
+  let previousInput = 0, previousVelocity = 0;
   const target = (breath, angleY) => Number(breath) * translationGain + Number(angleY) * angleGain;
   return {
-    resetPhysics: () => spring.resetPhysics(),
+    resetPhysics: () => { previousInput = 0; previousVelocity = 0; return spring.resetPhysics(); },
     warmupPhysics: (seconds, breath = 0, angleY = 0) => spring.warmupPhysics(seconds, target(breath, angleY)),
-    stepPhysicsFixed: (count = 1, breath = 0, angleY = 0) => spring.stepPhysicsFixed(count, target(breath, angleY)),
+    stepPhysicsFixed: (count = 1, breath = 0, angleY = 0) => {
+      const source = target(breath, angleY), dt = 1 / Number(config.update_hz || 60);
+      const velocity = (source - previousInput) / dt;
+      const acceleration = (velocity - previousVelocity) / dt;
+      const interpreted = { translation: source, angle: source, velocity,
+        acceleration, impulse: source - previousInput }[inputMode];
+      previousInput = source; previousVelocity = velocity;
+      return spring.stepPhysicsFixed(count, interpreted);
+    },
   };
 }
