@@ -24,6 +24,7 @@ __all__ = [
     "DEFORMER_PARALLAX_TURN", "DEFORMER_SHELL_TURN", "DEFORMER_WEIGHTED_ROTATION",
     "DEFORMER_CONTINUOUS_FIELD", "DEFORMER_EYE_FOLD", "DEFORMER_GAZE",
     "DEFORMER_SPRITE_SWAP", "DEFORMER_VISIBILITY_CURVE", "DEFORMER_LOCAL_SOFT_FIELD", "DEFORMER_KINDS",
+    "DEFORMER_STRAND_SPRING", "DEFORMER_UPPER_TORSO_PHYSICS", "physics_deformer_entries",
     "DRIVER_UPPER_TORSO_SECONDARY",
     "PHASE_BASE", "PHASE_PRIMARY", "PHASE_CORRECTIVE", "PHASE_SECONDARY",
     "PHASE_CONSTRAINTS", "PHASE_VISIBILITY", "PHASE_RENDER", "EVALUATION_PHASES",
@@ -53,11 +54,14 @@ DEFORMER_VISIBILITY_CURVE = "visibility_curve"
 # upper_torso_secondary (and any future authored secondary region) writes
 # its displacement through -- see upper_torso_secondary_entries.
 DEFORMER_LOCAL_SOFT_FIELD = "local_soft_field"
+DEFORMER_STRAND_SPRING = "strand_spring"
+DEFORMER_UPPER_TORSO_PHYSICS = "upper_torso_physics"
 DEFORMER_KINDS = frozenset({
     DEFORMER_PARALLAX_TURN, DEFORMER_SHELL_TURN, DEFORMER_WEIGHTED_ROTATION,
     DEFORMER_CONTINUOUS_FIELD, DEFORMER_EYE_FOLD, DEFORMER_GAZE, DEFORMER_SPRITE_SWAP,
     DEFORMER_VISIBILITY_CURVE,
     DEFORMER_LOCAL_SOFT_FIELD,
+    DEFORMER_STRAND_SPRING, DEFORMER_UPPER_TORSO_PHYSICS,
 })
 
 # UpperTorsoSecondaryDriver (directive v0.2 #18-19): a driver *kind* name,
@@ -228,6 +232,30 @@ def upper_torso_secondary_entries(
         "phase": PHASE_SECONDARY,
     }
     return deformer, driver
+
+
+def physics_deformer_entries(spec: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Compile opt-in physics manifest declarations into secondary deformers."""
+    if not spec:
+        return []
+    entries: list[dict[str, Any]] = []
+    strand = spec.get("strand_driver")
+    if strand and strand.get("enabled", True) and strand.get("strands"):
+        entries.append({
+            "id": "strand_spring", "kind": DEFORMER_STRAND_SPRING,
+            "targets": {"tags": ["front hair", "back hair", "hair_secondary", "hair"]},
+            "config": {"driver": "strand", "output": "motion.physics.strand"},
+            "phase": PHASE_SECONDARY,
+        })
+    torso = spec.get("upper_torso_driver")
+    if torso and torso.get("enabled", True):
+        entries.append({
+            "id": "upper_torso_physics", "kind": DEFORMER_UPPER_TORSO_PHYSICS,
+            "targets": {"tag": "topwear"},
+            "config": {"driver": "torso", "output": "motion.physics.torso"},
+            "phase": PHASE_SECONDARY,
+        })
+    return entries
 
 
 def upgrade_manifest_v01_to_v02(manifest: dict[str, Any]) -> dict[str, Any]:

@@ -19,6 +19,8 @@
 
 "use strict";
 
+import { createStrandSpringDriver, createUpperTorsoSecondaryDriver } from "./physics.mjs";
+
 // Parallax strength as a fraction of the canvas, so the same manifest reads
 // the same at any render resolution. Near layers travel further than far ones,
 // which is the entire illusion; these are starting values to be tuned against
@@ -152,6 +154,8 @@ export const PHASE_DEFORMER_HANDLERS = {
     }
   },
   local_soft_field(deformer, context) { registerDeformerOperation(deformer, context); },
+  strand_spring(deformer, context) { registerDeformerOperation(deformer, context); },
+  upper_torso_physics(deformer, context) { registerDeformerOperation(deformer, context); },
   sprite_swap(deformer, context) {
     registerDeformerOperation(deformer, context);
     (context.visibility || (context.visibility = [])).push(deformer.id);
@@ -236,6 +240,10 @@ export const state = {
   blinkTimer: 0, blinkPhase: null,
   canMipmap: false,
   collarOverride: null,   // null = use whatever the manifest baked in
+  physicsDrivers: null,
+  physicsOutputs: {},
+  physicsAccumulator: 0,
+  physicsLastNow: null,
   shells: null,           // fitted in build(); null disables the shell path
   variantSets: {},
   variantSelections: {},
@@ -943,6 +951,32 @@ export function build(manifest, images) {
   state.manifest = manifest;
   state.parameters = {};
   state.frameOperations = null;
+  state.physicsDrivers = null;
+  state.physicsOutputs = {};
+  state.physicsAccumulator = 0;
+  state.physicsLastNow = null;
+  const physicsSpec = manifest.physics || null;
+  if (physicsSpec) {
+    const config = physicsSpec.config || {};
+    state.physicsDrivers = {};
+    const strandSpec = physicsSpec.strand_driver;
+    if (strandSpec?.enabled !== false && Array.isArray(strandSpec?.strands) && strandSpec.strands.length) {
+      state.physicsDrivers.strand = createStrandSpringDriver(strandSpec.strands, {
+        stiffness: strandSpec.stiffness, damping: strandSpec.damping,
+        mass: strandSpec.mass, config,
+      });
+    }
+    const torsoSpec = physicsSpec.upper_torso_driver;
+    if (torsoSpec?.enabled !== false && torsoSpec) {
+      state.physicsDrivers.torso = createUpperTorsoSecondaryDriver({
+        profile: torsoSpec.profile || "soft",
+        translationGain: torsoSpec.translation_gain ?? 1,
+        angleGain: torsoSpec.angle_gain ?? 0.25,
+        config,
+      });
+    }
+    resetPhysics();
+  }
   for (const descriptor of (manifest.parameters || [])) {
     if (descriptor && descriptor.id) state.parameters[descriptor.id] = Number(descriptor.default ?? 0);
   }
@@ -1141,6 +1175,55 @@ export function build(manifest, images) {
   requestAnimationFrame(frame);
 }
 
+export function resetPhysics() {
+  if (!state.physicsDrivers) return {};
+  state.physicsOutputs = {};
+  for (const [name, driver] of Object.entries(state.physicsDrivers)) {
+    state.physicsOutputs[name] = driver.resetPhysics();
+  }
+  state.physicsAccumulator = 0;
+  return state.physicsOutputs;
+}
+
+export function warmupPhysics(seconds, inputs = {}) {
+  if (!state.physicsDrivers) return {};
+  for (const [name, driver] of Object.entries(state.physicsDrivers)) {
+    state.physicsOutputs[name] = name === "torso"
+      ? driver.warmupPhysics(seconds, inputs.breath || 0, inputs.angleY || 0)
+      : driver.warmupPhysics(seconds, inputs.strandTarget || 0);
+  }
+  return state.physicsOutputs;
+}
+
+/** Deterministic capture hook: every preview/golden capture starts from rest. */
+export function preparePhysicsCapture(seconds, inputs = {}) {
+  resetPhysics();
+  return warmupPhysics(seconds, inputs);
+}
+
+export function stepPhysicsFixed(count = 1, inputs = {}) {
+  if (!state.physicsDrivers) return {};
+  for (const [name, driver] of Object.entries(state.physicsDrivers)) {
+    state.physicsOutputs[name] = name === "torso"
+      ? driver.stepPhysicsFixed(count, inputs.breath || 0, inputs.angleY || 0)
+      : driver.stepPhysicsFixed(count, inputs.strandTarget || 0);
+  }
+  return state.physicsOutputs;
+}
+
+function advancePhysics(now, inputs) {
+  if (!state.physicsDrivers) return {};
+  if (state.physicsLastNow == null) state.physicsLastNow = now;
+  state.physicsAccumulator += Math.max(0, Math.min(0.1, (now - state.physicsLastNow) / 1000));
+  state.physicsLastNow = now;
+  const hz = Number((state.manifest.physics?.config || {}).update_hz || 60);
+  const tick = 1 / Math.max(1, hz);
+  let count = 0;
+  while (state.physicsAccumulator >= tick && count < 8) { state.physicsAccumulator -= tick; count++; }
+  if (count) stepPhysicsFixed(count, inputs);
+  return state.physicsOutputs;
+}
+
 export function renderPanel() {
   const m = state.manifest;
   const anchors = Object.keys(m.anchors || {});
@@ -1322,6 +1405,22 @@ function gazeDelta(part, motion) {
   return [dx, dy];
 }
 
+function strandSpringDelta(part, vertexIndex, motion) {
+  const specs = part.spec?.strand_topology?.specs;
+  const outputs = motion.physics?.strand;
+  if (!Array.isArray(specs) || !outputs) return 0;
+  let delta = 0;
+  for (const spec of specs) {
+    const output = outputs[spec.strand_id];
+    if (!output) continue;
+    for (const column of spec.columns || []) {
+      const weight = Number(column.weights?.[String(vertexIndex)] || 0);
+      delta += weight * Number(output.value || 0);
+    }
+  }
+  return delta;
+}
+
 function geometryOperations(part) {
   // Legacy manifests have no operation list.  Their canonical order is kept
   // as a compatibility adapter; declarative v0.2 manifests use the exact list
@@ -1427,6 +1526,19 @@ export function deform(part, now, motion) {
                 y += sm.verticalPx * amount * Math.max(wl, wr) * part.softMorph.lowerBias[i];
               }
             }
+          }
+          break;
+        }
+        case "strand_spring": {
+          if (["front hair", "back hair", "hair_secondary", "hair"].includes(part.spec.tag)) {
+            y += strandSpringDelta(part, i, motion);
+          }
+          break;
+        }
+        case "upper_torso_physics": {
+          if (part.spec.tag === SOFT_MORPH_TAG && motion.physics?.torso) {
+            const output = Number(motion.physics.torso.value || 0);
+            y += output;
           }
           break;
         }
@@ -1562,6 +1674,11 @@ export function frame(now) {
       collar: state.collarOverride,
     },
   };
+  motion.physics = advancePhysics(now, {
+    breath: motion.breath,
+    angleY: motion.turnY,
+    strandTarget: motion.turnY,
+  });
 
   // v0.2's manifest phase list is the runtime ordering contract.  The
   // deformation math below remains the legacy-compatible render backend, but

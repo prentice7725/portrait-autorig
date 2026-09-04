@@ -662,6 +662,26 @@ console.log("\nphase relocation regression (eye_fold -> secondary)");
   state.frameOperations = null;
 }
 
+console.log("\nP2 physics geometry bindings");
+{
+  const savedManifest = state.manifest, savedOperations = state.frameOperations;
+  state.manifest = { anchors: { neck_pivot: [0, 0] },
+    evaluation: { phases: ["secondary"] } };
+  state.frameOperations = [{ id: "strand_spring", kind: "strand_spring", phase: "secondary" }];
+  const hair = {
+    spec: { name: "front_hair", tag: "front hair", group: "head", depth: 0.5,
+      strand_topology: { specs: [{ strand_id: "strand_0", columns: [
+        { weights: { "0": 1 } },
+      ] }] } },
+    mesh: { rest: new Float32Array([10, 20]), live: new Float32Array([10, 20]),
+      weight: new Float32Array([1]) },
+    eyeSide: null, isEye: false, isLid: false, shell: null,
+  };
+  deform(hair, 0, { ...still, physics: { strand: { strand_0: { value: 3 } } } });
+  check("strand physics output reaches hair geometry", near(hair.mesh.live[1], 23));
+  state.manifest = savedManifest; state.frameOperations = savedOperations;
+}
+
 console.log("\nP0-D: motion{} <-> deformers[] equivalence (absorption plan #7, #19)");
 {
   const v01Motion = {

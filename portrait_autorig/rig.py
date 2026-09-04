@@ -18,10 +18,14 @@ from PIL import Image
 from . import soft_morph
 from .capability import capability_report
 from .image import composite_layers, crop_to_alpha, rest_fidelity
-from .manifest import RIG_MANIFEST_VERSION_01, upgrade_manifest_v01_to_v02
+from .manifest import (
+    RIG_MANIFEST_VERSION_01, physics_deformer_entries,
+    upgrade_manifest_v01_to_v02,
+)
 from .mesh import contour_mesh_spec, mesh_spec, motion_aware_mesh_spec
 from .strand_topology import build_strand_specs
 from .constraints import boundary_stitch_spec, compile_clip_masks
+from .physics import validate_physics_spec
 from .semantic import SEMANTIC_Z_ORDER
 from .topology import mesh_topology_hash
 from .variant import _part_name, compile_variant_bindings
@@ -980,6 +984,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
                   visibility_curves: Sequence[dict[str, Any]] | None = None,
                   clip_masks: Sequence[dict[str, Any]] | None = None,
                   boundary_stitches: Sequence[dict[str, Any]] | None = None,
+                  physics: dict[str, Any] | None = None,
               ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     """Stages A-D: turn `{tag: full-canvas RGBA}` into `(manifest, images)`.
 
@@ -1325,6 +1330,13 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         constraints.append(boundary_stitch_spec(boundary_stitches))
     if constraints:
         manifest["constraints"] = constraints
+    if physics is not None:
+        if not isinstance(physics, dict):
+            raise ValueError("physics must be an object when provided")
+        physics_errors = validate_physics_spec(physics)
+        if physics_errors:
+            raise ValueError("invalid physics spec: " + "; ".join(physics_errors))
+        manifest["physics"] = json.loads(json.dumps(physics))
     if provenance is not None:
         # Provenance is a Composer-owned opaque payload.  AutoRig forwards it
         # verbatim and only adds operation provenance for derived semantics.
@@ -1378,6 +1390,8 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     # rig_preflight/derived_semantics/...) is preserved verbatim; this only
     # adds parameters[]/deformers[]/drivers[] and bumps `version` to "0.2".
     manifest = upgrade_manifest_v01_to_v02(manifest)
+    if physics:
+        manifest["deformers"].extend(physics_deformer_entries(physics))
     if variant_deformers:
         manifest["deformers"].extend(variant_deformers)
     if compiled_variants:

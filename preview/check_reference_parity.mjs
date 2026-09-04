@@ -43,7 +43,7 @@ let maxError = 0;
 for (let i = 0; i < reference.length; i++) maxError = Math.max(maxError, Math.abs(reference[i] - runtimePart.mesh.live[i]));
 if (maxError > 1e-4) throw new Error(`reference parity failed: max error ${maxError}`);
 
-const seamParts = [
+const makeSeamParts = () => [
   { name: "head", mesh: { live: new Float32Array([0, 0]) } },
   { name: "neck", mesh: { live: new Float32Array([10, 0]) } },
   { name: "topwear", mesh: { live: new Float32Array([0, 10]) } },
@@ -52,10 +52,19 @@ const constraint = { kind: "boundary_stitch", tolerance_px: 0, groups: [{ member
   { part: "head", vertex: 0, weight: 2 }, { part: "neck", vertex: 0, weight: 1 },
   { part: "topwear", vertex: 0, weight: 1 },
 ]}] };
-Runtime.applyBoundaryStitches(seamParts.map((part) => ({ spec: { name: part.name }, mesh: part.mesh })), [constraint]);
-applyBoundaryStitchesReference(seamParts, [constraint]);
-for (let i = 0; i < seamParts.length; i++) {
-  if (seamParts[i].mesh.live[0] !== 2.5 || seamParts[i].mesh.live[1] !== 2.5)
+const optimizedSeamParts = makeSeamParts();
+const referenceSeamParts = makeSeamParts();
+Runtime.applyBoundaryStitches(
+  optimizedSeamParts.map((part) => ({ spec: { name: part.name }, mesh: part.mesh })),
+  [constraint],
+);
+applyBoundaryStitchesReference(referenceSeamParts, [constraint]);
+for (let i = 0; i < optimizedSeamParts.length; i++) {
+  const optimized = optimizedSeamParts[i].mesh.live;
+  const reference = referenceSeamParts[i].mesh.live;
+  if (optimized[0] !== reference[0] || optimized[1] !== reference[1]
+      || optimized[0] !== 2.5 || optimized[1] !== 2.5) {
     throw new Error("boundary stitch parity failed");
+  }
 }
 console.log(`reference parity passed (max geometry error ${maxError.toExponential(2)})`);
