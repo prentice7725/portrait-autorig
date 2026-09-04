@@ -8,7 +8,7 @@
   Stage E of docs/PORTRAIT_AUTO_RIG_FEASIBILITY_v0.1.md.
 
   Loads a run's rig_manifest.json plus its part PNGs and animates them: head
-  pseudo-turn, head tilt, breathing, blink. Deliberately a single self-contained
+  pseudo-turn, head tilt, breathing, blink, and conservative iris gaze. Deliberately a single self-contained
   file with no build step and no server requirement -- pick the run directory
   and it runs from file://, so an unzipped run works on a machine that has
   never seen this repo.
@@ -135,6 +135,11 @@
   <label class="row"><input type="checkbox" id="doTalk"> Talk</label>
   <label>Mouth open <span class="val" id="mouthOpenv">0.00</span>
     <input type="range" id="mouthOpen" min="0" max="1" step="0.01" value="0"></label>
+
+  <label>Gaze X <span class="val" id="gazeXv">0.00</span>
+    <input type="range" id="gazeX" min="-1" max="1" step="0.01" value="0"></label>
+  <label>Gaze Y <span class="val" id="gazeYv">0.00</span>
+    <input type="range" id="gazeY" min="-1" max="1" step="0.01" value="0"></label>
 
   <h2>Head</h2>
   <label>Turn X <span class="val" id="turnXv">0.00</span>

@@ -8,7 +8,10 @@ from pathlib import Path
 
 from PIL import Image
 
-from .assembly import AssemblyAsset, load_assembly_bundle
+from .assembly import (
+    ASSEMBLY_FORMAT, ASSEMBLY_SCHEMA_PIN, ASSEMBLY_VERSION,
+    AssemblyAsset, load_assembly_bundle,
+)
 from .bundle import PortraitAsset, load_legacy_run, load_portrait_bundle
 from .rig import build_rig, rig_preflight, write_rig_project
 
@@ -79,6 +82,17 @@ def compile_assembly_asset(asset: AssemblyAsset, output_dir: str | os.PathLike[s
         messages = "; ".join(item["message"] for item in preflight["warnings"])
         raise ValueError(f"Assembly Bundle is not rig-compatible: {messages}")
     output = Path(output_dir)
+    # Preserve a one-to-one Composer instance binding on ordinary semantic
+    # parts where flattening did not lose identity.  Variant members retain
+    # their exact instance id inside build_rig.
+    by_tag: dict[str, list[str]] = {}
+    for instance_id in asset.instance_draw_order:
+        tag = asset.instance_to_tag.get(instance_id)
+        if tag is not None:
+            by_tag.setdefault(tag, []).append(instance_id)
+    source_instance_ids = {
+        tag: ids[0] for tag, ids in by_tag.items() if len(ids) == 1
+    }
     manifest, images = build_rig(
         asset.layers,
         original_rgba=None,
@@ -96,7 +110,13 @@ def compile_assembly_asset(asset: AssemblyAsset, output_dir: str | os.PathLike[s
         instance_to_tag=asset.instance_to_tag,
         variant_draw_order=[asset.instance_to_tag[i] for i in asset.instance_draw_order],
         preflight=preflight,
+        provenance=asset.provenance,
+        source_instance_ids=source_instance_ids,
     )
+    manifest["source"]["assembly_schema"] = {
+        "format": ASSEMBLY_FORMAT, "version": ASSEMBLY_VERSION,
+        "pin": ASSEMBLY_SCHEMA_PIN,
+    }
     if manifest["rest_fidelity"]["status"] == "fail":
         raise ValueError(
             "rig rest pose differs from the Assembly Bundle's own reference.png: "

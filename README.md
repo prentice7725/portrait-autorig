@@ -103,9 +103,15 @@ rig part를 포함한 `member_bindings`에 그대로 보존됩니다. Runtime은
 authoring API는 exclusive VariantSet과 preset을 작성하고, crossfade 선택은 manifest
 계약을 통해 전달됩니다. 잘못된 member mapping은 compile을 실패시킵니다.
 
+P0-H에서 `ParamEyeBallX/Y`는 독립 `iridesl`/`iridesr`를 우선 움직이는 보수적인
+`gaze` deformer로 컴파일됩니다. 독립 iris가 없고 coarse eye layer만 있으면
+Capability Report가 `degraded`로 기록됩니다. `visibility_curve`는 대상 part의
+기존 visibility와 VariantSet alpha에 곱해지며, 여러 curve도 곱셈으로 합성됩니다.
+Runtime은 manifest의 `evaluation.phases` 순서대로 driver/deformer/constraint 단계를
+방문하고, v0.1 `motion`은 호환성 adapter로만 사용합니다.
+
 브라우저에서 [`preview/index.html`](preview/index.html)을 열고 Rig Bundle directory를
-선택하면 head turn, tilt, breath, blink을 테스트할 수 있습니다. `gaze`는 아직
-런타임 deformer가 구현되지 않아 테스트 대상에서 제외되어 있습니다.
+선택하면 head turn, tilt, breath, blink, gaze를 테스트할 수 있습니다.
 
 원본 feasibility study와 측정된 motion limit은
 [`docs/PORTRAIT_AUTO_RIG_FEASIBILITY_v0.1.md`](docs/PORTRAIT_AUTO_RIG_FEASIBILITY_v0.1.md)에

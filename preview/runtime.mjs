@@ -123,6 +123,10 @@ export const LID_LINE_RATIO = 0.85;
 // Which layer defines the eye opening the lid closes onto, best first.
 export const EYE_OPENING_TAGS = ["eyewhite", "irides", "eyes"];
 
+export const DEFAULT_EVALUATION_PHASES = [
+  "base", "primary", "corrective", "secondary", "constraints", "visibility", "render",
+];
+
 // An expression pack (M4.1) carries drawings the decomposition cannot produce:
 // a shut eye, an open mouth. Where one exists it *owns* the feature while it is
 // showing, and the parts it stands in for fade out under it.
@@ -185,8 +189,38 @@ export const state = {
   variantSets: {},
   variantSelections: {},
   variantFades: {},
+  parameters: {},
+  gazeTargets: [],
+  eyeOpening: { l: null, r: null },
+  phaseTrace: [],
   t0: performance.now(),
 };
+
+/** Set a manifest parameter from a host or a test harness.  Values are
+ * clamped to the immutable parameter descriptor range when one is present. */
+export function setParameter(id, value) {
+  const descriptor = (state.manifest?.parameters || []).find((p) => p.id === id);
+  let numeric = Number(value);
+  if (!Number.isFinite(numeric)) numeric = descriptor?.default ?? 0;
+  if (descriptor) numeric = Math.max(descriptor.min, Math.min(descriptor.max, numeric));
+  state.parameters[id] = numeric;
+  return numeric;
+}
+
+function parameterValue(id, motion = {}) {
+  if (motion.parameters && motion.parameters[id] != null) return Number(motion.parameters[id]);
+  if (id === "ParamAngleX") return Number(motion.turnX ?? state.turnX ?? 0);
+  if (id === "ParamAngleY") return Number(motion.turnY ?? state.turnY ?? 0);
+  if (id === "ParamAngleZ") return Number(motion.tiltRad ?? 0);
+  if (id === "ParamEyeLOpen" && motion.blink) return 1 - Number(motion.blink.l ?? 0);
+  if (id === "ParamEyeROpen" && motion.blink) return 1 - Number(motion.blink.r ?? 0);
+  if (id === "ParamMouthOpenY" && motion.mouthOpen != null) return Number(motion.mouthOpen);
+  if (id === "ParamBreath" && motion.breath != null) return Number(motion.breath);
+  if (id === "ParamEyeBallX") return Number(motion.gazeX ?? state.parameters[id] ?? 0);
+  if (id === "ParamEyeBallY") return Number(motion.gazeY ?? state.parameters[id] ?? 0);
+  if (state.parameters[id] != null) return Number(state.parameters[id]);
+  return 0;
+}
 
 /** Runtime binding for Composer VariantSets (P0-F2).  Composer instance ids
  * are resolved through manifest.member_bindings; no semantic-name guessing is
@@ -238,23 +272,106 @@ export function applyExpressionPreset(presetId, options = {}) {
   return result;
 }
 
-/** Consume visibility-phase sprite_swap entries and finish expired fades. */
+function visibilityCurveValue(deformer, value) {
+  const points = deformer.points || deformer.stops || deformer.curve
+    || deformer.config?.points || deformer.config?.stops || deformer.config?.curve || [];
+  if (!Array.isArray(points) || points.length === 0) return 1;
+  const normalized = points.map((p) => Array.isArray(p)
+    ? { value: Number(p[0]), alpha: Number(p[1]) }
+    : { value: Number(p.value ?? p.x), alpha: Number(p.alpha ?? p.y) })
+    .filter((p) => Number.isFinite(p.value) && Number.isFinite(p.alpha))
+    .sort((a, b) => a.value - b.value);
+  if (!normalized.length) return 1;
+  if (value <= normalized[0].value) return Math.max(0, Math.min(1, normalized[0].alpha));
+  const last = normalized[normalized.length - 1];
+  if (value >= last.value) return Math.max(0, Math.min(1, last.alpha));
+  for (let i = 1; i < normalized.length; i++) {
+    const hi = normalized[i], lo = normalized[i - 1];
+    if (value <= hi.value) {
+      const t = (value - lo.value) / Math.max(1e-9, hi.value - lo.value);
+      return Math.max(0, Math.min(1, lo.alpha + (hi.alpha - lo.alpha) * t));
+    }
+  }
+  return 1;
+}
+
+function curveTargets(deformer) {
+  const raw = deformer.targets ?? deformer.target ?? deformer.config?.targets ?? [];
+  if (typeof raw === "string") return [raw];
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === "object") {
+    if (Array.isArray(raw.tags)) return raw.tags;
+    if (Array.isArray(raw.parts)) return raw.parts;
+    if (typeof raw.tag === "string") return [raw.tag];
+    if (typeof raw.part === "string") return [raw.part];
+  }
+  return [];
+}
+
+function visibilityCurveAlpha(part, motion) {
+  let alpha = 1;
+  for (const deformer of (state.manifest?.deformers || [])) {
+    if (deformer.kind !== "visibility_curve" || deformer.phase !== "visibility") continue;
+    const targets = curveTargets(deformer);
+    if (!targets.includes(part.spec.name) && !targets.includes(part.spec.tag)) continue;
+    const parameter = deformer.parameter || deformer.parameters?.[0];
+    const value = parameter ? parameterValue(parameter, motion) : 0;
+    alpha *= visibilityCurveValue(deformer, Number.isFinite(value) ? value : 0);
+  }
+  return Math.max(0, Math.min(1, alpha));
+}
+
+/** Consume visibility-phase entries and finish expired VariantSet fades. */
 export function evaluateVisibilityPhase(now = performance.now()) {
   for (const [setId, fade] of Object.entries(state.variantFades)) {
     if (now - fade.start >= fade.duration) applyVariantSet(setId, fade.to, { transition: "discrete" });
   }
   return (state.manifest?.deformers || []).filter(
-    (d) => d.kind === "sprite_swap" && d.phase === "visibility");
+    (d) => (d.kind === "sprite_swap" || d.kind === "visibility_curve") && d.phase === "visibility");
 }
 
-/** Phase entry point used by the preview/runtime.  Non-visibility phases
- * remain declarative until their existing deformation adapters consume them;
- * visibility is fully live in P0-F2. */
-export function evaluatePhase(phase, now = performance.now()) {
+export function evaluateDrivers(phase, context = {}) {
+  const entries = (state.manifest?.drivers || []).filter((d) => (d.phase || "secondary") === phase);
+  context.executedDrivers = (context.executedDrivers || []).concat(entries.map((d) => d.id));
+  return entries;
+}
+
+export function evaluateDeformers(phase, context = {}) {
+  const entries = (state.manifest?.deformers || []).filter((d) => d.phase === phase);
+  context.executedDeformers = (context.executedDeformers || []).concat(entries.map((d) => d.id));
+  if (phase === "visibility") evaluateVisibilityPhase(context.now ?? performance.now());
+  return entries;
+}
+
+export function evaluateConstraints(phase, context = {}) {
+  const entries = (state.manifest?.constraints || []).filter((d) => (d.phase || "constraints") === phase);
+  context.executedConstraints = (context.executedConstraints || []).concat(entries.map((d) => d.id));
+  return entries;
+}
+
+/** Execute the manifest's declared phase order. Geometry remains in the
+ * render loop, while every declarative phase is visited in this one order. */
+export function evaluatePhase(phase, now = performance.now(), context = {}) {
   const allowed = state.manifest?.evaluation?.phases;
   if (allowed && !allowed.includes(phase)) throw new Error(`unknown evaluation phase: ${phase}`);
-  if (phase === "visibility") return evaluateVisibilityPhase(now);
-  return (state.manifest?.deformers || []).filter((d) => d.phase === phase);
+  context.now = now;
+  evaluateDrivers(phase, context);
+  const result = evaluateDeformers(phase, context);
+  evaluateConstraints(phase, context);
+  state.phaseTrace.push(phase);
+  return result;
+}
+
+export function evaluateAllPhases(now = performance.now(), context = {}) {
+  state.phaseTrace = [];
+  const phases = state.manifest?.evaluation?.phases || DEFAULT_EVALUATION_PHASES;
+  for (const phase of phases) evaluatePhase(phase, now, context);
+  return state.phaseTrace.slice();
+}
+
+function phaseEnabled(phase) {
+  const phases = state.manifest?.evaluation?.phases;
+  return !Array.isArray(phases) || phases.includes(phase);
 }
 
 /* ---------- loading ---------- */
@@ -733,6 +850,9 @@ export function motionFromDeformers(manifest) {
     .find((d) => d.targets && d.targets.side === "l");
   if (blinkL) motion.blink = blinkL.config;
 
+  const gaze = (byKind.gaze || [])[0];
+  if (gaze) motion.gaze = gaze.config || {};
+
   return motion;
 }
 
@@ -741,6 +861,11 @@ export function build(manifest, images) {
   const overlayCanvas = document.getElementById("regionOverlay");
   manifest = { ...manifest, motion: motionFromDeformers(manifest) };
   state.manifest = manifest;
+  state.parameters = {};
+  for (const descriptor of (manifest.parameters || [])) {
+    if (descriptor && descriptor.id) state.parameters[descriptor.id] = Number(descriptor.default ?? 0);
+  }
+  state.phaseTrace = [];
   state.canvasW = manifest.canvas.width;
   state.canvasH = manifest.canvas.height;
   canvas.width = state.canvasW;
@@ -763,6 +888,7 @@ export function build(manifest, images) {
       if (found) { opening[suffix] = found.xyxy; break; }
     }
   }
+  state.eyeOpening = { l: opening.l || opening[""] || null, r: opening.r || opening[""] || null };
 
   state.shells = fitShells(manifest.parts);
 
@@ -1022,6 +1148,7 @@ export function blinkAmount(now) {
 /** How opaque a part is this frame. Only the expression pack moves this: with
  *  no pack every part draws at 1, which is the v0.1 rig. */
 export function opacityOf(part, motion) {
+  let alpha = Number(part.spec?.authored_visibility ?? part.spec?.visibility ?? 1);
   if (part.spec && part.spec.variant_set) {
     const setId = part.spec.variant_set;
     const spec = state.variantSets[setId];
@@ -1029,20 +1156,22 @@ export function opacityOf(part, motion) {
     const fade = state.variantFades[setId];
     if (fade && spec) {
       const amount = Math.max(0, Math.min(1, (motion.now - fade.start) / fade.duration));
-      if (amount >= 1) return member === fade.to ? 1 : 0;
-      if (member === fade.from) return 1 - amount;
-      if (member === fade.to) return amount;
-      return 0;
+      if (amount >= 1) alpha *= member === fade.to ? 1 : 0;
+      else if (member === fade.from) alpha *= 1 - amount;
+      else if (member === fade.to) alpha *= amount;
+      else alpha = 0;
+    } else {
+      alpha *= spec && state.variantSelections[setId] === member ? 1 : 0;
     }
-    return spec && state.variantSelections[setId] === member ? 1 : 0;
   }
-  if (!motion.swap) return 1;
-  if (part.expression) {
+  if (motion.swap && part.expression) {
     const key = part.expression.kind === "mouth" ? "mouth" : part.expression.side;
-    return motion.swap[key] ? motion.swap[key].art : 0;
+    alpha *= motion.swap[key] ? motion.swap[key].art : 0;
+  } else if (motion.swap && part.replacedBy) {
+    alpha *= motion.swap[part.replacedBy].base;
   }
-  if (part.replacedBy) return motion.swap[part.replacedBy].base;
-  return 1;
+  if (!Number.isFinite(alpha)) alpha = 0;
+  return Math.max(0, Math.min(1, alpha * visibilityCurveAlpha(part, motion)));
 }
 
 /** Weight overrides for the H2/H3 experiments. `motion.overrides` is read once
@@ -1060,6 +1189,35 @@ export function effectiveWeight(part, i, overrides) {
   return part.mesh.weight[i];
 }
 
+function gazeTarget(part) {
+  const tag = part.spec.tag;
+  if (tag === "iridesl" || tag === "iridesr") return tag.endsWith("l") ? "l" : "r";
+  if (tag === "eyel" || tag === "eyer") return tag.endsWith("l") ? "l" : "r";
+  if (tag === "irides" || tag === "eyes") return "both";
+  return null;
+}
+
+function gazeDelta(part, motion) {
+  const target = gazeTarget(part);
+  if (!target || !motion.gaze) return [0, 0];
+  const cfg = motion.gaze;
+  const x = Math.max(-1, Math.min(1, parameterValue("ParamEyeBallX", motion)));
+  const y = Math.max(-1, Math.min(1, parameterValue("ParamEyeBallY", motion)));
+  const anchor = target === "r" ? state.manifest.anchors?.eye_right
+    : state.manifest.anchors?.eye_left;
+  const box = anchor ? (target === "r" ? state.eyeOpening?.r : state.eyeOpening?.l) : null;
+  const width = box ? Math.max(1, box[2] - box[0]) : Math.max(1, part.spec.xyxy[2] - part.spec.xyxy[0]);
+  const height = box ? Math.max(1, box[3] - box[1]) : Math.max(1, part.spec.xyxy[3] - part.spec.xyxy[1]);
+  let dx = x * Number(cfg.max_x ?? 0.22) * width;
+  let dy = y * Number(cfg.max_y ?? 0.14) * height;
+  const margin = Math.max(0, Math.min(0.45, Number(cfg.safe_margin ?? 0.08)));
+  const limitX = width * Math.max(0, 0.5 - margin);
+  const limitY = height * Math.max(0, 0.5 - margin);
+  dx = Math.max(-limitX, Math.min(limitX, dx));
+  dy = Math.max(-limitY, Math.min(limitY, dy));
+  return [dx, dy];
+}
+
 export function deform(part, now, motion) {
   const { rest, live } = part.mesh;
   const anchors = state.manifest.anchors || {};
@@ -1067,6 +1225,8 @@ export function deform(part, now, motion) {
   const span = Math.max(state.canvasW, state.canvasH);
   const parallax = span * (TURN_BASE + TURN_SPAN * (1 - part.spec.depth));
   const tilt = pivot ? motion.tiltRad : 0;
+  const primaryEnabled = phaseEnabled("primary");
+  const secondaryEnabled = phaseEnabled("secondary");
   // How far the *drawn* eye closes. With an expression pack this is held at
   // the swap point instead of going to 1: past there the art owns the eye, and
   // squashing a layer that is fading out only adds a second motion under it.
@@ -1081,19 +1241,28 @@ export function deform(part, now, motion) {
 
     // Eyes close toward their own centre line before anything moves them, so
     // the lid stays put while the head turns.
-    if (part.isEye && blink > 0) {
+    if (primaryEnabled && part.isEye && blink > 0) {
       const floor = part.isLid ? motion.lidThickness : 0;
       const lid = part.openTop + motion.lidRatio * (part.openBottom - part.openTop);
       y = lid + (y - lid) * (1 - blink * (1 - floor));
     }
 
+    // Gaze is deliberately restricted to iris/coarse-eye targets.  The eye
+    // white and lash never inherit this offset, so head turn and blink remain
+    // responsible for their own motion.
+    const gaze = gazeDelta(part, motion);
+    if (primaryEnabled && (gaze[0] !== 0 || gaze[1] !== 0)) {
+      x += gaze[0];
+      y += gaze[1];
+    }
+
     // Depth-differential parallax: near parts travel further than far ones.
-    let dx = motion.turnX * parallax;
-    let dy = motion.turnY * parallax * TURN_Y_SCALE;
+    let dx = primaryEnabled ? motion.turnX * parallax : 0;
+    let dy = primaryEnabled ? motion.turnY * parallax * TURN_Y_SCALE : 0;
     // ... blended toward the shell rotation (H6). The head-follow weight scales
     // the blended result, not just the parallax, so the neck's gradient still
     // governs both paths and the two seams stay continuous either way.
-    if (motion.shell > 0 && part.shell) {
+    if (primaryEnabled && motion.shell > 0 && part.shell) {
       const d = shellDelta(part.shell, x, y, motion.yaw, motion.pitch);
       dx += motion.shell * (d[0] - dx);
       dy += motion.shell * (d[1] - dy);
@@ -1103,7 +1272,7 @@ export function deform(part, now, motion) {
 
     // Tilt about the neck pivot, scaled by the same weight, which is what
     // keeps the bottom of the neck attached to the torso.
-    if (tilt !== 0 && w !== 0) {
+    if (primaryEnabled && tilt !== 0 && w !== 0) {
       const a = tilt * w, cos = Math.cos(a), sin = Math.sin(a);
       const dx = x - pivot[0], dy = y - pivot[1];
       x = pivot[0] + dx * cos - dy * sin;
@@ -1114,7 +1283,7 @@ export function deform(part, now, motion) {
     // formula. Giving the head a translation and the torso a scale meant the
     // two disagreed at the collar and the neck visibly stretched: everything
     // above the chest has to rise by the *same* amount the chest top rises.
-    if (motion.breath !== 0) {
+    if (primaryEnabled && motion.breath !== 0) {
       const ramp = breathRamp(y);
       if (ramp > 0) {
         y -= motion.breath * motion.breathAmp * ramp;
@@ -1132,7 +1301,7 @@ export function deform(part, now, motion) {
     // additive push -- outward for whichever lobe a vertex belongs to, and a
     // little downward bias so the effect reads as cloth settling rather than
     // sliding sideways in a straight line.
-    if (part.softMorph && motion.softMorph.enabled) {
+    if (secondaryEnabled && part.softMorph && motion.softMorph.enabled) {
       const sm = motion.softMorph;
       const amount = sm.strength * sm.morph;
       if (amount !== 0) {
@@ -1153,8 +1322,6 @@ export function frame(now) {
   const t = (now - state.t0) / 1000;
   const dt = Math.min(0.1, (now - (state.lastFrame || now)) / 1000);
   state.lastFrame = now;
-  evaluatePhase("visibility", now);
-
   if (document.getElementById("autoIdle").checked) {
     // Two incommensurable periods so the loop never visibly repeats, and the
     // turn held well inside where it starts to cost something.
@@ -1206,6 +1373,8 @@ export function frame(now) {
   const motion = {
     now,
     turnX: state.turnX, turnY: state.turnY,
+    gazeX: parseFloat(document.getElementById("gazeX").value),
+    gazeY: parseFloat(document.getElementById("gazeY").value),
     tiltRad: state.tiltDeg * Math.PI / 180,
     shell: state.shell,
     yaw: state.turnX * SHELL_MAX_YAW,
@@ -1213,6 +1382,7 @@ export function frame(now) {
     // two paths have to agree on which way "down" is or the blend fights itself.
     pitch: -state.turnY * SHELL_MAX_PITCH,
     blink,
+    mouthOpen: state.mouthOpen,
     squash: { l: swap.l.squash, r: swap.r.squash },
     swap,
     breath: breathSin,
@@ -1233,6 +1403,11 @@ export function frame(now) {
       collar: state.collarOverride,
     },
   };
+
+  // v0.2's manifest phase list is the runtime ordering contract.  The
+  // deformation math below remains the legacy-compatible render backend, but
+  // it is now reached only after every declared phase has been evaluated.
+  evaluateAllPhases(now, { motion });
 
   gl.viewport(0, 0, state.canvasW, state.canvasH);
   gl.clearColor(0, 0, 0, 0);
@@ -1286,7 +1461,12 @@ export function syncSlider(id) {
   if (id === "turnX") { state.turnX = value; document.getElementById("turnXv").textContent = value.toFixed(2); }
   if (id === "turnY") { state.turnY = value; document.getElementById("turnYv").textContent = value.toFixed(2); }
   if (id === "tilt") { state.tiltDeg = value; document.getElementById("tiltv").textContent = value.toFixed(1) + "°"; }
+  if (id === "gazeX") { setParameter("ParamEyeBallX", value); document.getElementById("gazeXv").textContent = value.toFixed(2); }
+  if (id === "gazeY") { setParameter("ParamEyeBallY", value); document.getElementById("gazeYv").textContent = value.toFixed(2); }
 }
+
+document.getElementById("gazeX").addEventListener("input", () => syncSlider("gazeX"));
+document.getElementById("gazeY").addEventListener("input", () => syncSlider("gazeY"));
 
 document.getElementById("mouthOpen").addEventListener("input", () => {
   document.getElementById("doTalk").checked = false;

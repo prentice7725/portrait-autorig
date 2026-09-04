@@ -39,6 +39,20 @@ def _eye_capability(tags: set[str], side: str) -> str:
     return DISABLED
 
 
+def _gaze_capability(tags: set[str]) -> str:
+    """Gaze prefers bilateral independent iris parts.
+
+    A coarse ``eyes``/``eyel``/``eyer`` drawing can still be moved, but it is
+    less precise and therefore explicitly degraded.  No movable eye content
+    means gaze is disabled rather than guessed.
+    """
+    if {"iridesl", "iridesr"}.issubset(tags):
+        return READY
+    if any(tag in tags for tag in ("irides", "eyel", "eyer", "eyes")):
+        return DEGRADED
+    return DISABLED
+
+
 def capability_report(parts: list[dict[str, Any]], preflight: dict[str, Any],
                       variant_status: str | None = None) -> dict[str, str]:
     """The manifest's `"capabilities"` block. Values are `READY`/`DEGRADED`/
@@ -59,6 +73,7 @@ def capability_report(parts: list[dict[str, Any]], preflight: dict[str, Any],
 
     report["blink_l"] = _eye_capability(tags, "l")
     report["blink_r"] = _eye_capability(tags, "r")
+    report["gaze"] = _gaze_capability(tags)
 
     report["mouth_open"] = READY if has("mouth") else DISABLED
 

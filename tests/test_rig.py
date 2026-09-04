@@ -417,7 +417,7 @@ class BuildRigTests(unittest.TestCase):
         deformer_kinds = {d["kind"] for d in manifest["deformers"]}
         self.assertEqual(deformer_kinds,
                          {"parallax_turn", "shell_turn", "weighted_rotation",
-                          "continuous_field", "eye_fold"})
+                          "continuous_field", "eye_fold", "gaze"})
 
     def test_every_part_carries_a_frozen_mesh_topology_hash(self):
         # directive v0.2 #11-12 (P0-G): generate mesh -> hash -> freeze.
@@ -438,6 +438,29 @@ class BuildRigTests(unittest.TestCase):
         self.assertIn("capabilities", manifest)
         self.assertEqual(manifest["capabilities"]["head_turn"], "ready")
         self.assertIn(manifest["capabilities"]["mouth_open"], {"ready", "degraded", "disabled"})
+
+    def test_provenance_is_forwarded_opaquely(self):
+        provenance = {"composer": "2.1.0", "seed": "A002"}
+        manifest, _ = build_rig(self.layers, frame_size=(CANVAS, CANVAS), provenance=provenance)
+        self.assertEqual(manifest["source"]["provenance"], provenance)
+        self.assertEqual(manifest["provenance"], provenance)
+
+    def test_preflight_reports_gaze_readiness_without_gating_compile(self):
+        preflight = rig_preflight(self.layers, body_remainder=self.remainder)
+        self.assertIn("gaze", preflight["checks"])
+        self.assertEqual(preflight["checks"]["gaze"]["available"], "disabled")
+
+    def test_visibility_curves_compile_into_visibility_deformers(self):
+        manifest, _ = build_rig(
+            self.layers, frame_size=(CANVAS, CANVAS),
+            visibility_curves=[{
+                "parameter": "ParamEyeLOpen", "targets": ["eyewhitel"],
+                "points": [{"value": 0.0, "alpha": 1.0}, {"value": 1.0, "alpha": 0.0}],
+            }],
+        )
+        curves = [d for d in manifest["deformers"] if d["kind"] == "visibility_curve"]
+        self.assertEqual(len(curves), 1)
+        self.assertEqual(curves[0]["phase"], "visibility")
 
     def test_default_draw_order_matches_the_canonical_semantic_table(self):
         # No draw_order supplied (every Portrait Bundle caller) reproduces
@@ -666,4 +689,3 @@ class WriteRigProjectTests(unittest.TestCase):
             for part in written["parts"]:
                 self.assertTrue(os.path.isfile(os.path.join(out_dir, part["image"])),
                                 part["image"])
-
