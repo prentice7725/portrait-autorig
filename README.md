@@ -140,6 +140,8 @@ overlapping curtain-column weight를 포함하며 P2 물리 계산은 수행하�
 
 현재 P1 상태는 다음과 같습니다.
 
+P1은 위 항목과 parity/QA gate를 충족하여 `CLOSED/FROZEN` 상태입니다.
+
 - 완료: contour-aware mesh(P1-A), mesh quality QA(P1-B), island policy(P1-C),
   motion-aware density(P1-D), strand topology, clip-mask contract, N-way
   boundary-stitch contract, strand partition QA, constraints-phase dispatch 및
@@ -148,6 +150,9 @@ overlapping curtain-column weight를 포함하며 P2 물리 계산은 수행하�
 
 테스트 의존성에는 원본 Composer schema를 직접 검증하기 위한 `jsonschema`가 포함되어
 있으며, 일반 runtime은 외부 Composer 또는 `seethrough_engine`를 import하지 않습니다.
+휴리스틱의 계약/실험 구분은 [`docs/HEURISTIC_REGISTRY.md`](docs/HEURISTIC_REGISTRY.md)에
+기록하며, 최적화 runtime과 독립 CPU oracle의 parity는
+`node preview/check_reference_parity.mjs`로 확인합니다.
 
 원본 feasibility study와 측정된 motion limit은
 [`docs/PORTRAIT_AUTO_RIG_FEASIBILITY_v0.1.md`](docs/PORTRAIT_AUTO_RIG_FEASIBILITY_v0.1.md)에

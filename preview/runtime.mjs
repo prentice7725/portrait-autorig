@@ -1439,6 +1439,43 @@ export function deform(part, now, motion) {
   }
 }
 
+/** Apply declarative N-way seam relations after all parts have been deformed. */
+export function applyBoundaryStitches(parts = state.parts,
+                                      constraints = state.manifest?.constraints || []) {
+  const byName = new Map(parts.map((part) => [part.spec?.name || part.name, part]));
+  for (const constraint of constraints) {
+    if (constraint.kind !== "boundary_stitch") continue;
+    const tolerance = Math.max(0, Number(constraint.tolerance_px ?? 0));
+    for (const group of constraint.groups || []) {
+      const members = (group.members || []).map((member) => ({
+        member, part: byName.get(member.part),
+      })).filter(({ member, part }) => part?.mesh?.live && Number.isInteger(member.vertex)
+        && member.vertex >= 0 && member.vertex * 2 + 1 < part.mesh.live.length);
+      if (members.length < 2) continue;
+      const points = members.map(({ member, part }) => [
+        part.mesh.live[member.vertex * 2], part.mesh.live[member.vertex * 2 + 1],
+      ]);
+      let maxDistance = 0;
+      for (const point of points) for (const other of points) {
+        maxDistance = Math.max(maxDistance, Math.hypot(point[0] - other[0], point[1] - other[1]));
+      }
+      if (maxDistance <= tolerance) continue;
+      const weights = members.map(({ member }) => Math.max(0, Number(member.weight ?? 1)));
+      const total = weights.reduce((sum, value) => sum + value, 0);
+      if (!(total > 0)) continue;
+      const target = [0, 0];
+      points.forEach((point, index) => {
+        target[0] += point[0] * weights[index] / total;
+        target[1] += point[1] * weights[index] / total;
+      });
+      for (const { member, part } of members) {
+        part.mesh.live[member.vertex * 2] = target[0];
+        part.mesh.live[member.vertex * 2 + 1] = target[1];
+      }
+    }
+  }
+}
+
 export function frame(now) {
   const gl = state.gl, loc = state.loc;
   const t = (now - state.t0) / 1000;
@@ -1536,11 +1573,16 @@ export function frame(now) {
   gl.clear(gl.COLOR_BUFFER_BIT);
 
   const wire = document.getElementById("wire").checked;
+  const drawParts = [];
   for (const p of state.parts) {
     if (!p.visible) continue;
     const opacity = opacityOf(p, motion);
     if (opacity <= 0.002) continue;
     deform(p, now, motion);
+    drawParts.push({ part: p, opacity });
+  }
+  applyBoundaryStitches(state.parts);
+  for (const { part: p, opacity } of drawParts) {
 
     gl.bindBuffer(gl.ARRAY_BUFFER, p.buf.pos);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, p.mesh.live);
