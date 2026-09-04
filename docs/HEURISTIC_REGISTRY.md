@@ -27,4 +27,5 @@ must not silently become defaults.
 - `REJECTED`: tested and intentionally not used.
 - `REPLACED`: superseded by a named rule; retained for historical traceability.
 
-P2 drivers remain opt-in until they are connected to the manifest/runtime path.
+P2 drivers are connected to the manifest/runtime path but remain opt-in until
+production corpus tuning is frozen.

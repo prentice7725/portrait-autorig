@@ -963,7 +963,7 @@ export function build(manifest, images) {
     if (strandSpec?.enabled !== false && Array.isArray(strandSpec?.strands) && strandSpec.strands.length) {
       state.physicsDrivers.strand = createStrandSpringDriver(strandSpec.strands, {
         stiffness: strandSpec.stiffness, damping: strandSpec.damping,
-        mass: strandSpec.mass, config,
+        mass: strandSpec.mass, input_mode: strandSpec.input_mode || "translation", config,
       });
     }
     const torsoSpec = physicsSpec.upper_torso_driver;
@@ -972,6 +972,7 @@ export function build(manifest, images) {
         profile: torsoSpec.profile || "soft",
         translationGain: torsoSpec.translation_gain ?? 1,
         angleGain: torsoSpec.angle_gain ?? 0.25,
+        inputMode: torsoSpec.input_mode || "translation",
         config,
       });
     }
@@ -1518,7 +1519,12 @@ export function deform(part, now, motion) {
           flushDelta();
           if (part.softMorph && motion.softMorph.enabled) {
             const sm = motion.softMorph;
-            const amount = sm.strength * sm.morph;
+            // P2 torso physics feeds the authored local field; it never adds
+            // a second uniform topwear translation. This preserves lobe,
+            // neckline, center, and occluder locks already encoded in weights.
+            const physicsAmount = part.spec.tag === SOFT_MORPH_TAG
+              ? Number(motion.physics?.torso?.value || 0) : 0;
+            const amount = sm.strength * sm.morph + physicsAmount;
             if (amount !== 0) {
               const wl = part.softMorph.left[i], wr = part.softMorph.right[i];
               if (wl > 0 || wr > 0) {
@@ -1532,13 +1538,6 @@ export function deform(part, now, motion) {
         case "strand_spring": {
           if (["front hair", "back hair", "hair_secondary", "hair"].includes(part.spec.tag)) {
             y += strandSpringDelta(part, i, motion);
-          }
-          break;
-        }
-        case "upper_torso_physics": {
-          if (part.spec.tag === SOFT_MORPH_TAG && motion.physics?.torso) {
-            const output = Number(motion.physics.torso.value || 0);
-            y += output;
           }
           break;
         }

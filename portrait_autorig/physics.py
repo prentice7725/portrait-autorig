@@ -12,7 +12,7 @@ import hashlib
 import math
 from typing import Any
 
-__all__ = ["PhysicsMaterial", "PhysicsSnapshot", "DeterministicSpring",
+__all__ = ["INPUT_MODES", "PhysicsMaterial", "PhysicsSnapshot", "DeterministicSpring",
            "StrandSpringDriver", "UpperTorsoSecondaryDriver",
            "DEFAULT_PHYSICS_CONFIG", "validate_physics_spec"]
 
@@ -22,6 +22,7 @@ DEFAULT_PHYSICS_CONFIG: dict[str, Any] = {
     "reset_policy": "rest",
     "warmup_seconds": 0.25,
 }
+INPUT_MODES = frozenset({"translation", "angle", "velocity", "acceleration", "impulse"})
 
 
 def validate_physics_spec(spec: dict[str, Any]) -> list[str]:
@@ -144,11 +145,17 @@ class StrandSpringDriver:
 
     def __init__(self, strands: list[dict[str, Any]], *,
                  material: PhysicsMaterial | None = None,
-                 config: dict[str, Any] | None = None) -> None:
+                 config: dict[str, Any] | None = None,
+                 input_mode: str = "translation") -> None:
+        if input_mode not in INPUT_MODES:
+            raise ValueError(f"unknown strand input mode: {input_mode!r}")
         base = material or PhysicsMaterial()
         self.springs: dict[str, DeterministicSpring] = {}
         self.geometry_factor: dict[str, float] = {}
         self.offset: dict[str, float] = {}
+        self.input_mode = input_mode
+        self._previous_input = 0.0
+        self._previous_velocity = 0.0
         for strand in strands:
             strand_id = str(strand.get("strand_id", strand.get("id", ""))).strip()
             if not strand_id or strand_id in self.springs:
@@ -170,6 +177,8 @@ class StrandSpringDriver:
             self.offset[strand_id] = (digest - 0.5) * 0.02
 
     def resetPhysics(self) -> dict[str, PhysicsSnapshot]:
+        self._previous_input = 0.0
+        self._previous_velocity = 0.0
         return {strand_id: spring.resetPhysics() for strand_id, spring in self.springs.items()}
 
     def warmupPhysics(self, seconds: float | None = None,
@@ -177,9 +186,21 @@ class StrandSpringDriver:
         return {strand_id: spring.warmupPhysics(seconds, target=target + self.offset[strand_id])
                 for strand_id, spring in self.springs.items()}
 
-    def stepPhysicsFixed(self, n: int = 1, *, target: float = 0.0) -> dict[str, PhysicsSnapshot]:
+    def stepPhysicsFixed(self, n: int = 1, *, target: float = 0.0,
+                         input_mode: str | None = None,
+                         input_value: float | None = None) -> dict[str, PhysicsSnapshot]:
+        mode = self.input_mode if input_mode is None else input_mode
+        if mode not in INPUT_MODES:
+            raise ValueError(f"unknown strand input mode: {mode!r}")
+        source = float(target if input_value is None else input_value)
+        dt = 1.0 / next(iter(self.springs.values())).update_hz if self.springs else 1.0 / 60.0
+        velocity = (source - self._previous_input) / dt
+        acceleration = (velocity - self._previous_velocity) / dt
+        interpreted = {"translation": source, "angle": source, "velocity": velocity,
+                       "acceleration": acceleration, "impulse": source - self._previous_input}[mode]
+        self._previous_input, self._previous_velocity = source, velocity
         return {strand_id: spring.stepPhysicsFixed(
-            n, target=target * self.geometry_factor[strand_id] + self.offset[strand_id])
+            n, target=interpreted * self.geometry_factor[strand_id] + self.offset[strand_id])
                 for strand_id, spring in self.springs.items()}
 
 
@@ -193,15 +214,32 @@ class UpperTorsoSecondaryDriver:
     }
 
     def __init__(self, *, profile: str = "soft", translation_gain: float = 1.0,
-                 angle_gain: float = 0.25, config: dict[str, Any] | None = None) -> None:
+                 angle_gain: float = 0.25, config: dict[str, Any] | None = None,
+                 input_mode: str = "translation") -> None:
         if profile not in self.PROFILES:
             raise ValueError(f"unknown torso response profile: {profile!r}")
+        if input_mode not in INPUT_MODES:
+            raise ValueError(f"unknown torso input mode: {input_mode!r}")
         self.translation_gain = float(translation_gain)
         self.angle_gain = float(angle_gain)
+        self.input_mode = input_mode
+        self._previous_input = 0.0
+        self._previous_velocity = 0.0
         self.spring = DeterministicSpring(material=self.PROFILES[profile], config=config)
 
     def resetPhysics(self) -> PhysicsSnapshot:
+        self._previous_input = 0.0
+        self._previous_velocity = 0.0
         return self.spring.resetPhysics()
+
+    def _interpret(self, source: float, mode: str) -> float:
+        dt = 1.0 / self.spring.update_hz
+        velocity = (source - self._previous_input) / dt
+        acceleration = (velocity - self._previous_velocity) / dt
+        interpreted = {"translation": source, "angle": source, "velocity": velocity,
+                       "acceleration": acceleration, "impulse": source - self._previous_input}[mode]
+        self._previous_input, self._previous_velocity = source, velocity
+        return interpreted
 
     def warmupPhysics(self, seconds: float | None = None, *, breath: float = 0.0,
                       angle_y: float = 0.0) -> PhysicsSnapshot:
@@ -209,6 +247,12 @@ class UpperTorsoSecondaryDriver:
         return self.spring.warmupPhysics(seconds, target=target)
 
     def stepPhysicsFixed(self, n: int = 1, *, breath: float = 0.0,
-                         angle_y: float = 0.0) -> PhysicsSnapshot:
-        target = breath * self.translation_gain + angle_y * self.angle_gain
+                         angle_y: float = 0.0, input_mode: str | None = None,
+                         input_value: float | None = None) -> PhysicsSnapshot:
+        mode = self.input_mode if input_mode is None else input_mode
+        if mode not in INPUT_MODES:
+            raise ValueError(f"unknown torso input mode: {mode!r}")
+        source = (breath * self.translation_gain + angle_y * self.angle_gain
+                  if input_value is None else float(input_value))
+        target = self._interpret(source, mode)
         return self.spring.stepPhysicsFixed(n, target=target)

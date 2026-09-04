@@ -679,6 +679,20 @@ console.log("\nP2 physics geometry bindings");
   };
   deform(hair, 0, { ...still, physics: { strand: { strand_0: { value: 3 } } } });
   check("strand physics output reaches hair geometry", near(hair.mesh.live[1], 23));
+  state.frameOperations = [{ id: "torso", kind: "local_soft_field", phase: "secondary" }];
+  const torso = {
+    spec: { name: "topwear", tag: "topwear", group: "body", depth: 0.5 },
+    mesh: { rest: new Float32Array([10, 20, 30, 20]), live: new Float32Array([10, 20, 30, 20]),
+      weight: new Float32Array([1, 1]) },
+    softMorph: { left: new Float32Array([1, 0]), right: new Float32Array([0, 0]),
+      lowerBias: new Float32Array([1, 0]) },
+    eyeSide: null, isEye: false, isLid: false, shell: null,
+  };
+  deform(torso, 0, { ...still, physics: { torso: { value: 2 } },
+    softMorph: { enabled: true, strength: 0, morph: 0, horizontalPx: 1, verticalPx: 1 } });
+  check("torso physics preserves authored lobe/lock weights",
+        near(torso.mesh.live[0], 8) && near(torso.mesh.live[1], 22)
+        && near(torso.mesh.live[2], 30) && near(torso.mesh.live[3], 20));
   state.manifest = savedManifest; state.frameOperations = savedOperations;
 }
 
