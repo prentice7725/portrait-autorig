@@ -1,36 +1,217 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "portrait-autorig/vendor/portrait-composer/portrait-assembly-v0.2.schema.json",
-  "title": "Portrait Assembly Bundle v0.2",
-  "description": "Vendored input contract from portrait-composer; unknown extension fields remain allowed.",
-  "x-upstream": {
-    "vendor": "portrait-composer",
-    "commit": "682f25e",
-    "schema_id": "portrait-assembly-v0.2"
-  },
+  "$id": "https://portrait-composer/schemas/portrait-assembly-v0.2.schema.json",
+  "title": "Portrait Assembly Bundle manifest.json",
+  "description": "Directive ref: PORTRAIT_COMPOSER_IMPLEMENTATION_DIRECTIVE_v0.2.md #29-30. Composer C3/C4 authoring data is serialized, while AutoRig runtime and physics data are intentionally absent.",
   "type": "object",
-  "required": ["format", "version", "assets", "instances", "composition"],
+  "required": ["format", "version", "sources", "assets", "instances", "composition", "provenance"],
+  "additionalProperties": false,
   "properties": {
-    "format": {"const": "portrait-assembly"},
-    "version": {"const": "0.2"},
-    "assets": {"type": "object"},
-    "instances": {"type": "object"},
+    "format": { "const": "portrait-assembly" },
+    "version": { "const": "0.2" },
+
+    "sources": {
+      "type": "object",
+      "description": "source_id -> SourceAsset",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["source_id"],
+        "properties": {
+          "source_id": { "type": "string" },
+          "path": { "type": ["string", "null"] },
+          "metadata": { "type": "object" }
+        }
+      }
+    },
+
+    "assets": {
+      "type": "object",
+      "description": "asset id -> AssetDefinition (directive #5)",
+      "additionalProperties": { "$ref": "#/$defs/assetDefinition" }
+    },
+
+    "instances": {
+      "type": "object",
+      "description": "instance id -> LayerInstance (directive #6)",
+      "additionalProperties": { "$ref": "#/$defs/layerInstance" }
+    },
+
+    "hierarchy": { "type": "object", "description": "C1 -- {nodes: {node_id -> {parent, ref, label}}, children: {parent_id_or_\"\" -> [node_id,...]}} (directive #11, hierarchy.py)" },
+    "variant_sets": { "type": "object", "additionalProperties": { "$ref": "#/$defs/variantSet" }, "description": "C1 -- VariantSet map, id -> {mode, default, active, members} (directive #12, variants.py)" },
+    "expressions": { "type": "object", "additionalProperties": { "$ref": "#/$defs/expressionPreset" }, "description": "C3 -- thin ExpressionPreset map over VariantSets; no runtime parameter binding" },
+    "links": { "type": "object", "description": "C1 -- TransformLink map, id -> {members: [instance_id,...]} (directive #11, links.py)" },
+
+    "rig_intent": {
+      "type": "object",
+      "description": "C4 -- RigIntent (directive #21-23)",
+      "additionalProperties": false,
+      "properties": {
+        "regions": { "type": "object", "additionalProperties": { "$ref": "#/$defs/secondaryRegion" } },
+        "attachments": { "type": "object", "additionalProperties": { "$ref": "#/$defs/attachmentIntent" } },
+        "deformation_scopes": { "type": "object", "additionalProperties": { "$ref": "#/$defs/deformationScope" } }
+      }
+    },
+
     "composition": {
       "type": "object",
-      "required": ["draw_order", "canvas"],
+      "description": "Final draw order + canvas (directive #15)",
       "properties": {
-        "draw_order": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "draw_order": { "type": "array", "items": { "type": "string" } },
         "canvas": {
           "type": "object",
-          "required": ["width", "height"],
           "properties": {
-            "width": {"type": "number", "exclusiveMinimum": 0},
-            "height": {"type": "number", "exclusiveMinimum": 0},
-            "coordinate_system": {"const": "top-left-y-down"},
-            "color_space": {"const": "srgb"},
-            "alpha": {"const": "straight"}
+            "width": { "type": "integer", "minimum": 1 },
+            "height": { "type": "integer", "minimum": 1 }
           }
         }
+      }
+    },
+
+    "provenance": {
+      "type": "object",
+      "description": "target id -> ordered list of provenance records (directive #10, #16)",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["operation", "sources", "timestamp"],
+          "properties": {
+            "operation": { "type": "string" },
+            "sources": { "type": "array", "items": { "type": "string" } },
+            "timestamp": { "type": "number" }
+          }
+        }
+      }
+    }
+  },
+
+  "$defs": {
+    "sourceBinding": {
+      "type": "object",
+      "required": ["source_id", "revision", "source_layer_id"],
+      "properties": {
+        "source_id": { "type": "string" },
+        "revision": { "type": "string" },
+        "source_layer_id": { "type": "string" },
+        "fallback_semantic": { "type": ["string", "null"] }
+      }
+    },
+    "assetDefinition": {
+      "type": "object",
+      "required": ["id", "semantic"],
+      "properties": {
+        "id": { "type": "string" },
+        "semantic": { "type": "string" },
+        "source_binding": {
+          "oneOf": [{ "$ref": "#/$defs/sourceBinding" }, { "type": "null" }]
+        },
+        "planes": { "type": "array", "items": { "type": "string" } },
+        "compatibility": { "type": "object" },
+        "provenance": {
+          "type": "object",
+          "description": "C2 (bake.py) populates {derived_from: [{instance, asset, source_bundle}], operation, profile, timestamp, version} for a baked/derived asset; free-form and empty otherwise. See directive #16."
+        }
+      }
+    },
+    "deformationScope": {
+      "type": "string",
+      "enum": ["baked", "rigid", "local", "independent", "secondary"]
+    },
+    "attachmentIntent": {
+      "type": "object",
+      "required": ["child", "target", "mode"],
+      "additionalProperties": false,
+      "properties": {
+        "child": { "type": "string", "minLength": 1 },
+        "target": { "type": "string", "minLength": 1 },
+        "mode": { "type": "string", "enum": ["weld", "hinge", "free", "follow"] }
+      }
+    },
+    "lobe": {
+      "type": "object",
+      "required": ["center", "radius"],
+      "additionalProperties": false,
+      "properties": {
+        "center": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } },
+        "radius": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number", "exclusiveMinimum": 0 } }
+      }
+    },
+    "twoLobeGeometry": {
+      "type": "object",
+      "required": ["kind", "left", "right"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "two_lobe" },
+        "left": { "$ref": "#/$defs/lobe" },
+        "right": { "$ref": "#/$defs/lobe" }
+      }
+    },
+    "secondaryRegion": {
+      "type": "object",
+      "required": ["target", "geometry", "locks", "author_strength", "response_profile", "enabled"],
+      "additionalProperties": true,
+      "properties": {
+        "target": { "type": "string", "minLength": 1 },
+        "geometry": { "$ref": "#/$defs/twoLobeGeometry" },
+        "locks": {
+          "type": "object",
+          "additionalProperties": { "type": "number", "minimum": 0, "maximum": 1 },
+          "properties": {
+            "center": { "type": "number", "minimum": 0, "maximum": 1 },
+            "neckline": { "type": "number", "minimum": 0, "maximum": 1 },
+            "shoulder": { "type": "number", "minimum": 0, "maximum": 1 },
+            "lower_falloff": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        },
+        "exclusions": { "type": "array" },
+        "author_strength": { "type": "number", "minimum": 0, "maximum": 1 },
+        "response_profile": { "type": "string", "enum": ["soft", "firm_bounce", "springy"] },
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "variantSet": {
+      "type": "object",
+      "required": ["mode", "members"],
+      "additionalProperties": true,
+      "properties": {
+        "mode": { "type": "string", "enum": ["exclusive"] },
+        "default": { "type": "string" },
+        "active": { "type": "string" },
+        "members": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "expressionPreset": {
+      "type": "object",
+      "required": ["variants"],
+      "additionalProperties": true,
+      "properties": {
+        "variants": { "type": "object", "minProperties": 1, "additionalProperties": { "type": "string" } },
+        "metadata": { "type": "object" }
+      }
+    },
+    "transform": {
+      "type": "object",
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "scale_x": { "type": "number" },
+        "scale_y": { "type": "number" },
+        "rotation": { "type": "number" }
+      }
+    },
+    "layerInstance": {
+      "type": "object",
+      "required": ["id", "asset_ref", "slot", "draw_order"],
+      "properties": {
+        "id": { "type": "string" },
+        "asset_ref": { "type": "string" },
+        "slot": { "type": "string" },
+        "draw_order": { "type": "integer" },
+        "visible": { "type": "boolean" },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "transform": { "$ref": "#/$defs/transform" },
+        "transform_link": { "type": ["string", "null"] },
+        "plane": { "type": ["string", "null"], "description": "C1 -- which of asset_ref's declared planes this instance renders (directive #14)" }
       }
     }
   }

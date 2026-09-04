@@ -131,16 +131,33 @@ export const DEFAULT_EVALUATION_PHASES = [
 // these handlers decide which phase consumes each kind.  The legacy `deform`
 // function remains the geometry backend called by the render loop, rather
 // than being the place where a fixed invocation order defines semantics.
+function registerDeformerOperation(deformer, context) {
+  (context.operations || (context.operations = [])).push({
+    id: deformer.id, kind: deformer.kind, phase: deformer.phase,
+    config: deformer.config || {}, parameters: deformer.parameters || [],
+    targets: deformer.targets || {},
+  });
+}
+
 export const PHASE_DEFORMER_HANDLERS = {
+  parallax_turn(deformer, context) { registerDeformerOperation(deformer, context); },
+  shell_turn(deformer, context) { registerDeformerOperation(deformer, context); },
+  weighted_rotation(deformer, context) { registerDeformerOperation(deformer, context); },
+  continuous_field(deformer, context) { registerDeformerOperation(deformer, context); },
+  eye_fold(deformer, context) { registerDeformerOperation(deformer, context); },
   gaze(deformer, context) {
+    registerDeformerOperation(deformer, context);
     if (context.motion && deformer.config) {
       context.motion.gaze = { ...(context.motion.gaze || {}), ...deformer.config };
     }
   },
+  local_soft_field(deformer, context) { registerDeformerOperation(deformer, context); },
   sprite_swap(deformer, context) {
+    registerDeformerOperation(deformer, context);
     (context.visibility || (context.visibility = [])).push(deformer.id);
   },
   visibility_curve(deformer, context) {
+    registerDeformerOperation(deformer, context);
     (context.visibility || (context.visibility = [])).push(deformer.id);
   },
 };
@@ -212,6 +229,7 @@ export const state = {
   eyeOpening: { l: null, r: null },
   phaseTrace: [],
   phaseDispatch: {},
+  frameOperations: null,
   t0: performance.now(),
 };
 
@@ -391,8 +409,14 @@ export function evaluatePhase(phase, now = performance.now(), context = {}) {
 export function evaluateAllPhases(now = performance.now(), context = {}) {
   state.phaseTrace = [];
   state.phaseDispatch = {};
+  context.operations = [];
   const phases = state.manifest?.evaluation?.phases || DEFAULT_EVALUATION_PHASES;
   for (const phase of phases) evaluatePhase(phase, now, context);
+  // A pre-P0-B manifest has no declarative deformer list; retain its legacy
+  // motion backend in that case.  Once deformers exist, this immutable list is
+  // the only source of geometry operations for the frame.
+  state.frameOperations = Array.isArray(state.manifest?.deformers)
+    ? context.operations.slice() : null;
   return state.phaseTrace.slice();
 }
 
@@ -889,6 +913,7 @@ export function build(manifest, images) {
   manifest = { ...manifest, motion: motionFromDeformers(manifest) };
   state.manifest = manifest;
   state.parameters = {};
+  state.frameOperations = null;
   for (const descriptor of (manifest.parameters || [])) {
     if (descriptor && descriptor.id) state.parameters[descriptor.id] = Number(descriptor.default ?? 0);
   }
@@ -1245,6 +1270,26 @@ function gazeDelta(part, motion) {
   return [dx, dy];
 }
 
+function geometryOperations(part) {
+  // Legacy manifests have no operation list.  Their canonical order is kept
+  // as a compatibility adapter; declarative v0.2 manifests use the exact list
+  // assembled by phase dispatch, in that order.
+  const operations = state.frameOperations || [
+    { kind: "eye_fold", phase: "primary" },
+    { kind: "gaze", phase: "primary" },
+    { kind: "parallax_turn", phase: "primary" },
+    { kind: "shell_turn", phase: "primary" },
+    { kind: "weighted_rotation", phase: "primary" },
+    { kind: "continuous_field", phase: "primary" },
+    { kind: "local_soft_field", phase: "secondary" },
+  ];
+  return operations.filter((operation) => {
+    if (!phaseEnabled(operation.phase || "primary")) return false;
+    const side = operation.targets?.side;
+    return operation.kind !== "eye_fold" || !side || side === part.eyeSide;
+  });
+}
+
 export function deform(part, now, motion) {
   const { rest, live } = part.mesh;
   const anchors = state.manifest.anchors || {};
@@ -1252,11 +1297,9 @@ export function deform(part, now, motion) {
   const span = Math.max(state.canvasW, state.canvasH);
   const parallax = span * (TURN_BASE + TURN_SPAN * (1 - part.spec.depth));
   const tilt = pivot ? motion.tiltRad : 0;
-  const primaryEnabled = phaseEnabled("primary");
-  const secondaryEnabled = phaseEnabled("secondary");
+  const operations = geometryOperations(part);
   // How far the *drawn* eye closes. With an expression pack this is held at
-  // the swap point instead of going to 1: past there the art owns the eye, and
-  // squashing a layer that is fading out only adds a second motion under it.
+  // the swap point instead of going to 1: past there the art owns the eye.
   const squash = motion.squash || motion.blink;
   const blink = part.eyeSide === "l" ? squash.l
               : part.eyeSide === "r" ? squash.r
@@ -1265,81 +1308,81 @@ export function deform(part, now, motion) {
   for (let i = 0, v = 0; v < rest.length; i++, v += 2) {
     let x = rest[v], y = rest[v + 1];
     const w = effectiveWeight(part, i, motion.overrides);
+    let pendingDx = 0, pendingDy = 0;
+    const flushDelta = () => {
+      x += pendingDx * w; y += pendingDy * w;
+      pendingDx = 0; pendingDy = 0;
+    };
 
-    // Eyes close toward their own centre line before anything moves them, so
-    // the lid stays put while the head turns.
-    if (primaryEnabled && part.isEye && blink > 0) {
-      const floor = part.isLid ? motion.lidThickness : 0;
-      const lid = part.openTop + motion.lidRatio * (part.openBottom - part.openTop);
-      y = lid + (y - lid) * (1 - blink * (1 - floor));
-    }
-
-    // Gaze is deliberately restricted to iris/coarse-eye targets.  The eye
-    // white and lash never inherit this offset, so head turn and blink remain
-    // responsible for their own motion.
-    const gaze = gazeDelta(part, motion);
-    if (primaryEnabled && (gaze[0] !== 0 || gaze[1] !== 0)) {
-      x += gaze[0];
-      y += gaze[1];
-    }
-
-    // Depth-differential parallax: near parts travel further than far ones.
-    let dx = primaryEnabled ? motion.turnX * parallax : 0;
-    let dy = primaryEnabled ? motion.turnY * parallax * TURN_Y_SCALE : 0;
-    // ... blended toward the shell rotation (H6). The head-follow weight scales
-    // the blended result, not just the parallax, so the neck's gradient still
-    // governs both paths and the two seams stay continuous either way.
-    if (primaryEnabled && motion.shell > 0 && part.shell) {
-      const d = shellDelta(part.shell, x, y, motion.yaw, motion.pitch);
-      dx += motion.shell * (d[0] - dx);
-      dy += motion.shell * (d[1] - dy);
-    }
-    x += dx * w;
-    y += dy * w;
-
-    // Tilt about the neck pivot, scaled by the same weight, which is what
-    // keeps the bottom of the neck attached to the torso.
-    if (primaryEnabled && tilt !== 0 && w !== 0) {
-      const a = tilt * w, cos = Math.cos(a), sin = Math.sin(a);
-      const dx = x - pivot[0], dy = y - pivot[1];
-      x = pivot[0] + dx * cos - dy * sin;
-      y = pivot[1] + dx * sin + dy * cos;
-    }
-
-    // Breathing is one continuous displacement field over y, not a per-group
-    // formula. Giving the head a translation and the torso a scale meant the
-    // two disagreed at the collar and the neck visibly stretched: everything
-    // above the chest has to rise by the *same* amount the chest top rises.
-    if (primaryEnabled && motion.breath !== 0) {
-      const ramp = breathRamp(y);
-      if (ramp > 0) {
-        y -= motion.breath * motion.breathAmp * ramp;
-        if (part.spec.group === "body" && motion.chestX !== 0) {
-          // A ribcage widens as well as rises; without it the torso reads as
-          // bobbing rather than breathing.
-          x = state.chestCx + (x - state.chestCx) * (1 + motion.breath * motion.chestX * ramp);
+    for (const operation of operations) {
+      switch (operation.kind) {
+        case "eye_fold": {
+          if (part.isEye && blink > 0) {
+            const floor = part.isLid ? motion.lidThickness : 0;
+            const lid = part.openTop + motion.lidRatio * (part.openBottom - part.openTop);
+            y = lid + (y - lid) * (1 - blink * (1 - floor));
+          }
+          break;
         }
+        case "gaze": {
+          const gaze = gazeDelta(part, motion);
+          if (gaze[0] !== 0 || gaze[1] !== 0) { x += gaze[0]; y += gaze[1]; }
+          break;
+        }
+        case "parallax_turn":
+          pendingDx = motion.turnX * parallax;
+          pendingDy = motion.turnY * parallax * TURN_Y_SCALE;
+          break;
+        case "shell_turn":
+          if (motion.shell > 0 && part.shell) {
+            const d = shellDelta(part.shell, x, y, motion.yaw, motion.pitch);
+            pendingDx += motion.shell * (d[0] - pendingDx);
+            pendingDy += motion.shell * (d[1] - pendingDy);
+          }
+          flushDelta();
+          break;
+        case "weighted_rotation":
+          flushDelta();
+          if (tilt !== 0 && w !== 0) {
+            const a = tilt * w, cos = Math.cos(a), sin = Math.sin(a);
+            const dx = x - pivot[0], dy = y - pivot[1];
+            x = pivot[0] + dx * cos - dy * sin;
+            y = pivot[1] + dx * sin + dy * cos;
+          }
+          break;
+        case "continuous_field": {
+          flushDelta();
+          if (motion.breath !== 0) {
+            const ramp = breathRamp(y);
+            if (ramp > 0) {
+              y -= motion.breath * motion.breathAmp * ramp;
+              if (part.spec.group === "body" && motion.chestX !== 0) {
+                x = state.chestCx + (x - state.chestCx) * (1 + motion.breath * motion.chestX * ramp);
+              }
+            }
+          }
+          break;
+        }
+        case "local_soft_field": {
+          flushDelta();
+          if (part.softMorph && motion.softMorph.enabled) {
+            const sm = motion.softMorph;
+            const amount = sm.strength * sm.morph;
+            if (amount !== 0) {
+              const wl = part.softMorph.left[i], wr = part.softMorph.right[i];
+              if (wl > 0 || wr > 0) {
+                x += sm.horizontalPx * amount * (wr - wl);
+                y += sm.verticalPx * amount * Math.max(wl, wr) * part.softMorph.lowerBias[i];
+              }
+            }
+          }
+          break;
+        }
+        default:
+          break;
       }
     }
-
-    // Chest soft morph: a small local volume response layered on top of the
-    // global breathing field above, confined to `topwear` alone. `wl`/`wr`
-    // already carry the neckline/center locks baked in, so this is a plain
-    // additive push -- outward for whichever lobe a vertex belongs to, and a
-    // little downward bias so the effect reads as cloth settling rather than
-    // sliding sideways in a straight line.
-    if (secondaryEnabled && part.softMorph && motion.softMorph.enabled) {
-      const sm = motion.softMorph;
-      const amount = sm.strength * sm.morph;
-      if (amount !== 0) {
-        const wl = part.softMorph.left[i], wr = part.softMorph.right[i];
-        if (wl > 0 || wr > 0) {
-          x += sm.horizontalPx * amount * (wr - wl);
-          y += sm.verticalPx * amount * Math.max(wl, wr) * part.softMorph.lowerBias[i];
-        }
-      }
-    }
-
+    flushDelta();
     live[v] = x; live[v + 1] = y;
   }
 }

@@ -42,6 +42,7 @@ positioning contract instead.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from dataclasses import dataclass
 from functools import lru_cache
@@ -52,7 +53,8 @@ import numpy as np
 from PIL import Image
 
 __all__ = ["ASSEMBLY_FORMAT", "ASSEMBLY_VERSION", "ASSEMBLY_SCHEMA_VENDOR",
-           "ASSEMBLY_SCHEMA_COMMIT", "ASSEMBLY_SCHEMA_ID", "ASSEMBLY_SCHEMA_PIN",
+           "ASSEMBLY_SCHEMA_COMMIT", "ASSEMBLY_SCHEMA_ID", "ASSEMBLY_SCHEMA_SHA256",
+           "ASSEMBLY_SCHEMA_PIN",
            "ASSEMBLY_SCHEMA_PATH", "AssemblyAsset", "validate_assembly_manifest",
            "load_assembly_bundle"]
 
@@ -68,6 +70,10 @@ ASSEMBLY_VERSION = "0.2"
 ASSEMBLY_SCHEMA_VENDOR = "portrait-composer"
 ASSEMBLY_SCHEMA_COMMIT = "682f25e"
 ASSEMBLY_SCHEMA_ID = "portrait-assembly-v0.2"
+# Hash of Composer's schema at the pinned commit.  The schema file itself is
+# copied byte-for-byte; provenance lives here so the upstream JSON remains a
+# true vendor copy and is never modified with AutoRig-specific fields.
+ASSEMBLY_SCHEMA_SHA256 = "70d2efe40f73548cd1b3369992c8bc257aaa270b3a78fAD5e2e6fd8cd6eca378".lower()
 ASSEMBLY_SCHEMA_PIN = f"{ASSEMBLY_SCHEMA_VENDOR}@{ASSEMBLY_SCHEMA_COMMIT}:{ASSEMBLY_SCHEMA_ID}"
 ASSEMBLY_SCHEMA_PATH = Path(__file__).with_name("schemas") / "portrait-assembly-v0.2.schema.json"
 
@@ -111,11 +117,15 @@ def _schema_errors(manifest: Any) -> list[str]:
     errors: list[str] = []
     if not isinstance(manifest, dict):
         return ["manifest must be a JSON object"]
+    allowed = {"format", "version", "sources", "assets", "instances", "hierarchy",
+               "variant_sets", "expressions", "links", "rig_intent", "composition",
+               "provenance"}
+    errors.extend(f"unknown top-level field {key!r}" for key in manifest if key not in allowed)
     if manifest.get("format") != ASSEMBLY_FORMAT:
         errors.append(f"format must be {ASSEMBLY_FORMAT!r}")
     if str(manifest.get("version", "")) != ASSEMBLY_VERSION:
         errors.append(f"version must be {ASSEMBLY_VERSION!r}")
-    for key in ("assets", "instances", "composition"):
+    for key in ("sources", "assets", "instances", "composition", "provenance"):
         if not isinstance(manifest.get(key), dict):
             errors.append(f"{key} must be an object")
     composition = manifest.get("composition")
@@ -133,6 +143,15 @@ def _schema_errors(manifest: Any) -> list[str]:
                     errors.append(f"composition.canvas.{key} must be positive")
     assets = manifest.get("assets")
     instances = manifest.get("instances")
+    sources = manifest.get("sources")
+    provenance = manifest.get("provenance")
+    if isinstance(sources, dict):
+        for source_id, source in sources.items():
+            if not isinstance(source, dict) or not isinstance(source.get("source_id"), str):
+                errors.append(f"source {source_id!r} must have string source_id")
+    # Provenance is preserved opaquely for forward compatibility.  The full
+    # nested shape is exercised by the optional jsonschema test; the runtime
+    # seam only needs to guarantee that the top-level field is an object.
     if isinstance(assets, dict):
         for asset_id, asset in assets.items():
             if not isinstance(asset, dict):
@@ -144,6 +163,10 @@ def _schema_errors(manifest: Any) -> list[str]:
             if not isinstance(inst, dict):
                 errors.append(f"instance {instance_id!r} must be an object")
                 continue
+            if not isinstance(inst.get("id"), str) or not isinstance(inst.get("slot"), str):
+                errors.append(f"instance {instance_id!r} must have string id and slot")
+            if not isinstance(inst.get("draw_order"), int) or isinstance(inst.get("draw_order"), bool):
+                errors.append(f"instance {instance_id!r} must have integer draw_order")
             asset_ref = inst.get("asset_ref")
             if not isinstance(asset_ref, str) or not asset_ref:
                 errors.append(f"instance {instance_id!r} must have asset_ref")
@@ -162,16 +185,6 @@ def _schema_errors(manifest: Any) -> list[str]:
                     errors.append(f"instance {instance_id!r} must have asset_ref")
                 elif not isinstance(assets.get(asset_ref), dict):
                     errors.append(f"instance {instance_id!r} references unknown asset {asset_ref!r}")
-    # Composer may optionally echo this pin in the manifest.  If present it
-    # is an assertion, never a field AutoRig has to invent for old bundles.
-    schema_ref = manifest.get("schema") or manifest.get("schema_ref")
-    if isinstance(schema_ref, dict):
-        vendor = schema_ref.get("vendor")
-        commit = schema_ref.get("commit") or schema_ref.get("upstream_commit")
-        if vendor is not None and vendor != ASSEMBLY_SCHEMA_VENDOR:
-            errors.append(f"schema vendor must be {ASSEMBLY_SCHEMA_VENDOR!r}")
-        if commit is not None and commit != ASSEMBLY_SCHEMA_COMMIT:
-            errors.append(f"schema upstream commit must be {ASSEMBLY_SCHEMA_COMMIT!r}")
     return errors
 
 
@@ -179,14 +192,13 @@ def _schema_errors(manifest: Any) -> list[str]:
 def _vendored_schema_metadata() -> dict[str, Any]:
     """Load and pin the checked-in schema descriptor before accepting input."""
     try:
-        schema = _read_json(ASSEMBLY_SCHEMA_PATH)
+        raw = ASSEMBLY_SCHEMA_PATH.read_bytes()
+        schema = json.loads(raw.decode("utf-8"))
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"vendored Assembly schema is unavailable: {ASSEMBLY_SCHEMA_PATH}") from exc
-    upstream = schema.get("x-upstream") or {}
-    if (upstream.get("vendor") != ASSEMBLY_SCHEMA_VENDOR
-            or upstream.get("commit") != ASSEMBLY_SCHEMA_COMMIT
-            or upstream.get("schema_id") != ASSEMBLY_SCHEMA_ID):
-        raise RuntimeError("vendored Assembly schema metadata does not match the pinned Composer commit")
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != ASSEMBLY_SCHEMA_SHA256 or schema.get("$id") != "https://portrait-composer/schemas/portrait-assembly-v0.2.schema.json":
+        raise RuntimeError("vendored Assembly schema does not match the pinned Composer commit")
     return schema
 
 
