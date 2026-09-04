@@ -187,25 +187,41 @@ attribute vec2 a_pos;
 attribute vec2 a_uv;
 uniform vec2 u_canvas;
 varying vec2 v_uv;
+varying vec2 v_pos;
 void main() {
   vec2 clip = vec2(a_pos.x / u_canvas.x * 2.0 - 1.0,
                    1.0 - a_pos.y / u_canvas.y * 2.0);
   gl_Position = vec4(clip, 0.0, 1.0);
   v_uv = a_uv;
+  v_pos = a_pos;
 }`;
 
 export const FRAG_SRC = `
 precision mediump float;
 uniform sampler2D u_tex;
+uniform sampler2D u_mask;
+uniform vec4 u_mask_box;
+uniform float u_mask_enabled;
 uniform float u_wire;
 uniform float u_alpha;
 varying vec2 v_uv;
+varying vec2 v_pos;
 void main() {
   // Premultiplied output throughout: the wire overlay's RGB is pre-scaled by
   // its own alpha, and a part fade scales every channel by u_alpha equally
   // (not just alpha) so the blend stays correctly premultiplied at any fade.
   if (u_wire > 0.5) { gl_FragColor = vec4(0.215, 0.33, 0.5, 0.5); return; }
-  gl_FragColor = texture2D(u_tex, v_uv) * u_alpha;
+  vec4 color = texture2D(u_tex, v_uv) * u_alpha;
+  if (u_mask_enabled > 0.5) {
+    vec2 maskSize = u_mask_box.zw - u_mask_box.xy;
+    vec2 maskUv = (v_pos - u_mask_box.xy) / max(maskSize, vec2(1.0));
+    if (maskUv.x < 0.0 || maskUv.x > 1.0 || maskUv.y < 0.0 || maskUv.y > 1.0) {
+      color = vec4(0.0);
+    } else {
+      color *= texture2D(u_mask, maskUv).a;
+    }
+  }
+  gl_FragColor = color;
 }`;
 
 export const state = {
@@ -390,6 +406,16 @@ export function evaluateConstraints(phase, context = {}) {
   context.executedConstraints = (context.executedConstraints || []).concat(entries.map((d) => d.id));
   state.phaseDispatch[phase] = (state.phaseDispatch[phase] || []).concat(
     entries.map((d) => ({ id: d.id, kind: d.kind || "constraint" })));
+  // Constraints are deliberately kept out of the geometry deformer list:
+  // they run in their declared phase and expose a separate, ordered backend
+  // input.  A renderer may consume these records as a stencil (clip_mask) or
+  // vertex relation (boundary_stitch) without making deform()'s operation
+  // order carry constraint semantics.
+  context.constraintOperations = (context.constraintOperations || []).concat(
+    entries.map((d) => ({ id: d.id, kind: d.kind || "constraint", phase,
+      source: d.source, targets: d.targets, groups: d.groups,
+      config: d.config || {},
+    })));
   return entries;
 }
 
@@ -842,6 +868,9 @@ export function initGL(canvas) {
       uv: gl.getAttribLocation(prog, "a_uv"),
       canvas: gl.getUniformLocation(prog, "u_canvas"),
       tex: gl.getUniformLocation(prog, "u_tex"),
+      mask: gl.getUniformLocation(prog, "u_mask"),
+      maskBox: gl.getUniformLocation(prog, "u_mask_box"),
+      maskEnabled: gl.getUniformLocation(prog, "u_mask_enabled"),
       wire: gl.getUniformLocation(prog, "u_wire"),
       alpha: gl.getUniformLocation(prog, "u_alpha"),
     },
@@ -1008,6 +1037,19 @@ export function build(manifest, images) {
   state.variantSets = manifest.variant_sets || {};
   state.variantSelections = {};
   state.variantFades = {};
+  state.clipMasks = [];
+  for (const constraint of (manifest.constraints || [])) {
+    if (constraint.kind !== "clip_mask") continue;
+    state.clipMasks.push({ source: constraint.source,
+      targets: Array.isArray(constraint.targets) ? constraint.targets.slice() : [] });
+  }
+  for (const part of state.parts) {
+    const relation = state.clipMasks.find((mask) =>
+      mask.targets.includes(part.spec.name) || mask.targets.includes(part.spec.tag));
+    if (!relation) continue;
+    part.clipMaskSource = state.parts.find((candidate) =>
+      candidate.spec.name === relation.source || candidate.spec.tag === relation.source) || null;
+  }
   for (const [setId, spec] of Object.entries(state.variantSets)) {
     state.variantSelections[setId] = spec.default;
     // The manifest marks the default member visible; enforce it here too so
@@ -1221,6 +1263,16 @@ export function opacityOf(part, motion) {
     alpha *= motion.swap[key] ? motion.swap[key].art : 0;
   } else if (motion.swap && part.replacedBy) {
     alpha *= motion.swap[part.replacedBy].base;
+  }
+  // A clip relation cannot invent a missing source.  If a declared source
+  // part is unavailable or fully hidden, conservatively hide its targets;
+  // when the source exists, pixel-level stencil ownership remains with the
+  // renderer and the target keeps its authored opacity.
+  for (const mask of (state.clipMasks || [])) {
+    if (!mask.targets.includes(part.spec?.name) && !mask.targets.includes(part.spec?.tag)) continue;
+    const source = state.parts.find((candidate) =>
+      candidate.spec?.name === mask.source || candidate.spec?.tag === mask.source);
+    if (!source || source.visible === false) { alpha = 0; break; }
   }
   if (!Number.isFinite(alpha)) alpha = 0;
   return Math.max(0, Math.min(1, alpha * visibilityCurveAlpha(part, motion)));
@@ -1502,6 +1554,16 @@ export function frame(now) {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, p.tex);
     gl.uniform1i(loc.tex, 0);
+    if (p.clipMaskSource) {
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, p.clipMaskSource.tex);
+      gl.uniform1i(loc.mask, 1);
+      const box = p.clipMaskSource.spec.xyxy;
+      gl.uniform4f(loc.maskBox, box[0], box[1], box[2], box[3]);
+      gl.uniform1f(loc.maskEnabled, 1);
+    } else {
+      gl.uniform1f(loc.maskEnabled, 0);
+    }
 
     gl.uniform1f(loc.wire, 0);
     gl.uniform1f(loc.alpha, opacity);

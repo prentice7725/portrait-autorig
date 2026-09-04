@@ -68,6 +68,11 @@ python -m portrait_autorig path\to\legacy-run path\to\A001.rig --legacy
 python -m portrait_autorig.spine path\to\A001.rig path\to\spine-project
 ```
 
+현재 CLI는 Portrait Bundle과 legacy run을 대상으로 합니다. Composer Assembly Bundle은
+동일한 compiler API의 `compile_assembly_bundle()`/`compile_assembly_asset()`로 컴파일합니다.
+Assembly 입력은 Composer가 기록한 `composition.draw_order`, `reference.png`, VariantSet,
+RigIntent를 그대로 사용합니다.
+
 Portrait Bundle 입력은 반드시 `canonical_stage=production_repaired`를 선언해야
 합니다. 일반 compiler는 입력을 다시 repair하지 않습니다. `--legacy` adapter는
 이전 run을 위해서만 고정된 호환성 repair를 수행합니다.
@@ -107,7 +112,8 @@ Assembly 입력 계약은 Composer `portrait-assembly-v0.2` 스키마를
 upstream commit `682f25e`에 고정해 vendoring합니다
 ([vendored schema](portrait_autorig/schemas/portrait-assembly-v0.2.schema.json)).
 Assembly load 시 format/version, canvas, draw order, instance→asset 참조를
-검증하며, manifest가 선택적으로 적은 schema vendor/commit이 다르면 즉시 거부합니다.
+검증합니다. 원본 schema는 수정하지 않고 그대로 보관하며, compiler 출력의
+`source.assembly_schema`에 vendor, upstream commit, schema id와 pin을 기록합니다.
 
 P0-H에서 `ParamEyeBallX/Y`는 독립 `iridesl`/`iridesr`를 우선 움직이는 보수적인
 `gaze` deformer로 컴파일됩니다. 독립 iris가 없고 coarse eye layer만 있으면
@@ -118,6 +124,30 @@ Runtime은 manifest의 `evaluation.phases` 순서대로 driver/deformer/constrai
 
 브라우저에서 [`preview/index.html`](preview/index.html)을 열고 Rig Bundle directory를
 선택하면 head turn, tilt, breath, blink, gaze를 테스트할 수 있습니다.
+
+P1 mesh 경로는 `contour_tags`로 선택할 수 있으며 disconnected alpha의
+`island_policy`를 `separate`(기본), `connect_nearest`, `largest_only`, `reject` 중에서
+지정합니다. 기본 `separate`는 component별로 triangulate하여 섬 사이에 임의의
+삼각형 bridge를 만들지 않습니다. `build_rig`/compiler의 `island_policy` 인자로
+같은 정책을 전달할 수 있습니다.
+
+Contour hair part에는 선택적으로 `strand_topology`가 붙습니다. 이 기록은
+connected mesh component, prominent bottom tip, 그리고 합이 1이 되도록 정규화한
+overlapping curtain-column weight를 포함하며 P2 물리 계산은 수행하지 않습니다.
+`portrait_autorig.constraints`의 `clip_mask_spec`와 `boundary_stitch_spec`은
+각각 source→targets mask와 2개 이상 참여자를 갖는 N-way stitch를 검증해
+`constraints` manifest contract로 내보냅니다.
+
+현재 P1 상태는 다음과 같습니다.
+
+- 완료: contour-aware mesh(P1-A), mesh quality QA(P1-B), island policy(P1-C),
+  motion-aware density(P1-D), strand topology, clip-mask contract, N-way
+  boundary-stitch contract, strand partition QA, constraints-phase dispatch 및
+  GPU pixel-level clip/stencil backend
+- 다음: deterministic physics와 spring/damping 계열(P2)
+
+테스트 의존성에는 원본 Composer schema를 직접 검증하기 위한 `jsonschema`가 포함되어
+있으며, 일반 runtime은 외부 Composer 또는 `seethrough_engine`를 import하지 않습니다.
 
 원본 feasibility study와 측정된 motion limit은
 [`docs/PORTRAIT_AUTO_RIG_FEASIBILITY_v0.1.md`](docs/PORTRAIT_AUTO_RIG_FEASIBILITY_v0.1.md)에

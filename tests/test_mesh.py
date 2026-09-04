@@ -13,6 +13,7 @@ import numpy as np
 from portrait_autorig.mesh import (
     CONTOUR, GRID, MESH_CELL_FINE_PX, MESH_CELL_PX, MESH_REFERENCE_SIZE,
     contour_mesh, contour_mesh_spec, mesh_cell, mesh_spec,
+    motion_aware_mesh_spec,
 )
 
 
@@ -44,6 +45,29 @@ class MeshCellTests(unittest.TestCase):
         self.assertGreater(wide, square)
 
 
+class MotionAwareDensityTests(unittest.TestCase):
+    def test_eye_features_use_fine_density(self):
+        spec = motion_aware_mesh_spec((768, 768), tag="iridesl", group="head",
+                                      deformation_kinds=("gaze",))
+        self.assertEqual(spec["density"], "fine")
+        self.assertEqual(spec["cell"], MESH_CELL_FINE_PX)
+
+    def test_head_turn_surface_uses_medium_density(self):
+        spec = motion_aware_mesh_spec((768, 768), tag="face", group="head",
+                                      deformation_kinds=("parallax_turn",))
+        self.assertEqual(spec["density"], "medium")
+
+    def test_static_body_surface_stays_coarse(self):
+        spec = motion_aware_mesh_spec((768, 768), tag="body", group="body")
+        self.assertEqual(spec["density"], "coarse")
+        self.assertEqual(spec["cell"], MESH_CELL_PX)
+
+    def test_local_soft_field_promotes_target_to_fine(self):
+        spec = motion_aware_mesh_spec((768, 768), tag="topwear", group="body",
+                                      deformation_kinds=("local_soft_field",))
+        self.assertEqual(spec["density"], "fine")
+
+
 class MeshSpecTests(unittest.TestCase):
     def test_spec_carries_kind_and_cell(self):
         spec = mesh_spec((768, 768), fine=False)
@@ -71,14 +95,49 @@ class ContourMeshTests(unittest.TestCase):
         empty = np.zeros((200, 200), np.uint8)
         self.assertIsNone(contour_mesh(empty, (0, 0, 200, 200)))
 
-    def test_returns_none_for_two_disconnected_islands(self):
-        # Island-aware contour meshing is a separate P1 concern
-        # (island_policy); a multi-island part falls back to the grid
-        # backend rather than silently triangulating only its largest piece.
+    def test_separate_policy_keeps_two_disconnected_islands_without_bridges(self):
         two = np.zeros((200, 200), np.uint8)
         two[20:40, 20:40] = 255
         two[150:170, 150:170] = 255
-        self.assertIsNone(contour_mesh(two, (0, 0, 200, 200)))
+        result = contour_mesh(two, (0, 0, 200, 200), island_policy="separate")
+        self.assertIsNotNone(result)
+        self.assertGreaterEqual(len(result["triangles"]), 2)
+        for triangle in result["triangles"]:
+            xs = [result["vertices"][i][0] for i in triangle]
+            ys = [result["vertices"][i][1] for i in triangle]
+            self.assertTrue(max(xs) < 60 or min(xs) > 130)
+            self.assertTrue(max(ys) < 60 or min(ys) > 130)
+
+    def test_reject_policy_returns_none_for_two_disconnected_islands(self):
+        two = np.zeros((200, 200), np.uint8)
+        two[20:40, 20:40] = 255
+        two[150:170, 150:170] = 255
+        self.assertIsNone(contour_mesh(two, (0, 0, 200, 200), island_policy="reject"))
+
+    def test_largest_only_policy_discards_smaller_island(self):
+        two = np.zeros((200, 200), np.uint8)
+        two[10:35, 10:35] = 255
+        two[120:180, 120:180] = 255
+        result = contour_mesh(two, (0, 0, 200, 200), island_policy="largest_only",
+                              edge_points=32, interior_spacing=15, edge_padding=4)
+        self.assertIsNotNone(result)
+        self.assertTrue(all(v[0] > 100 and v[1] > 100 for v in result["vertices"]))
+
+    def test_connect_nearest_policy_explicitly_bridges_large_islands(self):
+        two = np.zeros((200, 200), np.uint8)
+        two[10:70, 10:70] = 255
+        two[120:190, 120:190] = 255
+        result = contour_mesh(two, (0, 0, 200, 200), island_policy="connect_nearest",
+                              edge_points=32, interior_spacing=15, edge_padding=4)
+        self.assertIsNotNone(result)
+        xs = [vertex[0] for vertex in result["vertices"]]
+        self.assertLess(min(xs), 70)
+        self.assertGreater(max(xs), 120)
+        self.assertTrue(any(70 < x < 120 for x in xs))
+
+    def test_unknown_island_policy_is_rejected(self):
+        with self.assertRaises(ValueError):
+            contour_mesh(_disk_alpha(), (0, 0, 200, 200), island_policy="guess")
 
     def test_raises_when_alpha_shape_disagrees_with_xyxy(self):
         alpha = _disk_alpha()
@@ -149,6 +208,7 @@ class ContourMeshSpecTests(unittest.TestCase):
         self.assertEqual(spec["edge_points"], 72)
         self.assertEqual(spec["interior_spacing"], 30)
         self.assertEqual(spec["edge_padding"], 8)
+        self.assertEqual(spec["island_policy"], "separate")
 
     def test_spec_is_none_when_contour_mesh_is_none(self):
         empty = np.zeros((200, 200), np.uint8)

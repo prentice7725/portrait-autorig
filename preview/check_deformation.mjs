@@ -601,12 +601,14 @@ console.log("\ngaze and visibility curves (P0-H)");
 console.log("\ncentral phase evaluator (P0-H)");
 {
   const savedManifest = state.manifest;
+  const savedParts = state.parts, savedClipMasks = state.clipMasks;
   state.manifest = {
     evaluation: { phases: ["base", "primary", "corrective", "secondary", "constraints", "visibility", "render"] },
     drivers: [{ id: "driver_secondary", phase: "secondary" }],
     deformers: [{ id: "deformer_primary", kind: "gaze", phase: "primary" },
                 { id: "deformer_visibility", kind: "visibility_curve", phase: "visibility" }],
-    constraints: [{ id: "constraint_one", phase: "constraints" }],
+    constraints: [{ id: "constraint_one", kind: "boundary_stitch", phase: "constraints",
+                    groups: [{ id: "seam", members: [] }] }],
   };
   const dispatchContext = { motion: {} };
   const trace = evaluateAllPhases(0, dispatchContext);
@@ -621,9 +623,23 @@ console.log("\ncentral phase evaluator (P0-H)");
   check("constraint is dispatched in constraints",
         dispatchContext.executedConstraints?.[0] === "constraint_one"
         && state.phaseDispatch.constraints?.[0]?.id === "constraint_one");
+  check("constraint backend receives an ordered operation",
+        dispatchContext.constraintOperations?.[0]?.kind === "boundary_stitch"
+        && dispatchContext.constraintOperations?.[0]?.phase === "constraints");
   check("phase handlers run before the geometry backend",
         Array.isArray(dispatchContext.executedDeformers)
         && dispatchContext.executedDeformers.join(",") === "deformer_primary,deformer_visibility");
+  state.parts = [
+    { spec: { name: "eyewhite_l", tag: "eyewhitel" }, visible: true },
+    { spec: { name: "iris_l", tag: "iridesl" }, visible: true },
+  ];
+  state.clipMasks = [{ source: "eyewhite_l", targets: ["iris_l"] }];
+  check("clip mask preserves a target while its source is available",
+        opacityOf(state.parts[1], {}) === 1);
+  state.parts[0].visible = false;
+  check("clip mask conservatively gates a target with hidden source",
+        opacityOf(state.parts[1], {}) === 0);
+  state.parts = savedParts; state.clipMasks = savedClipMasks;
   state.manifest = savedManifest;
 }
 
