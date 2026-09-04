@@ -46,6 +46,7 @@ const Runtime = await import(runtimeUrl);
 
 const { weightAt, buildMesh, deform, state, scheduleBlink, startBlink, blinkAmount, breathRamp,
         fitShells, shellDelta, SHELL_MAX_YAW, SHELL_MAX_PITCH,
+        buildSoftMorphWeights,
         expressionSwap, opacityOf, SWAP_HI, motionFromDeformers } = Runtime;
 const { applyVariantSet, applyExpressionPreset, evaluateVisibilityPhase } = Runtime;
 const { evaluateAllPhases } = Runtime;
@@ -110,7 +111,8 @@ console.log("\ncontour mesh (P1-A, absorption plan #8)");
 state.canvasW = 1000; state.canvasH = 1000;
 state.manifest = {
   canvas: { width: 1000, height: 1000 },
-  anchors: { neck_pivot: [500, 700], body_pivot: [500, 950], eye_left: [460, 300] },
+  anchors: { neck_pivot: [500, 700], body_pivot: [500, 950],
+             eye_left: [460, 300], eye_right: [540, 300] },
   motion: { breathing: { period_s: 4, amplitude_px: 3 }, head_tilt: { max_deg: 2 },
             blink: { close_s: 0.08, hold_s: 0.34, open_s: 0.16, interval_s: [1.6, 5.4] } },
 };
@@ -264,6 +266,34 @@ check("a half-blink is between open and closed",
         return h > 6 && h < 16;
       })());
 
+// Composer Assembly variants can keep both eyes in one unsuffixed member.
+// The runtime must use each alpha component's opening, not that member's
+// full-canvas bbox, and a wink must affect only the requested half.
+const unsplitEye = part({ tag: "eyewhite", group: "head", depth: 0.35,
+                          xyxy: [420, 260, 580, 340], mesh: { cell: 20 },
+                          weight: { mode: "constant", value: 1 } },
+                        { isEye: true, eyeSide: null,
+                          eyeOpenings: { l: [440, 280, 500, 320],
+                                         r: [500, 280, 560, 320] },
+                          openTop: 260, openBottom: 340 });
+deform(unsplitEye, 0, { ...still, blink: { l: 1, r: 0 } });
+const midpoint = 500;
+let leftRange = [Infinity, -Infinity], rightShift = 0;
+for (let v = 0; v < unsplitEye.mesh.rest.length; v += 2) {
+  if (unsplitEye.mesh.rest[v] < midpoint) {
+    leftRange[0] = Math.min(leftRange[0], unsplitEye.mesh.live[v + 1]);
+    leftRange[1] = Math.max(leftRange[1], unsplitEye.mesh.live[v + 1]);
+  } else {
+    rightShift = Math.max(rightShift,
+      Math.abs(unsplitEye.mesh.live[v + 1] - unsplitEye.mesh.rest[v + 1]));
+  }
+}
+check("unsplit eye uses per-side opening bounds", leftRange[0] >= 314 - 1e-6
+      && leftRange[1] <= 314 + 1e-6,
+      `left=${leftRange}`);
+check("unsplit wink leaves the other half open", near(rightShift, 0),
+      `rightShift=${rightShift}`);
+
 console.log("\nblink envelope");
 state.blinkPhase = null;
 startBlink(0, ["l", "r"]);
@@ -272,6 +302,28 @@ check("starts open", near(at(0), 0));
 check("fully closed after the close phase", near(at(80), 1));
 check("still closed through the hold", near(at(400), 1));
 check("open again after the whole envelope", at(581) === 0);
+
+console.log("\nComposer authored chest coordinates");
+{
+  const authored = {
+    coordinate_space: "canvas_normalized", center_lock: 0.1,
+    neckline_lock: 0.16,
+    left: { center: [0.3756, 0.7319], radius: [0.0936, 0.1219] },
+    right: { center: [0.6116, 0.7319], radius: [0.0924, 0.1142] },
+  };
+  const topwear = { xyxy: [162, 345, 604, 768],
+                    mesh: { cell: 32 },
+                    weight: { mode: "constant", value: 1 } };
+  const mesh = buildMesh(topwear);
+  const weights = buildSoftMorphWeights(topwear, mesh, authored, []);
+  let best = -1, bestWeight = -1;
+  for (let i = 0; i < weights.left.length; i++) {
+    if (weights.left[i] > bestWeight) { bestWeight = weights.left[i]; best = i; }
+  }
+  const cx = mesh.rest[best * 2], cy = mesh.rest[best * 2 + 1];
+  check("authored lobe is evaluated in canvas space", cx > 250 && cy > 680,
+        `peak=(${cx},${cy})`);
+}
 
 console.log("\nbreathing (one continuous field)");
 const breathe = { ...still, breath: 1 };

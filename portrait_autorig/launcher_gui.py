@@ -53,7 +53,11 @@ class PortraitAutorigLauncher:
 
 def main() -> None:
     root = tk.Tk()
-    PortraitAutorigLauncher(root)
+    # The normal entry point opens the build screen directly. Composer owns
+    # expression/VariantSet authoring, so the old donor-selection splash is no
+    # longer part of the default AutoRig workflow. Keep PortraitAutorigLauncher
+    # available for callers that still want the optional legacy donor tool.
+    PortraitAutorigApp(root)
     # A window opened from a launched-but-not-focused process (a double
     # click on the .pyw, a shell association) otherwise draws behind
     # whatever already has focus -- indistinguishable from not having

@@ -6,17 +6,58 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import urllib.parse
+import webbrowser
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .workflow import (
     BuildResult,
+    bundle_kind,
     compile_batch,
-    compile_portrait,
+    compile_bundle_input,
     default_batch_output_path,
     default_output_path,
     discover_portrait_bundles,
 )
+
+
+class _PreviewRequestHandler(SimpleHTTPRequestHandler):
+    """Serve the checked-in preview and one generated Rig Bundle locally."""
+
+    def __init__(self, *args, preview_root: Path, run_root: Path, **kwargs):
+        self.preview_root = preview_root.resolve()
+        self.run_root = run_root.resolve()
+        super().__init__(*args, directory=str(self.preview_root), **kwargs)
+
+    def translate_path(self, path: str) -> str:
+        route = urllib.parse.urlsplit(path).path.lstrip("/")
+        if route.startswith("preview/"):
+            root, relative = self.preview_root, route[len("preview/"):]
+        elif route.startswith("run/"):
+            root, relative = self.run_root, route[len("run/"):]
+        else:
+            return str(self.preview_root / "__missing__")
+        candidate = (root / Path(*urllib.parse.unquote(relative).split("/"))).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            return str(root / "__missing__")
+        return str(candidate)
+
+    def log_message(self, _format: str, *_args) -> None:
+        return
+
+
+def _start_preview_server(run_root: Path) -> tuple[ThreadingHTTPServer, str]:
+    preview_root = Path(__file__).resolve().parent.parent / "preview"
+    handler = lambda *args, **kwargs: _PreviewRequestHandler(
+        *args, preview_root=preview_root, run_root=run_root, **kwargs
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}/preview/index.html"
 
 
 class PortraitAutorigApp:
@@ -38,6 +79,7 @@ class PortraitAutorigApp:
         self._events: queue.Queue[tuple[str, object]] = queue.Queue()
         self._busy = False
         self._last_output: Path | None = None
+        self._preview_server: ThreadingHTTPServer | None = None
 
         self._build_ui()
         self.root.after(100, self._drain_events)
@@ -51,7 +93,7 @@ class PortraitAutorigApp:
         ttk.Label(header, text="Portrait AutoRig", font=("Segoe UI", 18, "bold")).pack(side="left")
         ttk.Label(
             header,
-            text="Semantic Portrait Bundle → Rig Bundle",
+            text="Semantic Bundle → Rig Bundle",
             foreground="#666666",
         ).pack(side="left", padx=(14, 0), pady=(6, 0))
 
@@ -104,8 +146,10 @@ class PortraitAutorigApp:
         actions.pack(fill="x", pady=(2, 12))
         self.build_button = ttk.Button(actions, text="BUILD", command=self._start_build)
         self.build_button.pack(side="left", ipadx=18, ipady=6)
+        self.viewer_button = ttk.Button(actions, text="뷰어 열기", command=self._open_viewer, state="disabled")
+        self.viewer_button.pack(side="left", padx=(10, 0), ipady=6)
         self.open_button = ttk.Button(actions, text="결과 폴더 열기", command=self._open_output, state="disabled")
-        self.open_button.pack(side="left", padx=(10, 0), ipady=6)
+        self.open_button.pack(side="left", padx=(8, 0), ipady=6)
         ttk.Button(actions, text="로그 지우기", command=self._clear_log).pack(side="right")
 
         progress_frame = ttk.Frame(outer)
@@ -176,8 +220,15 @@ class PortraitAutorigApp:
             raise ValueError(f"입력 경로가 없습니다: {input_path}")
         if not input_path.is_dir():
             raise ValueError(f"입력은 폴더여야 합니다: {input_path}")
-        if self.mode.get() == "single" and not self.legacy.get() and input_path.suffix != ".portrait":
-            raise ValueError("한 명 빌드 입력은 .portrait 폴더를 선택하세요.")
+        if self.mode.get() == "single" and not self.legacy.get():
+            # `.portrait` is the conventional directory name used by batch
+            # discovery, not part of the Bundle file contract. Validate the
+            # selected directory by its manifest/layers so future bundle
+            # types (for example full-body characters) can use any name.
+            try:
+                bundle_kind(input_path)
+            except Exception as exc:
+                raise ValueError(f"Bundle 검증 실패: {exc}") from exc
         return input_path, output_path
 
     def _start_build(self) -> None:
@@ -198,6 +249,7 @@ class PortraitAutorigApp:
 
         self._busy = True
         self.build_button.configure(state="disabled")
+        self.viewer_button.configure(state="disabled")
         self.open_button.configure(state="disabled")
         self.progress.configure(value=0, maximum=1)
         self.progress_text.set("")
@@ -223,7 +275,7 @@ class PortraitAutorigApp:
         try:
             if mode == "single":
                 self._events.put(("progress_init", 1))
-                result = compile_portrait(
+                result = compile_bundle_input(
                     input_path,
                     output_path,
                     legacy=legacy,
@@ -294,7 +346,9 @@ class PortraitAutorigApp:
         self.build_button.configure(state="normal")
         if results:
             self._last_output = results[-1].output_path
+            self.viewer_button.configure(state="normal")
             self.open_button.configure(state="normal")
+            self._open_viewer()
         self.status.set(f"완료 — {len(results)}개 Rig Bundle 생성")
         self._append_log("=== DONE ===")
 
@@ -302,6 +356,7 @@ class PortraitAutorigApp:
         self._busy = False
         self.build_button.configure(state="normal")
         if self._last_output is not None:
+            self.viewer_button.configure(state="normal")
             self.open_button.configure(state="normal")
         self.status.set("빌드 실패")
         self._append_log(f"ERROR  {error}")
@@ -332,6 +387,28 @@ class PortraitAutorigApp:
                 subprocess.Popen(["xdg-open", str(folder)])
         except Exception as exc:
             messagebox.showerror("Portrait AutoRig", f"폴더를 열 수 없습니다:\n{exc}")
+
+    def _open_viewer(self) -> None:
+        target = self._last_output or (Path(self.output_path.get()) if self.output_path.get() else None)
+        if target is None:
+            return
+        run_root = target if target.is_dir() else target.parent
+        manifests = sorted(run_root.glob("*_rig_manifest.json"))
+        if not manifests:
+            messagebox.showerror("Portrait AutoRig", f"Rig manifest를 찾을 수 없습니다:\n{run_root}")
+            return
+        try:
+            if self._preview_server is not None:
+                self._preview_server.shutdown()
+                self._preview_server.server_close()
+            self._preview_server, base_url = _start_preview_server(run_root)
+            manifest_url = base_url + "?manifest=" + urllib.parse.quote(
+                "/run/" + manifests[0].name, safe="/"
+            )
+            if not webbrowser.open(manifest_url):
+                raise RuntimeError("기본 브라우저를 열지 못했습니다.")
+        except Exception as exc:
+            messagebox.showerror("Portrait AutoRig", f"뷰어를 열 수 없습니다:\n{exc}")
 
 
 def main() -> None:

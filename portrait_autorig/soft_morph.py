@@ -32,7 +32,8 @@ import cv2
 import numpy as np
 
 __all__ = [
-    "SOFT_MORPH_TAG", "derive_upper_torso_soft_region", "soft_morph_preflight",
+    "SOFT_MORPH_TAG", "SOFT_MORPH_TAGS", "soft_morph_layer",
+    "derive_upper_torso_soft_region", "soft_morph_preflight",
     "upper_torso_soft_morph_spec",
     "RESPONSE_PROFILES", "RESPONSE_PROFILE_CONFIG", "TARGET_ALIASES",
     "find_authored_region", "region_from_rig_intent", "authored_upper_torso_soft_morph_spec",
@@ -42,6 +43,17 @@ __all__ = [
 # the design doc's 5 and 24: no separate breast semantic layer, no splitting
 # topwear into more pieces, no touching neck/head/face/hair/eyewhite.
 SOFT_MORPH_TAG = "topwear"
+SOFT_MORPH_TAGS = frozenset({"topwear", "topwear_with_arms", "topwear_with_handwear"})
+
+
+def soft_morph_layer(layer_dict: dict[str, np.ndarray] | None) -> np.ndarray | None:
+    """Find the authored torso surface across Composer semantic aliases."""
+    if not layer_dict:
+        return None
+    for tag in (SOFT_MORPH_TAG, "topwear_with_handwear", "topwear_with_arms"):
+        if tag in layer_dict:
+            return layer_dict[tag]
+    return None
 
 # --- Geometry defaults ---------------------------------------------------
 #
@@ -274,7 +286,7 @@ def upper_torso_soft_morph_spec(layer_dict: dict[str, np.ndarray], *,
     rules -- it only ever reads a strength, and a DISABLED character's is
     exactly zero.
     """
-    topwear = layer_dict.get(SOFT_MORPH_TAG)
+    topwear = soft_morph_layer(layer_dict)
     region = derive_upper_torso_soft_region(topwear, neck_box=neck_box,
                                             alpha_threshold=alpha_threshold)
     verdict = soft_morph_preflight(topwear, region, frame_size=frame_size, neck_box=neck_box,
@@ -323,7 +335,7 @@ def upper_torso_soft_morph_spec(layer_dict: dict[str, np.ndarray], *,
 # `PORTRAIT_COMPOSER_IMPLEMENTATION_DIRECTIVE_v0.2.md` #18 names
 # "topwear_with_arms" as its export-profile grouping label for exactly this
 # surface. Generalizing beyond one tag is future work.
-TARGET_ALIASES = frozenset({"topwear_with_arms", "topwear", SOFT_MORPH_TAG})
+TARGET_ALIASES = SOFT_MORPH_TAGS
 
 RESPONSE_PROFILES = ("soft", "firm_bounce", "springy")
 
@@ -355,7 +367,9 @@ def find_authored_region(rig_intent: dict[str, Any] | None) -> dict[str, Any] | 
     if not rig_intent:
         return None
     for region in (rig_intent.get("regions") or {}).values():
-        if region.get("target") in TARGET_ALIASES:
+        target = str(region.get("target", ""))
+        target_base = target[:-len("__instance")] if target.endswith("__instance") else target
+        if target in TARGET_ALIASES or target_base in TARGET_ALIASES:
             return region
     return None
 
@@ -404,7 +418,7 @@ def authored_upper_torso_soft_morph_spec(region: dict[str, Any],
     preflight DISABLED, or missing geometry/topwear are all exactly
     strength 0.0, never a partial guess.
     """
-    topwear = layer_dict.get(SOFT_MORPH_TAG)
+    topwear = soft_morph_layer(layer_dict)
     region_geometry = region_from_rig_intent(topwear, region, alpha_threshold=alpha_threshold)
     verdict = soft_morph_preflight(topwear, region_geometry, frame_size=frame_size,
                                    neck_box=neck_box, occluder_alpha=occluder_alpha,
@@ -426,6 +440,12 @@ def authored_upper_torso_soft_morph_spec(region: dict[str, Any],
     spec: dict[str, Any] = {
         "enabled": enabled,
         "mode": "two_lobe",
+        # Composer's RigIntent geometry is normalized in the authored target
+        # instance space. Assembly layers are positioned into the canvas by
+        # the input seam; for the current canvas-sized target contract this is
+        # the canvas coordinate space. Keep the distinction explicit so the
+        # runtime never silently re-normalizes it against a cropped rig part.
+        "coordinate_space": "canvas_normalized",
         "strength": round(float(strength), 3),
         "horizontal_px": DEFAULT_HORIZONTAL_PX,
         "vertical_px": DEFAULT_VERTICAL_PX,

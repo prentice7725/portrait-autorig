@@ -28,14 +28,16 @@ from .constraints import boundary_stitch_spec, compile_clip_masks
 from .physics import validate_physics_spec
 from .semantic import SEMANTIC_Z_ORDER
 from .topology import mesh_topology_hash
-from .variant import _part_name, compile_variant_bindings
+from .variant import _part_name, compile_variant_bindings, visible_variant_members
 
 __all__ = [
     "GROUP_HEAD", "GROUP_NECK", "GROUP_BODY",
     "HEAD_REMAINDER", "NECK_REMAINDER", "BODY_REMAINDER",
-    "EYE_SPLIT_TAGS", "RIG_Z_ORDER", "group_for_tag", "depth_table",
+    "EYE_SPLIT_TAGS", "RIG_Z_ORDER", "group_for_tag", "depth_owner_for_tag",
+    "depth_table",
     "split_remainder", "split_eyes", "derive_missing_eyewhite",
-    "rig_preflight", "detect_anchors", "render_rig_rest", "build_rig",
+    "rig_preflight", "detect_anchors", "detect_variant_eye_metadata",
+    "render_rig_rest", "build_rig",
     "write_rig_project",
 ]
 
@@ -60,7 +62,7 @@ HEAD_TAGS = frozenset({
     "eyebrow", "eyebrowl", "eyebrowr", "browl", "browr",
     "eyelash", "eyelashl", "eyelashr",
     "eyes", "eyel", "eyer", "eyewear",
-    "nose", "mouth",
+    "nose", "mouth", "mouth_open", "mouth_closed", "eye_closed",
     HEAD_REMAINDER,
 })
 NECK_TAGS = frozenset({"neck", "neckwear", NECK_REMAINDER})
@@ -160,6 +162,21 @@ def group_for_tag(tag: str) -> str:
     if tag in NECK_TAGS:
         return GROUP_NECK
     return GROUP_BODY
+
+
+def depth_owner_for_tag(tag: str) -> str:
+    """Return the semantic depth plane for Composer expression donors.
+
+    Variant labels such as ``eye_closed`` and ``mouth_open`` are visual
+    states, not new motion surfaces. They must share the depth of the eye or
+    mouth they replace, otherwise idle head motion makes the donor lag behind
+    the face even though its group is correctly ``head``.
+    """
+    if tag.startswith("eye_") or tag in {"eyes_open", "eyes_closed"}:
+        return "eyewhite"
+    if tag.startswith("mouth_"):
+        return "mouth"
+    return tag
 
 
 def depth_table() -> dict[str, float]:
@@ -415,13 +432,27 @@ def split_eyes(layer_dict: dict[str, np.ndarray], face_center_x: float, *,
         if not left.any() or not right.any():
             continue
 
+        # Keep faint anti-aliased edge pixels as well.  The connected
+        # components above intentionally use `alpha_threshold` for stable
+        # feature detection, but dropping alpha <= threshold changes the
+        # Composer reference at rest (A002 has such pixels around eyebrow
+        # features). Assign each faint pixel to its nearest detected side so
+        # the two outputs remain disjoint and collectively preserve alpha.
+        faint = (alpha > 0) & ~(mask > 0)
+        if faint.any():
+            distances = np.stack([_distance_to(left), _distance_to(right)], axis=0)
+            nearest = np.argmin(distances, axis=0)
+            left |= faint & (nearest == 0)
+            right |= faint & (nearest == 1)
+
         for suffix, side in (("l", left), ("r", right)):
             side_mask = side
             if kernel is not None:
                 # Dilate, then intersect with the layer's own alpha: the point
                 # is to close the seam between adjacent components, not to
                 # invent coverage the layer never had.
-                side_mask = cv2.dilate(side.astype(np.uint8), kernel).astype(bool) & (mask > 0)
+                side_mask = (cv2.dilate(side.astype(np.uint8), kernel).astype(bool)
+                             & (mask > 0)) | (side & faint)
             out[f"{tag}{suffix}"] = _rgba_with_alpha(arr, alpha * side_mask)
 
     return out
@@ -691,16 +722,16 @@ def rig_preflight(layer_dict: dict[str, np.ndarray], *,
     if rig_intent is not None:
         # Assembly path: authored region or nothing -- never a guess.
         chest_region = soft_morph.region_from_rig_intent(
-            probe.get(soft_morph.SOFT_MORPH_TAG), authored_region,
+            soft_morph.soft_morph_layer(probe), authored_region,
             alpha_threshold=alpha_threshold,
         )
     else:
         chest_region = soft_morph.derive_upper_torso_soft_region(
-            probe.get(soft_morph.SOFT_MORPH_TAG), neck_box=chest_neck_box,
+            soft_morph.soft_morph_layer(probe), neck_box=chest_neck_box,
             alpha_threshold=alpha_threshold,
         )
     checks["upper_torso_soft_morph"] = soft_morph.soft_morph_preflight(
-        probe.get(soft_morph.SOFT_MORPH_TAG), chest_region, frame_size=sample.shape[:2],
+        soft_morph.soft_morph_layer(probe), chest_region, frame_size=sample.shape[:2],
         neck_box=chest_neck_box, occluder_alpha=chest_occluder_alpha(probe),
         alpha_threshold=alpha_threshold,
     )
@@ -835,6 +866,53 @@ def detect_anchors(layer_dict: dict[str, np.ndarray], frame_size: tuple[int, int
         put("body_pivot", (canvas_w / 2.0, float(canvas_h)))
 
     return anchors
+
+
+def detect_variant_eye_metadata(
+    variant_layers: dict[str, np.ndarray] | None,
+    instance_to_tag: dict[str, str] | None,
+    *,
+    alpha_threshold: int = 10,
+) -> tuple[dict[str, list[float]], dict[str, list[int]]] | None:
+    """Recover bilateral eye anchors/openings from one unsuffixed Composer
+    variant member.
+
+    Assembly semantic layers can omit ``eye_left``/``eye_right`` anchors and
+    keep both eyes in a single variant image.  The alpha components of the
+    eyewhite (or, conservatively, iris/eyes) are still an authoritative local
+    signal.  Preserve their boxes in the manifest so the browser runtime does
+    not mistake the member's full-canvas crop for an eye socket.
+    """
+    if not variant_layers or not instance_to_tag:
+        return None
+    candidates = [(member, image) for member, image in variant_layers.items()
+                  if instance_to_tag.get(member) in {"eyewhite", "irides", "eyes"}]
+    candidates.sort(key=lambda item: 0 if instance_to_tag.get(item[0]) == "eyewhite" else 1)
+    for _member, image in candidates:
+        arr = np.asarray(image)
+        if arr.ndim != 3 or arr.shape[-1] != 4:
+            continue
+        mask = (arr[..., 3] > alpha_threshold).astype(np.uint8)
+        count, _labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
+        components = [i for i in range(1, count)
+                      if int(stats[i, cv2.CC_STAT_AREA]) >= 8]
+        if len(components) < 2:
+            continue
+        components.sort(key=lambda i: int(stats[i, cv2.CC_STAT_AREA]), reverse=True)
+        components = sorted(components[:2], key=lambda i: float(centroids[i][0]))
+        boxes: dict[str, list[int]] = {}
+        anchors: dict[str, list[float]] = {}
+        for side, i in zip(("l", "r"), components):
+            x, y, w, h = (int(stats[i, key]) for key in (
+                cv2.CC_STAT_LEFT, cv2.CC_STAT_TOP,
+                cv2.CC_STAT_WIDTH, cv2.CC_STAT_HEIGHT))
+            boxes[side] = [x, y, x + w, y + h]
+            anchors[f"eye_{'left' if side == 'l' else 'right'}"] = [
+                round(float(centroids[i][0]), 2),
+                round(float(centroids[i][1]), 2),
+            ]
+        return anchors, boxes
+    return None
 
 
 def neck_bbox(layer_dict: dict[str, np.ndarray], *,
@@ -1088,7 +1166,12 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         for tag, img in split_remainder(body_remainder, working,
                                         alpha_threshold=alpha_threshold).items():
             working[tag] = img
-            depth_parent[tag] = tag
+            # Remainder subdivision changes motion ownership, not the
+            # Composer-authored setup plane.  In an Assembly compile the
+            # supplied draw order contains `body_remainder` but not the
+            # AutoRig-only split tags; inherit that authored rank so a split
+            # head/neck fragment cannot jump in front of the portrait at rest.
+            depth_parent[tag] = BODY_REMAINDER if draw_order is not None else tag
 
     anchors = detect_anchors(working, (canvas_h, canvas_w), alpha_threshold=alpha_threshold)
     face_center = anchors.get("face_center")
@@ -1202,7 +1285,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         # so use the semantic target here rather than a not-yet-created local
         # spec. This only selects a finer mesh; enabling the deformer remains
         # controlled by the motion payload.
-        if tag == "topwear":
+        if tag in soft_morph.SOFT_MORPH_TAGS:
             deformation_kinds.add("local_soft_field")
         part_mesh = (
             (tag in contour_tags
@@ -1249,6 +1332,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     # active member remains present in the canonical reference without being
     # double-drawn by the ordinary semantic part.
     variant_part_names: dict[str, str] = {}
+    eye_opening_metadata: dict[str, list[int]] | None = None
     if variant_sets:
         if not variant_layers or not instance_to_tag:
             raise ValueError("VariantSets require positioned instance layers and instance-to-tag mappings")
@@ -1279,7 +1363,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
                 parts.append({
                     "name": name, "tag": tag, "image": f"{image_prefix}/{name}.png" if image_prefix else f"{name}.png",
                     "xyxy": [int(v) for v in xyxy], "group": group,
-                    "depth": round(float(_DEPTH_TABLE.get(tag, UNKNOWN_DEPTH)), 4),
+                    "depth": round(float(_DEPTH_TABLE.get(depth_owner_for_tag(tag), UNKNOWN_DEPTH)), 4),
                     "z": float(base_z), "weight": weight, "mesh": part_mesh,
                     "variant_member": member,
                     "source_instance_id": member,
@@ -1287,15 +1371,27 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
                 })
                 images[name] = crop_img
 
+        # Assembly variants may be the only source of bilateral eye geometry.
+        # Preserve a compact alpha-component contract for the runtime instead
+        # of making it infer socket bounds from a full-canvas member crop.
+        variant_eye_metadata = detect_variant_eye_metadata(
+            variant_layers, instance_to_tag, alpha_threshold=alpha_threshold
+        )
+        if variant_eye_metadata is not None:
+            variant_anchors, eye_opening_metadata = variant_eye_metadata
+            for key, value in variant_anchors.items():
+                anchors.setdefault(key, value)
+
         compiled_variants, compiled_presets, variant_deformers, variant_report = compile_variant_bindings(
             variant_sets, expression_presets, instance_to_tag, variant_part_names
         )
         # Rest/reference validation uses Composer's authored `active` member;
         # runtime is reset to VariantSet.default immediately after that check.
         for set_id, spec in compiled_variants.items():
+            active_members = visible_variant_members(spec, spec["active"])
             for member in spec["members"]:
                 part = next(p for p in parts if p.get("variant_member") == member)
-                part["visible"] = member == spec["active"]
+                part["visible"] = member in active_members
                 part["variant_set"] = set_id
     else:
         compiled_variants, compiled_presets, variant_deformers, variant_report = {}, {}, [], {
@@ -1323,6 +1419,8 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         "motion": motion_payload,
         "rig_preflight": json.loads(json.dumps(preflight)),
     }
+    if eye_opening_metadata is not None:
+        manifest["eye_opening"] = eye_opening_metadata
     constraints: list[dict[str, Any]] = []
     if clip_masks:
         constraints.extend(compile_clip_masks(clip_masks))
@@ -1378,9 +1476,10 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     # Composer's active member is reference-only.  The runtime initial state
     # is the independent VariantSet.default contract.
     for set_id, spec in compiled_variants.items():
+        default_members = visible_variant_members(spec, spec["default"])
         for member in spec["members"]:
             part = next(p for p in parts if p.get("variant_member") == member)
-            part["visible"] = member == spec["default"]
+            part["visible"] = member in default_members
     # Capability Report (directive v0.2 #34-35, Master doc #19): what this
     # *compiled* rig can actually do, separate from whether the compile
     # itself succeeded (QA) -- derived from the final parts and preflight,
