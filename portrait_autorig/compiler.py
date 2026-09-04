@@ -19,7 +19,8 @@ from .rig import build_rig, rig_preflight, write_rig_project
 
 
 def compile_asset(asset: PortraitAsset, output_dir: str | os.PathLike[str], *,
-                  gradient_tags=(), contour_tags=()) -> str:
+                  gradient_tags=(), contour_tags=(), island_policy="separate",
+                  clip_masks=(), boundary_stitches=()) -> str:
     preflight = rig_preflight(asset.layers, original_rgba=asset.original,
                               body_remainder=asset.body_remainder)
     if preflight["status"] == "INCOMPATIBLE":
@@ -33,6 +34,9 @@ def compile_asset(asset: PortraitAsset, output_dir: str | os.PathLike[str], *,
         frame_size=asset.original.shape[:2],
         gradient_tags=gradient_tags,
         contour_tags=contour_tags,
+        island_policy=island_policy,
+        clip_masks=clip_masks,
+        boundary_stitches=boundary_stitches,
         run_id=asset.source_id,
         tag_version=asset.tag_version,
         preflight=preflight,
@@ -49,18 +53,25 @@ def compile_asset(asset: PortraitAsset, output_dir: str | os.PathLike[str], *,
     return write_rig_project(str(output), "portrait", manifest, images)
 
 
-def compile_bundle(bundle_dir: str, output_dir: str, *, gradient_tags=(), contour_tags=()) -> str:
+def compile_bundle(bundle_dir: str, output_dir: str, *, gradient_tags=(), contour_tags=(), island_policy="separate",
+                   clip_masks=(), boundary_stitches=()) -> str:
     return compile_asset(load_portrait_bundle(bundle_dir), output_dir,
-                         gradient_tags=gradient_tags, contour_tags=contour_tags)
+                         gradient_tags=gradient_tags, contour_tags=contour_tags,
+                         island_policy=island_policy, clip_masks=clip_masks,
+                         boundary_stitches=boundary_stitches)
 
 
-def compile_legacy_run(run_dir: str, output_dir: str, *, gradient_tags=(), contour_tags=()) -> str:
+def compile_legacy_run(run_dir: str, output_dir: str, *, gradient_tags=(), contour_tags=(), island_policy="separate",
+                       clip_masks=(), boundary_stitches=()) -> str:
     return compile_asset(load_legacy_run(run_dir), output_dir,
-                         gradient_tags=gradient_tags, contour_tags=contour_tags)
+                         gradient_tags=gradient_tags, contour_tags=contour_tags,
+                         island_policy=island_policy, clip_masks=clip_masks,
+                         boundary_stitches=boundary_stitches)
 
 
 def compile_assembly_asset(asset: AssemblyAsset, output_dir: str | os.PathLike[str], *,
-                           gradient_tags=(), contour_tags=()) -> str:
+                           gradient_tags=(), contour_tags=(), island_policy="separate",
+                           clip_masks=(), boundary_stitches=()) -> str:
     """Compile an Assembly Bundle v0.2 (`assembly.load_assembly_bundle`) into
     a Rig Bundle -- the "AutoRig Assembly input seam" (Master doc #22 STEP
     2). Every Stage A-D derivation in `build_rig` (remainder split, eye
@@ -105,6 +116,9 @@ def compile_assembly_asset(asset: AssemblyAsset, output_dir: str | os.PathLike[s
         rig_intent=asset.rig_intent,
         gradient_tags=gradient_tags,
         contour_tags=contour_tags,
+        island_policy=island_policy,
+        clip_masks=clip_masks,
+        boundary_stitches=boundary_stitches,
         run_id=asset.source_id,
         variant_sets=asset.variant_sets,
         expression_presets=asset.expressions,
@@ -136,6 +150,9 @@ def compile_assembly_asset(asset: AssemblyAsset, output_dir: str | os.PathLike[s
 
 
 def compile_assembly_bundle(bundle_dir: str, output_dir: str, *,
-                            gradient_tags=(), contour_tags=()) -> str:
+                            gradient_tags=(), contour_tags=(), island_policy="separate",
+                            clip_masks=(), boundary_stitches=()) -> str:
     return compile_assembly_asset(load_assembly_bundle(bundle_dir), output_dir,
-                                  gradient_tags=gradient_tags, contour_tags=contour_tags)
+                                  gradient_tags=gradient_tags, contour_tags=contour_tags,
+                                  island_policy=island_policy, clip_masks=clip_masks,
+                                  boundary_stitches=boundary_stitches)

@@ -19,7 +19,9 @@ from . import soft_morph
 from .capability import capability_report
 from .image import composite_layers, crop_to_alpha, rest_fidelity
 from .manifest import RIG_MANIFEST_VERSION_01, upgrade_manifest_v01_to_v02
-from .mesh import contour_mesh_spec, mesh_spec
+from .mesh import contour_mesh_spec, mesh_spec, motion_aware_mesh_spec
+from .strand_topology import build_strand_specs
+from .constraints import boundary_stitch_spec, compile_clip_masks
 from .semantic import SEMANTIC_Z_ORDER
 from .topology import mesh_topology_hash
 from .variant import _part_name, compile_variant_bindings
@@ -960,6 +962,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
               alpha_threshold: int = 10,
               gradient_tags: Collection[str] = (),
               contour_tags: Collection[str] = (),
+              island_policy: str = "separate",
               draw_order: Sequence[str] | None = None,
               rest_reference: np.ndarray | None = None,
               rig_intent: dict[str, Any] | None = None,
@@ -973,8 +976,10 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
               instance_to_tag: dict[str, str] | None = None,
               variant_draw_order: Sequence[str] | None = None,
               provenance: dict[str, Any] | None = None,
-              source_instance_ids: dict[str, str] | None = None,
-              visibility_curves: Sequence[dict[str, Any]] | None = None,
+                  source_instance_ids: dict[str, str] | None = None,
+                  visibility_curves: Sequence[dict[str, Any]] | None = None,
+                  clip_masks: Sequence[dict[str, Any]] | None = None,
+                  boundary_stitches: Sequence[dict[str, Any]] | None = None,
               ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     """Stages A-D: turn `{tag: full-canvas RGBA}` into `(manifest, images)`.
 
@@ -992,9 +997,9 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     `contour_tags` opts specific tags into the experimental contour mesh
     backend (absorption plan #8, P1-A) instead of the grid default, for A/B
     comparison against it (`preview/check_mesh_quality.mjs`, P1-B). A tag
-    whose alpha does not actually triangulate -- more than one disconnected
-    island, most commonly -- silently falls back to grid, exactly as if it
-    had not been listed; see `mesh.contour_mesh`.
+    `island_policy` is passed to the contour backend (`separate` by default;
+    `connect_nearest`, `largest_only`, or `reject` are explicit alternatives).
+    A contour result that cannot be triangulated still falls back to grid.
 
     `draw_order` is Composer's own authored paint order (`assembly.
     AssemblyAsset.draw_order`) -- `draw_order != motion_depth`
@@ -1183,9 +1188,25 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         # where a coarse grid shows up as faceting. Opted-in tags try the
         # contour backend first and fall back to grid when it declines
         # (multi-island alpha; see mesh.contour_mesh).
-        part_mesh = ((tag in contour_tags
-                     and contour_mesh_spec(crop_img[..., 3], tuple(int(v) for v in xyxy)))
-                    or mesh_spec((canvas_h, canvas_w), fine=weight["mode"] == "gradient_y"))
+        deformation_kinds = {"parallax_turn", "shell_turn", "weighted_rotation", "continuous_field"}
+        if tag in {"eyewhite", "eyewhitel", "eyewhiter", "irides", "iridesl", "iridesr",
+                   "eyes", "eyel", "eyer", "eyelash", "eyelashl", "eyelashr", "mouth"}:
+            deformation_kinds.update({"eye_fold", "gaze"})
+        # Topwear is the runtime target of the optional upper-torso soft field.
+        # The authored/derived spec is assembled below, after parts are built,
+        # so use the semantic target here rather than a not-yet-created local
+        # spec. This only selects a finer mesh; enabling the deformer remains
+        # controlled by the motion payload.
+        if tag == "topwear":
+            deformation_kinds.add("local_soft_field")
+        part_mesh = (
+            (tag in contour_tags
+             and contour_mesh_spec(crop_img[..., 3], tuple(int(v) for v in xyxy),
+                                   island_policy=island_policy))
+            or motion_aware_mesh_spec((canvas_h, canvas_w), tag=tag, group=group,
+                                      deformation_kinds=deformation_kinds,
+                                      weight_mode=weight["mode"])
+        )
         # Topology freeze (directive v0.2 #11-12): generate mesh -> hash ->
         # freeze. Downstream weights/keyforms/constraints/physics bindings
         # (once they exist) invalidate on a hash mismatch rather than being
@@ -1202,6 +1223,16 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
             "weight": weight,
             "mesh": part_mesh,
         }
+        if (part_mesh.get("kind") == "contour"
+                and tag in {"front hair", "back hair", "hair_secondary"}
+                and part_mesh.get("vertices") and part_mesh.get("triangles")):
+            part_spec["strand_topology"] = {
+                "version": "p1",
+                "specs": build_strand_specs(
+                    part_mesh["vertices"], part_mesh["triangles"],
+                    min_area=1.0,
+                ),
+            }
         if source_instance_ids and tag in source_instance_ids:
             part_spec["source_instance_id"] = source_instance_ids[tag]
         parts.append(part_spec)
@@ -1287,6 +1318,13 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         "motion": motion_payload,
         "rig_preflight": json.loads(json.dumps(preflight)),
     }
+    constraints: list[dict[str, Any]] = []
+    if clip_masks:
+        constraints.extend(compile_clip_masks(clip_masks))
+    if boundary_stitches:
+        constraints.append(boundary_stitch_spec(boundary_stitches))
+    if constraints:
+        manifest["constraints"] = constraints
     if provenance is not None:
         # Provenance is a Composer-owned opaque payload.  AutoRig forwards it
         # verbatim and only adds operation provenance for derived semantics.
