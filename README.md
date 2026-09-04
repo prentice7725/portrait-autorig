@@ -1,6 +1,6 @@
 # portrait-autorig
 
-`Production-ready Portrait Bundle → derived rig parts + animated portrait rig`
+`Production-ready Portrait/Assembly Bundle → derived rig parts + animated portrait rig`
 
 이 저장소는 [`seethrough-portrait`](https://github.com/prentice7725/seethrough-portrait)가
 생성하는 버전 관리 파일 계약을 소비합니다. See-Through, torch, diffusers에 대한
@@ -98,11 +98,14 @@ Assembly Bundle의 `variant_sets`는 Rig Manifest의 `visibility` phase에 명�
 rig part를 포함한 `member_bindings`에 그대로 보존됩니다. Runtime은 각 set의
 `default`에서 시작하며, Composer의 `active` member는 reference pose 검증에만 사용되고
 둘이 다르면 경고가 기록됩니다. `expression_presets`는 여러 set의 member를 원자적으로
-선택합니다. 초기 transition policy는 `discrete`와 명시적으로 작성된 `crossfade`이며,
-잘못된 member mapping은 compile을 실패시킵니다.
+선택합니다. 기본 transition policy는 `discrete`이며, Rig Manifest에
+`transition: "crossfade"`가 명시된 경우에만 `crossfade`를 사용합니다. 현재 Composer
+authoring API는 exclusive VariantSet과 preset을 작성하고, crossfade 선택은 manifest
+계약을 통해 전달됩니다. 잘못된 member mapping은 compile을 실패시킵니다.
 
 브라우저에서 [`preview/index.html`](preview/index.html)을 열고 Rig Bundle directory를
-선택하면 head turn, tilt, breath, blink, gaze를 테스트할 수 있습니다.
+선택하면 head turn, tilt, breath, blink을 테스트할 수 있습니다. `gaze`는 아직
+런타임 deformer가 구현되지 않아 테스트 대상에서 제외되어 있습니다.
 
 원본 feasibility study와 측정된 motion limit은
 [`docs/PORTRAIT_AUTO_RIG_FEASIBILITY_v0.1.md`](docs/PORTRAIT_AUTO_RIG_FEASIBILITY_v0.1.md)에
