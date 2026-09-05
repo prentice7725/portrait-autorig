@@ -123,6 +123,9 @@ RIG_SUBDIR = "rig"
 DEFAULT_MOTION: dict[str, Any] = {
     "head_turn": {"max_x": 0.8, "max_y": 0.8},
     "head_tilt": {"max_deg": 2.0, "pivot": "neck_pivot"},
+    "body_sway": {"enabled": True, "amplitude_x_px": 1.8, "amplitude_y_px": 1.2,
+                   "period_x_s": 7.3, "period_y_s": 5.9,
+                   "phase_x": 0.4, "phase_y": 1.2, "secondary_harmonic": 0.18},
     "breathing": {"period_s": 4.0, "amplitude_px": 3.0},
     #  places the closed lid inside the eye opening: 1.0 is the
     # lower lid, 0.5 the centre. Closing onto the centre leaves the lash as a
@@ -1434,7 +1437,13 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         physics_errors = validate_physics_spec(physics)
         if physics_errors:
             raise ValueError("invalid physics spec: " + "; ".join(physics_errors))
-        manifest["physics"] = json.loads(json.dumps(physics))
+        physics_payload = json.loads(json.dumps(physics))
+        torso_driver = physics_payload.get("upper_torso_driver")
+        if isinstance(torso_driver, dict):
+            # New compiler output opts into the separated inertial model;
+            # manifests loaded without this field remain legacy at runtime.
+            torso_driver.setdefault("model", "inertial_relative_v1")
+        manifest["physics"] = physics_payload
     if provenance is not None:
         # Provenance is a Composer-owned opaque payload.  AutoRig forwards it
         # verbatim and only adds operation provenance for derived semantics.
@@ -1465,6 +1474,32 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
                 working, frame_size=(canvas_h, canvas_w), neck_box=neck_box,
                 occluder_alpha=chest_occluder_alpha(working), alpha_threshold=alpha_threshold,
             )
+    # P2.1 local adaptive refinement: only the authored two-lobe chest region
+    # gets a finer grid. The surrounding topwear keeps its motion-aware cell,
+    # avoiding a dense full-garment mesh while preserving neckline/center locks.
+    soft_spec = manifest["motion"].get("upper_torso_soft_morph") or {}
+    if soft_spec.get("enabled") and soft_spec.get("left") and soft_spec.get("right"):
+        topwear_part = next((part for part in parts if part.get("tag") in soft_morph.SOFT_MORPH_TAGS), None)
+        if topwear_part and topwear_part["mesh"].get("kind") == "grid":
+            tx1, ty1, tx2, ty2 = topwear_part["xyxy"]
+            if soft_spec.get("coordinate_space") == "canvas_normalized":
+                bx1, by1, bw, bh = 0.0, 0.0, float(canvas_w), float(canvas_h)
+            else:
+                bx1, by1, bw, bh = float(tx1), float(ty1), float(tx2 - tx1), float(ty2 - ty1)
+            boxes = []
+            for lobe in (soft_spec["left"], soft_spec["right"]):
+                cx, cy = lobe["center"]
+                rx, ry = lobe["radius"]
+                boxes.append((bx1 + (cx - rx) * bw, by1 + (cy - ry) * bh,
+                              bx1 + (cx + rx) * bw, by1 + (cy + ry) * bh))
+            region = [max(tx1, min(box[0] for box in boxes) - 8),
+                      max(ty1, min(box[1] for box in boxes) - 8),
+                      min(tx2, max(box[2] for box in boxes) + 8),
+                      min(ty2, max(box[3] for box in boxes) + 8)]
+            if region[2] > region[0] and region[3] > region[1]:
+                topwear_part["mesh"]["refinement"] = {"region": region, "cell": 18}
+                topwear_part["mesh"]["topology_hash"] = mesh_topology_hash(
+                    topwear_part["mesh"], tuple(int(v) for v in topwear_part["xyxy"]))
     if derived_report and derived_report.get("succeeded"):
         manifest["derived_semantics"] = {
             "eyewhite": json.loads(json.dumps(derived_report))

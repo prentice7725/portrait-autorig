@@ -13,11 +13,9 @@
   and it runs from file://, so an unzipped run works on a machine that has
   never seen this repo.
 
-  Vertex positions are recomputed on the CPU each frame and re-uploaded. At a
-  few thousand vertices that costs nothing, and it keeps the deformation
-  readable as plain arithmetic instead of shader source -- this is a
-  feasibility rig, and being able to step through the math matters more than
-  the frame budget.
+  Vertex positions are kept in CPU-side typed arrays, but only dirty parts are
+  recomputed and uploaded. The preview remains a readable CPU arithmetic
+  oracle while avoiding needless work during idle/static frames.
 -->
 <style>
   :root {
@@ -86,13 +84,32 @@
 <div id="panel">
   <h2>Run</h2>
   <div class="meta" id="runmeta">no run loaded</div>
+  <div class="meta" id="profiler">profiler waiting</div>
 
   <h2>Idle</h2>
   <label class="row"><input type="checkbox" id="autoIdle"> Auto idle motion</label>
+  <label class="row"><input type="checkbox" id="bodySway" checked> Body sway</label>
+  <label class="row"><input type="checkbox" id="chestInertia" checked> Chest inertia</label>
+  <label>L/R asymmetry <span class="val" id="asymmetryv">1.00</span>
+    <input type="range" id="asymmetry" min="0" max="1" step="0.01" value="1"></label>
+  <div class="row">
+    <button id="kickX">Body Kick X</button>
+    <button id="kickY">Body Kick Y</button>
+    <button id="stopBody">Stop Body</button>
+  </div>
+  <div class="row">
+    <button id="breathOnly">Breath Only</button>
+    <button id="inertiaOnly">Inertia Only</button>
+    <button id="resetMotion">Reset Motion</button>
+  </div>
+  <canvas id="motionGraph" width="360" height="100" aria-label="Body and chest motion graph"></canvas>
   <p class="hint">Off by default: the page opens on the rest pose, so what you
      see first is the decomposition rather than the animation. Idle turns no
      further than &plusmn;0.3, which is below where the reveal along an edge
-     merges into one tear; the sliders reach 1.5 for finding that.</p>
+     merges into one tear; the sliders reach 1.5 for finding that. Idle slider
+     labels are sampled at 10Hz so the animation does not pay a DOM write per
+     frame. The graph shows body Y and independent chest L/R response over the
+     last five seconds; QA buttons never modify the manifest.</p>
   <label class="row"><input type="checkbox" id="doBlink" checked> Blink</label>
   <label class="row"><input type="checkbox" id="doBreathe" checked> Breathing</label>
   <label>Breath <span class="val" id="breathAmpv">3.0px</span>
@@ -112,19 +129,21 @@
   <p class="hint">Wink buttons exercise the left/right eye split (H4).</p>
 
   <h2>Chest Soft Morph</h2>
-  <div class="meta" id="softMeta">not available in this run</div>
+  <div class="meta" id="softMeta">not available in this run <span id="qaBadge" class="warn" hidden>QA OVERRIDE</span></div>
   <label class="row"><input type="checkbox" id="doSoftMorph"> Chest Soft Morph</label>
   <label>Strength <span class="val" id="softStrengthv">0.00</span>
     <input type="range" id="softStrength" min="0" max="1" step="0.01" value="0"></label>
   <label>Horizontal <span class="val" id="softHorizv">0.0px</span>
-    <input type="range" id="softHoriz" min="0" max="4" step="0.1" value="0"></label>
+    <input type="range" id="softHoriz" min="0" max="24" step="0.1" value="0"></label>
   <label>Vertical <span class="val" id="softVertv">0.0px</span>
-    <input type="range" id="softVert" min="0" max="2" step="0.1" value="0"></label>
+    <input type="range" id="softVert" min="0" max="12" step="0.1" value="0"></label>
   <label class="row"><input type="checkbox" id="softRegion"> Show region</label>
   <p class="hint">Local two-lobe volume response confined to <code>topwear</code>,
      layered on top of breathing rather than replacing it -- turning this off
      leaves breathing exactly as it was. Disabled and unchecked when this
-     run's preflight could not derive a confident region (design doc 15).</p>
+     run's preflight could not derive a confident region (design doc 15).
+     The extended slider range is for hard-morph QA; production manifests keep
+     their authored amplitude.</p>
 
   <h2>Expression pack</h2>
   <div class="meta" id="packmeta">no pack in this run</div>

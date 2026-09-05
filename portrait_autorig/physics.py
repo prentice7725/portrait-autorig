@@ -36,6 +36,13 @@ def validate_physics_spec(spec: dict[str, Any]) -> list[str]:
         if hz <= 0 or float(config["update_hz"]) != hz: errors.append("config.update_hz must be a positive integer")
     except (TypeError, ValueError):
         errors.append("config.update_hz must be a positive integer")
+    for field in ("max_body_acceleration", "max_impulse"):
+        if field in config:
+            try:
+                if not math.isfinite(float(config[field])) or float(config[field]) <= 0:
+                    errors.append(f"config.{field} must be finite and positive")
+            except (TypeError, ValueError):
+                errors.append(f"config.{field} must be finite and positive")
     strands = (spec.get("strand_driver") or {}).get("strands", [])
     ids = [str(item.get("strand_id", item.get("id", ""))).strip() for item in strands]
     if len(ids) != len(set(ids)) or any(not item for item in ids):
@@ -45,10 +52,22 @@ def validate_physics_spec(spec: dict[str, Any]) -> list[str]:
         errors.append(f"unsupported strand_driver.input_mode: {strand_driver.get('input_mode')!r}")
     torso = spec.get("upper_torso_driver")
     if torso:
+        model = torso.get("model", "legacy_target_v1")
+        if model not in {"legacy_target_v1", "inertial_relative_v1"}:
+            errors.append(f"unsupported upper_torso_driver.model: {model!r}")
         if torso.get("profile", "soft") not in UpperTorsoSecondaryDriver.PROFILES:
             errors.append(f"unsupported upper_torso_driver.profile: {torso.get('profile')!r}")
         if torso.get("input_mode", "translation") not in INPUT_MODES:
             errors.append(f"unsupported upper_torso_driver.input_mode: {torso.get('input_mode')!r}")
+        for field in ("translation_gain", "angle_gain", "velocity_gain", "acceleration_gain",
+                      "breath_gain", "pose_bias_gain", "inertia_gain_x", "inertia_gain_y",
+                      "velocity_drag_x", "velocity_drag_y", "settle_gain"):
+            if field in torso:
+                try:
+                    if not math.isfinite(float(torso[field])):
+                        errors.append(f"upper_torso_driver.{field} must be finite")
+                except (TypeError, ValueError):
+                    errors.append(f"upper_torso_driver.{field} must be finite")
         try:
             asymmetry = float(torso.get("turn_asymmetry", 0.08))
             if not math.isfinite(asymmetry) or not 0 <= asymmetry <= 1:
@@ -225,25 +244,67 @@ class UpperTorsoSecondaryDriver:
         "springy": PhysicsMaterial(stiffness=16.0, damping=1.8),
     }
 
-    def __init__(self, *, profile: str = "soft", translation_gain: float = 1.0,
-                 angle_gain: float = 0.25, turn_asymmetry: float = 0.08,
+    def __init__(self, *, profile: str = "soft", model: str = "legacy_target_v1",
+                 translation_gain: float = 1.0, angle_gain: float = 0.25,
+                 breath_gain: float = 1.0, pose_bias_gain: float = 0.05,
+                 inertia_gain_x: float = 0.015, inertia_gain_y: float = 0.045,
+                 velocity_drag_x: float = 0.002, velocity_drag_y: float = 0.006,
+                 settle_gain: float = 0.08, turn_asymmetry: float = 0.08,
+                 velocity_gain: float = 0.03, acceleration_gain: float = 0.005,
+                 left_material_scale: dict[str, Any] | None = None,
+                 right_material_scale: dict[str, Any] | None = None,
                  config: dict[str, Any] | None = None,
                  input_mode: str = "translation") -> None:
+        if model not in {"legacy_target_v1", "inertial_relative_v1"}:
+            raise ValueError(f"unknown torso driver model: {model!r}")
         if profile not in self.PROFILES:
             raise ValueError(f"unknown torso response profile: {profile!r}")
         if input_mode not in INPUT_MODES:
             raise ValueError(f"unknown torso input mode: {input_mode!r}")
         self.translation_gain = float(translation_gain)
         self.angle_gain = float(angle_gain)
+        self.model = model
+        self.breath_gain = float(breath_gain)
+        self.pose_bias_gain = float(pose_bias_gain)
+        self.inertia_gain_x = float(inertia_gain_x)
+        self.inertia_gain_y = float(inertia_gain_y)
+        self.velocity_drag_x = float(velocity_drag_x)
+        self.velocity_drag_y = float(velocity_drag_y)
+        self.settle_gain = float(settle_gain)
+        if not all(math.isfinite(value) for value in (
+                self.breath_gain, self.pose_bias_gain, self.inertia_gain_x,
+                self.inertia_gain_y, self.velocity_drag_x, self.velocity_drag_y,
+                self.settle_gain)):
+            raise ValueError("torso inertial coefficients must be finite")
+        self.velocity_gain = float(velocity_gain)
+        self.acceleration_gain = float(acceleration_gain)
+        if not math.isfinite(self.velocity_gain) or not math.isfinite(self.acceleration_gain):
+            raise ValueError("velocity/acceleration gains must be finite")
         self.turn_asymmetry = float(turn_asymmetry)
         if not math.isfinite(self.turn_asymmetry) or self.turn_asymmetry < 0 or self.turn_asymmetry > 1:
             raise ValueError("turn_asymmetry must be finite and in [0, 1]")
         self.input_mode = input_mode
         self._previous_input = 0.0
         self._previous_velocity = 0.0
+        if (self.model == "inertial_relative_v1" and not left_material_scale
+                and not right_material_scale):
+            # Keep the two lobes physically independent by default while
+            # retaining exact legacy behavior for old manifests.
+            left_material_scale = {"stiffness": 0.98, "damping": 1.02, "mass": 1.03}
+            right_material_scale = {"stiffness": 1.02, "damping": 0.98, "mass": 0.97}
+
+        def material(scale: dict[str, Any] | None) -> PhysicsMaterial:
+            scale = scale or {}
+            values = {key: float(scale.get(key, 1.0)) for key in ("stiffness", "damping", "mass")}
+            if not all(math.isfinite(value) and value > 0 for value in values.values()):
+                raise ValueError("torso material scales must be positive and finite")
+            base = self.PROFILES[profile]
+            return PhysicsMaterial(base.stiffness * values["stiffness"],
+                                   base.damping * values["damping"],
+                                   base.mass * values["mass"])
         self.springs = {
-            "left": DeterministicSpring(material=self.PROFILES[profile], config=config),
-            "right": DeterministicSpring(material=self.PROFILES[profile], config=config),
+            "left": DeterministicSpring(material=material(left_material_scale), config=config),
+            "right": DeterministicSpring(material=material(right_material_scale), config=config),
         }
         # Compatibility alias for callers that inspected the old scalar spring.
         self.spring = self.springs["left"]
@@ -284,7 +345,9 @@ class UpperTorsoSecondaryDriver:
 
     def warmupPhysics(self, seconds: float | None = None, *, breath: float = 0.0,
                       angle_y: float = 0.0) -> PhysicsSnapshot:
-        target = breath * self.translation_gain + angle_y * self.angle_gain
+        target = (breath * self.breath_gain + angle_y * self.pose_bias_gain
+                  if self.model == "inertial_relative_v1"
+                  else breath * self.translation_gain + angle_y * self.angle_gain)
         self.resetPhysics()
         asym = max(-1.0, min(1.0, angle_y * self.turn_asymmetry))
         left_target, right_target = target * (1.0 - asym), target * (1.0 + asym)
@@ -297,16 +360,51 @@ class UpperTorsoSecondaryDriver:
         return self._snapshot()
 
     def stepPhysicsFixed(self, n: int = 1, *, breath: float = 0.0,
-                         angle_y: float = 0.0, input_mode: str | None = None,
-                         input_value: float | None = None) -> PhysicsSnapshot:
+                         angle_y: float = 0.0, turn_y: float | None = None,
+                         equilibrium: float | None = None,
+                         body_velocity: tuple[float, float] = (0.0, 0.0),
+                         body_acceleration: tuple[float, float] = (0.0, 0.0),
+                         impulse: tuple[float, float] = (0.0, 0.0),
+                         input_mode: str | None = None,
+                         input_value: float | None = None,
+                         legacy_body_velocity: float = 0.0,
+                         legacy_body_acceleration: float = 0.0) -> PhysicsSnapshot:
         mode = self.input_mode if input_mode is None else input_mode
         if mode not in INPUT_MODES:
             raise ValueError(f"unknown torso input mode: {mode!r}")
-        source = (breath * self.translation_gain + angle_y * self.angle_gain
-                  if input_value is None else float(input_value))
-        target = self._interpret(source, mode)
-        asym = max(-1.0, min(1.0, angle_y * self.turn_asymmetry))
-        left_target, right_target = target * (1.0 - asym), target * (1.0 + asym)
+        turn = angle_y if turn_y is None else float(turn_y)
+        if self.model == "inertial_relative_v1":
+            equilibrium_value = (breath * self.breath_gain + turn * self.pose_bias_gain
+                                  if equilibrium is None else float(equilibrium))
+            def pair(value: tuple[float, float] | float) -> tuple[float, float]:
+                if isinstance(value, (int, float)):
+                    return 0.0, float(value)
+                return float(value[0]), float(value[1])
+            vx, vy = pair(body_velocity)
+            ax, ay = pair(body_acceleration)
+            ix, iy = pair(impulse)
+            max_acc = float((self.springs["left"].config or {}).get("max_body_acceleration", 2400.0))
+            max_impulse = float((self.springs["left"].config or {}).get("max_impulse", 8.0))
+            ax, ay = max(-max_acc, min(max_acc, ax)), max(-max_acc, min(max_acc, ay))
+            ix, iy = max(-max_impulse, min(max_impulse, ix)), max(-max_impulse, min(max_impulse, iy))
+            force = max(-4.0, min(4.0,
+                -ax * self.inertia_gain_x - ay * self.inertia_gain_y
+                -vx * self.velocity_drag_x - vy * self.velocity_drag_y + ix + iy))
+            asym = max(-1.0, min(1.0, turn * self.turn_asymmetry))
+            left_target = (equilibrium_value + force / self.springs["left"].material.stiffness) * (1.0 - asym)
+            right_target = (equilibrium_value + force / self.springs["right"].material.stiffness) * (1.0 + asym)
+        else:
+            legacy_velocity = (float(body_velocity) if isinstance(body_velocity, (int, float))
+                               else legacy_body_velocity)
+            legacy_acceleration = (float(body_acceleration) if isinstance(body_acceleration, (int, float))
+                                   else legacy_body_acceleration)
+            source = (breath * self.translation_gain + angle_y * self.angle_gain
+                      + legacy_velocity * self.velocity_gain
+                      + legacy_acceleration * self.acceleration_gain
+                      if input_value is None else float(input_value))
+            target = self._interpret(source, mode)
+            asym = max(-1.0, min(1.0, angle_y * self.turn_asymmetry))
+            left_target, right_target = target * (1.0 - asym), target * (1.0 + asym)
         self.springs["left"].stepPhysicsFixed(n, target=left_target)
         self.springs["right"].stepPhysicsFixed(n, target=right_target)
         return self._snapshot()

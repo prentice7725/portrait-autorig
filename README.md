@@ -163,11 +163,44 @@ P1은 위 항목과 parity/QA gate를 충족하여 `CLOSED/FROZEN` 상태입니�
   `turn_asymmetry`(기본 0.08)로 작은 고개 회전 비대칭을 주며, 출력은
   별도 uniform 이동 없이 Composer-authored `local_soft_field`의 lobe/lock
   weights를 통해 적용됩니다. scalar `torso.value`도 하위 호환 fallback으로
-  지원합니다. strand output은 `strand_spring` secondary operation으로 hair
+  지원합니다. `velocity_gain`/`acceleration_gain`은 body turn의 변화량을
+  아주 작게 secondary target에 섞어 정착감을 만들며 기본값은 각각 0.03/0.005입니다.
+  strand output은 `strand_spring` secondary operation으로 hair
   topology에 적용됩니다. physics manifest preflight와 capture reset/warmup
   golden QA, 좌우 독립 출력 회귀를 포함해 Phase 2 계약을 고정했습니다. 현재
   profile 값은 `EXPERIMENTAL` tuning registry로 관리합니다. 프로파일 envelope는
   `node preview/check_physics_tuning.mjs`로 재현할 수 있습니다.
+
+P2.1 품질/성능 패스도 preview에 반영되어 있습니다. Auto Idle은 매 프레임
+slider DOM을 쓰지 않고 상태만 갱신하며 UI 표시는 10Hz로 제한합니다. 변형이
+없는 part는 CPU deformation과 `bufferSubData`를 재사용하고, boundary stitch는
+실제 좌표가 바뀐 participant만 dirty 처리합니다. region overlay는 켜지는
+순간에만 canvas를 지우고, Run 패널의 profiler에서 FPS/physics/deform/stitch/
+upload 시간과 active/total vertex 수를 확인할 수 있습니다. Chest Soft Morph
+는 authored lobe bounding box에만 18px local refinement를 추가하고 바깥
+topwear grid는 기존 cell을 유지합니다. 슬라이더는 hard-morph QA를 위해
+확장했으며 canonical manifest의 authored amplitude는 변경하지 않습니다.
+Fixed-step backlog는 프레임당 최대 4 tick으로 제한해 지연 프레임에서 physics
+spiral이 발생하지 않도록 합니다.
+
+P2.2 `MOTION QUALITY & RUNTIME PERFORMANCE PASS`는 P2 계약을 다시 열지 않고
+실제 motion 입력과 preview 비용을 정리합니다. 새 compiler output은
+`primary/body_sway` deformer로 deterministic pixel-space sway를 기록하고,
+fixed tick에서 위치→속도→가속도를 계산합니다. `UpperTorsoSecondaryDriver`의
+`inertial_relative_v1`는 breath/pose를 equilibrium으로, body acceleration/velocity와
+impulse를 외력으로 분리해 기존 Composer `local_soft_field`에만 공급합니다.
+좌우 spring/material scale과 settle velocity를 독립 적용하며, 모델이 없는 legacy
+manifest는 `legacy_target_v1`로 그대로 로드합니다(자동 migration 없음).
+
+Preview에는 Body sway QA 토글, hard-morph 범위, frame-time profiler가 있으며,
+dirty part만 deform/upload합니다. `check_inertial_motion.mjs`와
+`check_motion_framerate_parity.mjs`는 외력 부호·좌우 독립성과 30/60/120 FPS
+fixed-tick 결과 일치를 고정합니다. adaptive refinement는 authored lobe 영역에만
+적용하고 neckline/center/shoulder lock 및 rest reference는 보존합니다.
+QA 패널의 Body Kick X/Y, Stop Body, Breath Only, Inertia Only, Reset Motion은
+manifest를 저장하지 않는 실험용 입력이며, 최근 5초의 Body Y/Chest L/R를
+motion graph로 표시합니다. profiler에는 physics backlog drop 횟수도 표시되어
+정상 idle에서 반복적으로 증가하면 성능 문제로 판정할 수 있습니다.
 
 Physics는 manifest에서 명시적으로 opt-in합니다. 예시는 다음과 같습니다.
 
@@ -182,11 +215,23 @@ Physics는 manifest에서 명시적으로 opt-in합니다. 예시는 다음과 �
       ]
     },
     "upper_torso_driver": {
+      "model": "inertial_relative_v1",
       "input_mode": "translation",
       "profile": "soft",
       "translation_gain": 1.0,
       "angle_gain": 0.25,
-      "turn_asymmetry": 0.08
+      "turn_asymmetry": 0.08,
+      "velocity_gain": 0.03,
+      "acceleration_gain": 0.005
+    }
+  },
+  "motion": {
+    "body_sway": {
+      "enabled": true,
+      "amplitude_x_px": 1.8,
+      "amplitude_y_px": 1.2,
+      "period_x_s": 7.3,
+      "period_y_s": 5.9
     }
   }
 }
@@ -210,6 +255,8 @@ node preview/check_deformation.mjs
 node preview/check_reference_parity.mjs
 node preview/check_capture_physics.mjs
 node preview/check_physics_tuning.mjs
+node preview/check_inertial_motion.mjs
+node preview/check_motion_framerate_parity.mjs
 ```
 
 테스트 의존성에는 원본 Composer schema를 직접 검증하기 위한 `jsonschema`가 포함되어

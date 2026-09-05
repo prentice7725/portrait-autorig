@@ -47,7 +47,7 @@ const Runtime = await import(runtimeUrl);
 const { weightAt, buildMesh, deform, state, scheduleBlink, startBlink, blinkAmount, breathRamp,
         fitShells, shellDelta, SHELL_MAX_YAW, SHELL_MAX_PITCH,
         buildSoftMorphWeights,
-        expressionSwap, opacityOf, SWAP_HI, motionFromDeformers } = Runtime;
+        expressionSwap, opacityOf, SWAP_HI, motionFromDeformers, bodySwayPosition } = Runtime;
 const { applyVariantSet, applyExpressionPreset, evaluateVisibilityPhase } = Runtime;
 const { evaluateAllPhases } = Runtime;
 
@@ -712,6 +712,26 @@ console.log("\nphase relocation regression (eye_fold -> secondary)");
         state.phaseDispatch.secondary?.[0]?.id === "blink_secondary");
   state.manifest = savedManifest;
   state.frameOperations = null;
+}
+
+console.log("\nP2.2 body sway");
+{
+  const savedManifest = state.manifest, savedOperations = state.frameOperations;
+  const swayA = bodySwayPosition(1.25, { amplitude_x_px: 2, amplitude_y_px: 1,
+    period_x_s: 7, period_y_s: 6, phase_x: 0.2, phase_y: 0.4, secondary_harmonic: 0.2 });
+  const swayB = bodySwayPosition(1.25, { amplitude_x_px: 2, amplitude_y_px: 1,
+    period_x_s: 7, period_y_s: 6, phase_x: 0.2, phase_y: 0.4, secondary_harmonic: 0.2 });
+  check("body sway sampler is deterministic", swayA[0] === swayB[0] && swayA[1] === swayB[1]);
+  state.manifest = { anchors: { neck_pivot: [0, 0] }, evaluation: { phases: ["primary"] },
+    deformers: [{ id: "body_sway", kind: "body_sway", phase: "primary" }] };
+  state.frameOperations = [{ id: "body_sway", kind: "body_sway", phase: "primary" }];
+  const bodySwayPart = { spec: { name: "topwear", tag: "topwear", group: "body", depth: 0.5 },
+    mesh: { rest: new Float32Array([10, 20]), live: new Float32Array([10, 20]), weight: new Float32Array([1]) },
+    eyeSide: null, isEye: false, isLid: false, shell: null };
+  deform(bodySwayPart, 0, { ...still, bodySwayPosition: swayA });
+  check("body sway reaches upper-body geometry",
+        near(bodySwayPart.mesh.live[0], 10 + swayA[0]) && near(bodySwayPart.mesh.live[1], 20 + swayA[1]));
+  state.manifest = savedManifest; state.frameOperations = savedOperations;
 }
 
 console.log("\nP2 physics geometry bindings");

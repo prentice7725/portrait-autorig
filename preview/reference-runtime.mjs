@@ -21,6 +21,11 @@ function weightAt(part, index, y) {
   return Number(weight.top ?? 1) * (1 - t) + Number(weight.bottom ?? 0) * t;
 }
 
+function bodySwayInfluence(part) {
+  return ["head", "neck", "body", "body_remainder", "hair"].includes(
+    part.group || part.spec?.group) ? 1 : 0;
+}
+
 /** Evaluate the phase-produced operation list on one part, without DOM/WebGL. */
 export function deformReference(part, motion, operations) {
   const rest = part.mesh.rest;
@@ -39,6 +44,13 @@ export function deformReference(part, motion, operations) {
     const flush = () => { x += pendingDx * w; y += pendingDy * w; pendingDx = 0; pendingDy = 0; };
     for (const operation of list) {
       switch (operation.kind) {
+        case "body_sway": {
+          const sway = motion.bodySwayPosition || [0, 0];
+          const influence = bodySwayInfluence(part);
+          x += Number(sway[0] || 0) * influence;
+          y += Number(sway[1] || 0) * influence;
+          break;
+        }
         case "eye_fold":
           if (part.isEye && blink > 0) {
             const lid = Number(part.openTop) + Number(motion.lidRatio ?? 0.85) *

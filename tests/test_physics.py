@@ -134,3 +134,44 @@ class DeterministicPhysicsTests(unittest.TestCase):
             "unsupported strand_driver.input_mode: 'angular_velocity'",
             "unsupported upper_torso_driver.input_mode: 'angular_velocity'",
         ])
+
+    def test_torso_body_velocity_coupling_is_optional_and_small(self):
+        coupled = UpperTorsoSecondaryDriver(velocity_gain=1.0, acceleration_gain=0.0)
+        baseline = UpperTorsoSecondaryDriver(velocity_gain=0.0, acceleration_gain=0.0)
+        coupled.stepPhysicsFixed(1, body_velocity=1.0)
+        baseline.stepPhysicsFixed(1, body_velocity=1.0)
+        self.assertGreater(coupled.snapshot()["value"], baseline.snapshot()["value"])
+
+    def test_inertial_model_separates_equilibrium_and_external_force(self):
+        kick = UpperTorsoSecondaryDriver(model="inertial_relative_v1", breath_gain=0,
+                                         pose_bias_gain=0, inertia_gain_y=1, velocity_drag_y=0)
+        kick.stepPhysicsFixed(1, body_acceleration=(0, 1))
+        self.assertNotEqual(kick.snapshot()["value"], 0.0)
+        breath = UpperTorsoSecondaryDriver(model="inertial_relative_v1", breath_gain=1,
+                                           inertia_gain_y=0, velocity_drag_y=0)
+        breath.stepPhysicsFixed(1, breath=1)
+        self.assertGreater(breath.snapshot()["value"], 0.0)
+
+    def test_inertial_model_supports_independent_material_scales(self):
+        driver = UpperTorsoSecondaryDriver(model="inertial_relative_v1",
+            left_material_scale={"mass": 1.04}, right_material_scale={"mass": 0.96})
+        driver.stepPhysicsFixed(4, body_acceleration=(0, 1))
+        self.assertNotEqual(driver.springs["left"].snapshot().value,
+                            driver.springs["right"].snapshot().value)
+
+    def test_inertial_model_has_deterministic_default_lobe_material_difference(self):
+        driver = UpperTorsoSecondaryDriver(model="inertial_relative_v1",
+                                           breath_gain=0, pose_bias_gain=0,
+                                           inertia_gain_y=1, velocity_drag_y=0)
+        driver.stepPhysicsFixed(4, body_acceleration=(0, 1))
+        self.assertNotEqual(driver.springs["left"].snapshot().value,
+                            driver.springs["right"].snapshot().value)
+
+    def test_model_defaults_preserve_legacy_and_new_compile_declares_inertial(self):
+        self.assertEqual(UpperTorsoSecondaryDriver().model, "legacy_target_v1")
+        head = np.zeros((12, 12, 4), dtype=np.uint8)
+        head[2:10, 2:10, 3] = 255
+        manifest, _ = build_rig({"head": head}, frame_size=(12, 12),
+                                physics={"upper_torso_driver": {"profile": "soft"}})
+        self.assertEqual(manifest["physics"]["upper_torso_driver"]["model"],
+                         "inertial_relative_v1")
