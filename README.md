@@ -154,17 +154,19 @@ P1은 위 항목과 parity/QA gate를 충족하여 `CLOSED/FROZEN` 상태입니�
   motion-aware density(P1-D), strand topology, clip-mask contract, N-way
   boundary-stitch contract, strand partition QA, constraints-phase dispatch 및
   GPU pixel-level clip/stencil backend
-- P2 진행: deterministic fixed-step core(`resetPhysics`, `warmupPhysics`,
+- P2 `CLOSED/FROZEN`: deterministic fixed-step core(`resetPhysics`, `warmupPhysics`,
   `stepPhysicsFixed`), non-finite rollback, `StrandSpringDriver`,
   `UpperTorsoSecondaryDriver`와 `soft`/`firm_bounce`/`springy` profiles를
   추가했고, opt-in `physics` manifest block과 preview fixed-tick loop에
   연결했습니다. `translation`/`angle`/`velocity`/`acceleration`/`impulse`
-  input mode를 지원합니다. strand output은 `strand_spring` secondary
-  operation으로 hair topology에 적용되고, torso output은 별도 uniform 이동
-  없이 Composer-authored `local_soft_field`의 lobe/lock weights를 통해
-  적용됩니다. physics manifest preflight와 capture reset/warmup golden QA도
-  추가했습니다. 남은 P2는 계약을 바꾸지 않는 corpus 기반 production driver
-  tuning이며, 현재 profile 값은 `EXPERIMENTAL`로 관리합니다. 프로파일 envelope는
+  input mode를 지원합니다. torso driver는 좌우 독립 spring을 유지하고
+  `turn_asymmetry`(기본 0.08)로 작은 고개 회전 비대칭을 주며, 출력은
+  별도 uniform 이동 없이 Composer-authored `local_soft_field`의 lobe/lock
+  weights를 통해 적용됩니다. scalar `torso.value`도 하위 호환 fallback으로
+  지원합니다. strand output은 `strand_spring` secondary operation으로 hair
+  topology에 적용됩니다. physics manifest preflight와 capture reset/warmup
+  golden QA, 좌우 독립 출력 회귀를 포함해 Phase 2 계약을 고정했습니다. 현재
+  profile 값은 `EXPERIMENTAL` tuning registry로 관리합니다. 프로파일 envelope는
   `node preview/check_physics_tuning.mjs`로 재현할 수 있습니다.
 
 Physics는 manifest에서 명시적으로 opt-in합니다. 예시는 다음과 같습니다.
@@ -183,7 +185,8 @@ Physics는 manifest에서 명시적으로 opt-in합니다. 예시는 다음과 �
       "input_mode": "translation",
       "profile": "soft",
       "translation_gain": 1.0,
-      "angle_gain": 0.25
+      "angle_gain": 0.25,
+      "turn_asymmetry": 0.08
     }
   }
 }

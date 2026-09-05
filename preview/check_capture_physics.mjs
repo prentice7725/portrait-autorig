@@ -28,4 +28,9 @@ const a = first.torso, b = second.torso;
 if (a.value !== b.value || a.velocity !== b.velocity || a.degraded || b.degraded)
   throw new Error("capture reset/warmup is not deterministic");
 Runtime.state.physicsDrivers = null;
+const asymmetric = createUpperTorsoSecondaryDriver({ profile: "soft", turnAsymmetry: 0.2 });
+asymmetric.resetPhysics();
+const asymmetricFrame = asymmetric.stepPhysicsFixed(8, 1, 0.5);
+if (!(asymmetricFrame.left.value !== asymmetricFrame.right.value))
+  throw new Error("torso turn asymmetry did not produce independent lobe outputs");
 console.log("capture physics golden check passed");

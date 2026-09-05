@@ -40,9 +40,21 @@ def validate_physics_spec(spec: dict[str, Any]) -> list[str]:
     ids = [str(item.get("strand_id", item.get("id", ""))).strip() for item in strands]
     if len(ids) != len(set(ids)) or any(not item for item in ids):
         errors.append("strand_driver.strands require unique strand_id values")
+    strand_driver = spec.get("strand_driver") or {}
+    if strand_driver.get("input_mode", "translation") not in INPUT_MODES:
+        errors.append(f"unsupported strand_driver.input_mode: {strand_driver.get('input_mode')!r}")
     torso = spec.get("upper_torso_driver")
-    if torso and torso.get("profile", "soft") not in UpperTorsoSecondaryDriver.PROFILES:
-        errors.append(f"unsupported upper_torso_driver.profile: {torso.get('profile')!r}")
+    if torso:
+        if torso.get("profile", "soft") not in UpperTorsoSecondaryDriver.PROFILES:
+            errors.append(f"unsupported upper_torso_driver.profile: {torso.get('profile')!r}")
+        if torso.get("input_mode", "translation") not in INPUT_MODES:
+            errors.append(f"unsupported upper_torso_driver.input_mode: {torso.get('input_mode')!r}")
+        try:
+            asymmetry = float(torso.get("turn_asymmetry", 0.08))
+            if not math.isfinite(asymmetry) or not 0 <= asymmetry <= 1:
+                errors.append("upper_torso_driver.turn_asymmetry must be finite and in [0, 1]")
+        except (TypeError, ValueError):
+            errors.append("upper_torso_driver.turn_asymmetry must be finite and in [0, 1]")
     return errors
 
 
@@ -214,7 +226,8 @@ class UpperTorsoSecondaryDriver:
     }
 
     def __init__(self, *, profile: str = "soft", translation_gain: float = 1.0,
-                 angle_gain: float = 0.25, config: dict[str, Any] | None = None,
+                 angle_gain: float = 0.25, turn_asymmetry: float = 0.08,
+                 config: dict[str, Any] | None = None,
                  input_mode: str = "translation") -> None:
         if profile not in self.PROFILES:
             raise ValueError(f"unknown torso response profile: {profile!r}")
@@ -222,15 +235,43 @@ class UpperTorsoSecondaryDriver:
             raise ValueError(f"unknown torso input mode: {input_mode!r}")
         self.translation_gain = float(translation_gain)
         self.angle_gain = float(angle_gain)
+        self.turn_asymmetry = float(turn_asymmetry)
+        if not math.isfinite(self.turn_asymmetry) or self.turn_asymmetry < 0 or self.turn_asymmetry > 1:
+            raise ValueError("turn_asymmetry must be finite and in [0, 1]")
         self.input_mode = input_mode
         self._previous_input = 0.0
         self._previous_velocity = 0.0
-        self.spring = DeterministicSpring(material=self.PROFILES[profile], config=config)
+        self.springs = {
+            "left": DeterministicSpring(material=self.PROFILES[profile], config=config),
+            "right": DeterministicSpring(material=self.PROFILES[profile], config=config),
+        }
+        # Compatibility alias for callers that inspected the old scalar spring.
+        self.spring = self.springs["left"]
+
+    def _snapshot(self) -> PhysicsSnapshot:
+        left, right = self.springs["left"].snapshot(), self.springs["right"].snapshot()
+        return PhysicsSnapshot(
+            (left.value + right.value) * 0.5,
+            (left.velocity + right.velocity) * 0.5,
+            left.degraded or right.degraded,
+            left.diagnostic or right.diagnostic,
+        )
+
+    def snapshot(self) -> dict[str, Any]:
+        left, right = self.springs["left"].snapshot(), self.springs["right"].snapshot()
+        aggregate = self._snapshot()
+        return {"value": aggregate.value, "velocity": aggregate.velocity,
+                "degraded": aggregate.degraded, "diagnostic": aggregate.diagnostic,
+                "left": left, "right": right}
 
     def resetPhysics(self) -> PhysicsSnapshot:
         self._previous_input = 0.0
         self._previous_velocity = 0.0
-        return self.spring.resetPhysics()
+        for spring in self.springs.values():
+            spring.resetPhysics()
+        self._previous_input = 0.0
+        self._previous_velocity = 0.0
+        return self._snapshot()
 
     def _interpret(self, source: float, mode: str) -> float:
         dt = 1.0 / self.spring.update_hz
@@ -244,7 +285,16 @@ class UpperTorsoSecondaryDriver:
     def warmupPhysics(self, seconds: float | None = None, *, breath: float = 0.0,
                       angle_y: float = 0.0) -> PhysicsSnapshot:
         target = breath * self.translation_gain + angle_y * self.angle_gain
-        return self.spring.warmupPhysics(seconds, target=target)
+        self.resetPhysics()
+        asym = max(-1.0, min(1.0, angle_y * self.turn_asymmetry))
+        left_target, right_target = target * (1.0 - asym), target * (1.0 + asym)
+        duration = self.springs["left"].config["warmup_seconds"] if seconds is None else float(seconds)
+        if not math.isfinite(duration) or duration < 0:
+            raise ValueError("warmup seconds must be finite and non-negative")
+        count = math.ceil(duration * self.springs["left"].update_hz)
+        self.springs["left"].stepPhysicsFixed(count, target=left_target)
+        self.springs["right"].stepPhysicsFixed(count, target=right_target)
+        return self._snapshot()
 
     def stepPhysicsFixed(self, n: int = 1, *, breath: float = 0.0,
                          angle_y: float = 0.0, input_mode: str | None = None,
@@ -255,4 +305,8 @@ class UpperTorsoSecondaryDriver:
         source = (breath * self.translation_gain + angle_y * self.angle_gain
                   if input_value is None else float(input_value))
         target = self._interpret(source, mode)
-        return self.spring.stepPhysicsFixed(n, target=target)
+        asym = max(-1.0, min(1.0, angle_y * self.turn_asymmetry))
+        left_target, right_target = target * (1.0 - asym), target * (1.0 + asym)
+        self.springs["left"].stepPhysicsFixed(n, target=left_target)
+        self.springs["right"].stepPhysicsFixed(n, target=right_target)
+        return self._snapshot()

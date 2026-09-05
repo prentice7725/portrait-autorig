@@ -245,6 +245,14 @@ class UpperTorsoSecondaryEntriesTests(unittest.TestCase):
         self.assertIn("ParamBreath", params)
         self.assertIn("ParamAngleY", params)
 
+    def test_upper_torso_driver_declares_turn_asymmetry_contract(self):
+        spec = _authored_soft_morph_spec()
+        _, driver = manifest.upper_torso_secondary_entries(spec)
+        self.assertEqual(driver["turn_asymmetry"], 0.08)
+        spec["turn_asymmetry"] = 0.2
+        _, custom = manifest.upper_torso_secondary_entries(spec)
+        self.assertEqual(custom["turn_asymmetry"], 0.2)
+
     def test_upgrade_wires_the_entries_into_deformers_and_drivers(self):
         v01 = _v01_manifest()
         v01["motion"]["upper_torso_soft_morph"] = _authored_soft_morph_spec()

@@ -107,3 +107,30 @@ class DeterministicPhysicsTests(unittest.TestCase):
             self.assertTrue(math.isfinite(result.value))
         with self.assertRaises(ValueError):
             UpperTorsoSecondaryDriver(input_mode="angular_velocity")
+
+    def test_torso_driver_keeps_independent_lobe_springs_and_turn_coupling(self):
+        driver = UpperTorsoSecondaryDriver(turn_asymmetry=0.2)
+        driver.resetPhysics()
+        driver.stepPhysicsFixed(8, breath=1.0, angle_y=0.5)
+        left = driver.springs["left"].snapshot()
+        right = driver.springs["right"].snapshot()
+        self.assertNotEqual(left.value, right.value)
+        self.assertAlmostEqual(driver.snapshot()["value"], (left.value + right.value) * 0.5)
+        with self.assertRaises(ValueError):
+            UpperTorsoSecondaryDriver(turn_asymmetry=1.1)
+
+    def test_turn_asymmetry_is_manifest_validated(self):
+        errors = validate_physics_spec({
+            "upper_torso_driver": {"profile": "soft", "turn_asymmetry": 2},
+        })
+        self.assertEqual(errors, ["upper_torso_driver.turn_asymmetry must be finite and in [0, 1]"])
+
+    def test_manifest_validates_driver_input_modes(self):
+        errors = validate_physics_spec({
+            "strand_driver": {"input_mode": "angular_velocity"},
+            "upper_torso_driver": {"input_mode": "angular_velocity"},
+        })
+        self.assertEqual(errors, [
+            "unsupported strand_driver.input_mode: 'angular_velocity'",
+            "unsupported upper_torso_driver.input_mode: 'angular_velocity'",
+        ])
