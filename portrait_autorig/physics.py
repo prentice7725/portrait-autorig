@@ -53,7 +53,7 @@ def validate_physics_spec(spec: dict[str, Any]) -> list[str]:
     torso = spec.get("upper_torso_driver")
     if torso:
         model = torso.get("model", "legacy_target_v1")
-        if model not in {"legacy_target_v1", "inertial_relative_v1"}:
+        if model not in {"legacy_target_v1", "inertial_relative_v1", "inertial_relative_v2"}:
             errors.append(f"unsupported upper_torso_driver.model: {model!r}")
         if torso.get("profile", "soft") not in UpperTorsoSecondaryDriver.PROFILES:
             errors.append(f"unsupported upper_torso_driver.profile: {torso.get('profile')!r}")
@@ -61,7 +61,11 @@ def validate_physics_spec(spec: dict[str, Any]) -> list[str]:
             errors.append(f"unsupported upper_torso_driver.input_mode: {torso.get('input_mode')!r}")
         for field in ("translation_gain", "angle_gain", "velocity_gain", "acceleration_gain",
                       "breath_gain", "pose_bias_gain", "inertia_gain_x", "inertia_gain_y",
-                      "velocity_drag_x", "velocity_drag_y", "settle_gain"):
+                      "velocity_drag_x", "velocity_drag_y", "settle_gain",
+                      "breath_displacement_px", "pose_bias_px", "inertia_coupling_x",
+                      "inertia_coupling_y", "drag_coupling_x", "drag_coupling_y",
+                      "natural_frequency_hz", "damping_ratio", "max_displacement_px",
+                      "max_velocity_px_s", "settle_time_scale_s"):
             if field in torso:
                 try:
                     if not math.isfinite(float(torso[field])):
@@ -74,6 +78,19 @@ def validate_physics_spec(spec: dict[str, Any]) -> list[str]:
                 errors.append("upper_torso_driver.turn_asymmetry must be finite and in [0, 1]")
         except (TypeError, ValueError):
             errors.append("upper_torso_driver.turn_asymmetry must be finite and in [0, 1]")
+        for field in ("natural_frequency_hz", "max_displacement_px", "max_velocity_px_s"):
+            if field in torso:
+                try:
+                    if float(torso[field]) <= 0:
+                        errors.append(f"upper_torso_driver.{field} must be positive")
+                except (TypeError, ValueError):
+                    pass
+        if "damping_ratio" in torso:
+            try:
+                if not 0 <= float(torso["damping_ratio"]) <= 2:
+                    errors.append("upper_torso_driver.damping_ratio must be in [0, 2]")
+            except (TypeError, ValueError):
+                pass
     return errors
 
 
@@ -253,9 +270,15 @@ class UpperTorsoSecondaryDriver:
                  velocity_gain: float = 0.03, acceleration_gain: float = 0.005,
                  left_material_scale: dict[str, Any] | None = None,
                  right_material_scale: dict[str, Any] | None = None,
+                 breath_displacement_px: float = 0.8, pose_bias_px: float = 0.15,
+                 inertia_coupling_x: float = 0.08, inertia_coupling_y: float = 0.22,
+                 drag_coupling_x: float = 0.01, drag_coupling_y: float = 0.02,
+                 natural_frequency_hz: float | None = None, damping_ratio: float | None = None,
+                 max_displacement_px: float = 4.0, max_velocity_px_s: float = 24.0,
+                 settle_time_scale_s: float = 0.03,
                  config: dict[str, Any] | None = None,
                  input_mode: str = "translation") -> None:
-        if model not in {"legacy_target_v1", "inertial_relative_v1"}:
+        if model not in {"legacy_target_v1", "inertial_relative_v1", "inertial_relative_v2"}:
             raise ValueError(f"unknown torso driver model: {model!r}")
         if profile not in self.PROFILES:
             raise ValueError(f"unknown torso response profile: {profile!r}")
@@ -284,6 +307,31 @@ class UpperTorsoSecondaryDriver:
         if not math.isfinite(self.turn_asymmetry) or self.turn_asymmetry < 0 or self.turn_asymmetry > 1:
             raise ValueError("turn_asymmetry must be finite and in [0, 1]")
         self.input_mode = input_mode
+        profile_units = {"soft": (1.8, 0.75), "firm_bounce": (2.4, 0.55),
+                          "springy": (2.2, 0.35)}
+        default_frequency, default_damping = profile_units[profile]
+        self.breath_displacement_px = float(breath_displacement_px)
+        self.pose_bias_px = float(pose_bias_px)
+        self.inertia_coupling_x = float(inertia_coupling_x)
+        self.inertia_coupling_y = float(inertia_coupling_y)
+        self.drag_coupling_x = float(drag_coupling_x)
+        self.drag_coupling_y = float(drag_coupling_y)
+        self.natural_frequency_hz = float(default_frequency if natural_frequency_hz is None else natural_frequency_hz)
+        self.damping_ratio = float(default_damping if damping_ratio is None else damping_ratio)
+        self.max_displacement_px = float(max_displacement_px)
+        self.max_velocity_px_s = float(max_velocity_px_s)
+        self.settle_time_scale_s = float(settle_time_scale_s)
+        if not all(math.isfinite(value) for value in (
+                self.breath_displacement_px, self.pose_bias_px,
+                self.inertia_coupling_x, self.inertia_coupling_y,
+                self.drag_coupling_x, self.drag_coupling_y,
+                self.natural_frequency_hz, self.damping_ratio,
+                self.max_displacement_px, self.max_velocity_px_s,
+                self.settle_time_scale_s)):
+            raise ValueError("torso physical-unit coefficients must be finite")
+        if self.natural_frequency_hz <= 0 or self.damping_ratio < 0 or self.max_displacement_px <= 0 \
+                or self.max_velocity_px_s <= 0 or self.settle_time_scale_s < 0:
+            raise ValueError("torso physical-unit coefficients are out of range")
         self._previous_input = 0.0
         self._previous_velocity = 0.0
         if (self.model == "inertial_relative_v1" and not left_material_scale
@@ -292,9 +340,22 @@ class UpperTorsoSecondaryDriver:
             # retaining exact legacy behavior for old manifests.
             left_material_scale = {"stiffness": 0.98, "damping": 1.02, "mass": 1.03}
             right_material_scale = {"stiffness": 1.02, "damping": 0.98, "mass": 0.97}
+        if (self.model == "inertial_relative_v2" and not left_material_scale
+                and not right_material_scale):
+            left_material_scale = {"frequency": 0.98, "damping": 1.02}
+            right_material_scale = {"frequency": 1.02, "damping": 0.98}
 
         def material(scale: dict[str, Any] | None) -> PhysicsMaterial:
             scale = scale or {}
+            if self.model == "inertial_relative_v2":
+                frequency = float(scale.get("frequency", 1.0))
+                damping = float(scale.get("damping", 1.0))
+                if not all(math.isfinite(value) and value > 0 for value in (frequency, damping)):
+                    raise ValueError("torso v2 frequency/damping scales must be positive and finite")
+                omega = 2.0 * math.pi * self.natural_frequency_hz * frequency
+                return PhysicsMaterial(stiffness=omega * omega,
+                                       damping=2.0 * self.damping_ratio * omega * damping,
+                                       mass=1.0)
             values = {key: float(scale.get(key, 1.0)) for key in ("stiffness", "damping", "mass")}
             if not all(math.isfinite(value) and value > 0 for value in values.values()):
                 raise ValueError("torso material scales must be positive and finite")
@@ -323,7 +384,21 @@ class UpperTorsoSecondaryDriver:
         aggregate = self._snapshot()
         return {"value": aggregate.value, "velocity": aggregate.velocity,
                 "degraded": aggregate.degraded, "diagnostic": aggregate.diagnostic,
+                "model": self.model,
+                "units": "px" if self.model == "inertial_relative_v2" else "normalized",
+                "settle_time_scale_s": self.settle_time_scale_s,
                 "left": left, "right": right}
+
+    def setRelativeDisplacement(self, value: float) -> dict[str, Any]:
+        """QA-only direct placement for physical-unit response probes."""
+        if self.model != "inertial_relative_v2":
+            raise ValueError("relative pixel displacement requires inertial_relative_v2")
+        value = max(-self.max_displacement_px, min(self.max_displacement_px, float(value)))
+        for spring in self.springs.values():
+            spring.value = value
+            spring.velocity = 0.0
+            spring.last_good = spring.snapshot()
+        return self.snapshot()
 
     def resetPhysics(self) -> PhysicsSnapshot:
         self._previous_input = 0.0
@@ -345,9 +420,11 @@ class UpperTorsoSecondaryDriver:
 
     def warmupPhysics(self, seconds: float | None = None, *, breath: float = 0.0,
                       angle_y: float = 0.0) -> PhysicsSnapshot:
-        target = (breath * self.breath_gain + angle_y * self.pose_bias_gain
-                  if self.model == "inertial_relative_v1"
-                  else breath * self.translation_gain + angle_y * self.angle_gain)
+        target = (breath * self.breath_displacement_px + angle_y * self.pose_bias_px
+                  if self.model == "inertial_relative_v2" else
+                  breath * self.breath_gain + angle_y * self.pose_bias_gain
+                  if self.model == "inertial_relative_v1" else
+                  breath * self.translation_gain + angle_y * self.angle_gain)
         self.resetPhysics()
         asym = max(-1.0, min(1.0, angle_y * self.turn_asymmetry))
         left_target, right_target = target * (1.0 - asym), target * (1.0 + asym)
@@ -373,9 +450,12 @@ class UpperTorsoSecondaryDriver:
         if mode not in INPUT_MODES:
             raise ValueError(f"unknown torso input mode: {mode!r}")
         turn = angle_y if turn_y is None else float(turn_y)
-        if self.model == "inertial_relative_v1":
-            equilibrium_value = (breath * self.breath_gain + turn * self.pose_bias_gain
-                                  if equilibrium is None else float(equilibrium))
+        if self.model in {"inertial_relative_v1", "inertial_relative_v2"}:
+            is_v2 = self.model == "inertial_relative_v2"
+            equilibrium_value = (float(equilibrium) if equilibrium is not None else
+                                  (breath * self.breath_displacement_px + turn * self.pose_bias_px
+                                   if is_v2 else breath * self.breath_gain + turn * self.pose_bias_gain))
+            asym = max(-1.0, min(1.0, turn * self.turn_asymmetry))
             def pair(value: tuple[float, float] | float) -> tuple[float, float]:
                 if isinstance(value, (int, float)):
                     return 0.0, float(value)
@@ -387,12 +467,20 @@ class UpperTorsoSecondaryDriver:
             max_impulse = float((self.springs["left"].config or {}).get("max_impulse", 8.0))
             ax, ay = max(-max_acc, min(max_acc, ax)), max(-max_acc, min(max_acc, ay))
             ix, iy = max(-max_impulse, min(max_impulse, ix)), max(-max_impulse, min(max_impulse, iy))
-            force = max(-4.0, min(4.0,
-                -ax * self.inertia_gain_x - ay * self.inertia_gain_y
-                -vx * self.velocity_drag_x - vy * self.velocity_drag_y + ix + iy))
-            asym = max(-1.0, min(1.0, turn * self.turn_asymmetry))
-            left_target = (equilibrium_value + force / self.springs["left"].material.stiffness) * (1.0 - asym)
-            right_target = (equilibrium_value + force / self.springs["right"].material.stiffness) * (1.0 + asym)
+            if is_v2:
+                omega = 2.0 * math.pi * self.natural_frequency_hz
+                external = (-ax * self.inertia_coupling_x - ay * self.inertia_coupling_y
+                            -vx * self.drag_coupling_x - vy * self.drag_coupling_y + ix + iy)
+                force = max(-self.max_velocity_px_s * omega,
+                            min(self.max_velocity_px_s * omega, external))
+                left_target = (equilibrium_value + force / max(1e-6, self.springs["left"].material.stiffness)) * (1.0 - asym)
+                right_target = (equilibrium_value + force / max(1e-6, self.springs["right"].material.stiffness)) * (1.0 + asym)
+            else:
+                force = max(-4.0, min(4.0,
+                    -ax * self.inertia_gain_x - ay * self.inertia_gain_y
+                    -vx * self.velocity_drag_x - vy * self.velocity_drag_y + ix + iy))
+                left_target = (equilibrium_value + force / self.springs["left"].material.stiffness) * (1.0 - asym)
+                right_target = (equilibrium_value + force / self.springs["right"].material.stiffness) * (1.0 + asym)
         else:
             legacy_velocity = (float(body_velocity) if isinstance(body_velocity, (int, float))
                                else legacy_body_velocity)
@@ -407,4 +495,15 @@ class UpperTorsoSecondaryDriver:
             left_target, right_target = target * (1.0 - asym), target * (1.0 + asym)
         self.springs["left"].stepPhysicsFixed(n, target=left_target)
         self.springs["right"].stepPhysicsFixed(n, target=right_target)
+        if self.model == "inertial_relative_v2":
+            for spring in self.springs.values():
+                if abs(spring.value) > self.max_displacement_px:
+                    spring.value = max(-self.max_displacement_px, min(self.max_displacement_px, spring.value))
+                    spring.velocity = max(-self.max_velocity_px_s, min(self.max_velocity_px_s, spring.velocity))
+                    spring.degraded = True
+                    spring.diagnostic = "chest_displacement_clamped_px"
+                if abs(spring.velocity) > self.max_velocity_px_s:
+                    spring.velocity = max(-self.max_velocity_px_s, min(self.max_velocity_px_s, spring.velocity))
+                    spring.degraded = True
+                    spring.diagnostic = "chest_velocity_clamped_px_s"
         return self._snapshot()

@@ -187,8 +187,10 @@ P2.2 `MOTION QUALITY & RUNTIME PERFORMANCE PASS`는 P2 계약을 다시 열지 �
 실제 motion 입력과 preview 비용을 정리합니다. 새 compiler output은
 `primary/body_sway` deformer로 deterministic pixel-space sway를 기록하고,
 fixed tick에서 위치→속도→가속도를 계산합니다. `UpperTorsoSecondaryDriver`의
-`inertial_relative_v1`는 breath/pose를 equilibrium으로, body acceleration/velocity와
-impulse를 외력으로 분리해 기존 Composer `local_soft_field`에만 공급합니다.
+P2.2의 `inertial_relative_v1`는 기존 manifest 호환 모델로 보존하고, 새 compiler
+output은 `inertial_relative_v2`를 사용합니다. v2는 breath/pose equilibrium과
+body acceleration/velocity/impulse 외력을 px 단위로 분리해 기존 Composer
+`local_soft_field`에만 공급합니다.
 좌우 spring/material scale과 settle velocity를 독립 적용하며, 모델이 없는 legacy
 manifest는 `legacy_target_v1`로 그대로 로드합니다(자동 migration 없음).
 
@@ -197,9 +199,10 @@ dirty part만 deform/upload합니다. `check_inertial_motion.mjs`와
 `check_motion_framerate_parity.mjs`는 외력 부호·좌우 독립성과 30/60/120 FPS
 fixed-tick 결과 일치를 고정합니다. adaptive refinement는 authored lobe 영역에만
 적용하고 neckline/center/shoulder lock 및 rest reference는 보존합니다.
-QA 패널의 Body Kick X/Y, Stop Body, Breath Only, Inertia Only, Reset Motion은
-manifest를 저장하지 않는 실험용 입력이며, 최근 5초의 Body Y/Chest L/R를
-motion graph로 표시합니다. profiler에는 physics backlog drop 횟수도 표시되어
+QA 패널의 Body Kick X/Y는 root/body pulse를 발생시키고, Chest Impulse Y는
+직접 chest 외력을 별도로 시험합니다. Stop Body, Breath Only, Inertia Only,
+Reset Motion 역시 manifest를 저장하지 않는 실험용 입력이며, 최근 5초의
+Body Y/Chest L/R를 motion graph로 표시합니다. profiler에는 physics backlog drop 횟수도 표시되어
 정상 idle에서 반복적으로 증가하면 성능 문제로 판정할 수 있습니다.
 
 Physics는 manifest에서 명시적으로 opt-in합니다. 예시는 다음과 같습니다.
@@ -215,14 +218,18 @@ Physics는 manifest에서 명시적으로 opt-in합니다. 예시는 다음과 �
       ]
     },
     "upper_torso_driver": {
-      "model": "inertial_relative_v1",
+      "model": "inertial_relative_v2",
       "input_mode": "translation",
       "profile": "soft",
-      "translation_gain": 1.0,
-      "angle_gain": 0.25,
-      "turn_asymmetry": 0.08,
-      "velocity_gain": 0.03,
-      "acceleration_gain": 0.005
+      "breath_displacement_px": 0.8,
+      "pose_bias_px": 0.15,
+      "inertia_coupling_y": 0.22,
+      "drag_coupling_y": 0.02,
+      "natural_frequency_hz": 1.8,
+      "damping_ratio": 0.75,
+      "max_displacement_px": 4.0,
+      "max_velocity_px_s": 24.0,
+      "settle_time_scale_s": 0.03
     }
   },
   "motion": {
@@ -256,7 +263,10 @@ node preview/check_reference_parity.mjs
 node preview/check_capture_physics.mjs
 node preview/check_physics_tuning.mjs
 node preview/check_inertial_motion.mjs
+node preview/check_physical_response.mjs
+node preview/check_body_kick_pipeline.mjs
 node preview/check_motion_framerate_parity.mjs
+node preview/check_chest_geometry_parity.mjs
 ```
 
 테스트 의존성에는 원본 Composer schema를 직접 검증하기 위한 `jsonschema`가 포함되어

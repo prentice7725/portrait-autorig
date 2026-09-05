@@ -1442,7 +1442,24 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         if isinstance(torso_driver, dict):
             # New compiler output opts into the separated inertial model;
             # manifests loaded without this field remain legacy at runtime.
-            torso_driver.setdefault("model", "inertial_relative_v1")
+            torso_driver.setdefault("model", "inertial_relative_v2")
+            if torso_driver["model"] == "inertial_relative_v2":
+                torso_driver.setdefault("breath_displacement_px", 0.8)
+                torso_driver.setdefault("pose_bias_px", 0.15)
+                torso_driver.setdefault("inertia_coupling_x", 0.08)
+                torso_driver.setdefault("inertia_coupling_y", 0.22)
+                torso_driver.setdefault("drag_coupling_x", 0.01)
+                torso_driver.setdefault("drag_coupling_y", 0.02)
+                profile_seeds = {"soft": (1.8, 0.75), "firm_bounce": (2.4, 0.55),
+                                 "springy": (2.2, 0.35)}
+                frequency, damping = profile_seeds.get(torso_driver.get("profile", "soft"), (1.8, 0.75))
+                torso_driver.setdefault("natural_frequency_hz", frequency)
+                torso_driver.setdefault("damping_ratio", damping)
+                torso_driver.setdefault("max_displacement_px", 4.0)
+                torso_driver.setdefault("max_velocity_px_s", 24.0)
+                torso_driver.setdefault("settle_time_scale_s", 0.03)
+                torso_driver.setdefault("left_material_scale", {"frequency": 0.98, "damping": 1.02})
+                torso_driver.setdefault("right_material_scale", {"frequency": 1.02, "damping": 0.98})
         manifest["physics"] = physics_payload
     if provenance is not None:
         # Provenance is a Composer-owned opaque payload.  AutoRig forwards it

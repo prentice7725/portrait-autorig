@@ -22,7 +22,12 @@ must not silently become defaults.
 | `body_sway` synthesis | ACTIVE | deterministic mixed-frequency pixel-space waveform; no per-frame randomness | primary deformer + fixed-tick motion parity |
 | body_sway amplitudes | EXPERIMENTAL | compiler QA seeds 1.8px/1.2px | motion graph and rest-fidelity checks |
 | body_sway periods | EXPERIMENTAL | compiler QA seeds 7.3s/5.9s; keep 5.5–9.0s | 30/60/120 FPS parity and idle loop review |
-| `upper_torso_driver.model` | ACTIVE | new compiler output uses `inertial_relative_v1`; manifests without a model remain `legacy_target_v1` | explicit model field and legacy-load regression |
+| `upper_torso_driver.model` | ACTIVE | new compiler output uses `inertial_relative_v2`; P2.2 manifests remain `inertial_relative_v1`, missing model remains `legacy_target_v1` | explicit model field and legacy-load regression |
+| physical spring state in px | ACTIVE | v2 q/v are px and px/s; no hidden stiffness-to-morph scaling | 1/2/4px response probes |
+| `inertial_relative_v2` semantics | ACTIVE | frequency/damping-ratio spring with explicit pixel equilibrium and external acceleration | unit validation and runtime parity |
+| natural frequency / damping defaults | EXPERIMENTAL | profile seeds soft 1.8Hz/.75, firm 2.4Hz/.55, springy 2.2Hz/.35 | calibration harness and settle envelope |
+| geometry distribution gains | EXPERIMENTAL | physical q maps via horizontal .45 / vertical 1.0 defaults | chest geometry parity and lock probes |
+| 1/2/4px QA calibration | ACTIVE QA CONTRACT | measured primary probe must remain within ±15% | `check_physical_response.mjs` |
 | inertia gains / velocity drag | EXPERIMENTAL | explicit X/Y coefficients; acceleration is external force, never equilibrium | inertial kick and breath-only regressions |
 | L/R material asymmetry | EXPERIMENTAL | tiny deterministic stiffness/damping/mass scales when omitted by a new inertial manifest | independent lobe output and bounded displacement clamps |
 | settle_gain | EXPERIMENTAL | lower-lobe vertical response uses spring velocity × settle gain | lock-preservation and bounded settle tests |

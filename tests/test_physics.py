@@ -167,11 +167,44 @@ class DeterministicPhysicsTests(unittest.TestCase):
         self.assertNotEqual(driver.springs["left"].snapshot().value,
                             driver.springs["right"].snapshot().value)
 
-    def test_model_defaults_preserve_legacy_and_new_compile_declares_inertial(self):
+    def test_model_defaults_preserve_legacy_and_new_compile_declares_v2(self):
         self.assertEqual(UpperTorsoSecondaryDriver().model, "legacy_target_v1")
         head = np.zeros((12, 12, 4), dtype=np.uint8)
         head[2:10, 2:10, 3] = 255
         manifest, _ = build_rig({"head": head}, frame_size=(12, 12),
                                 physics={"upper_torso_driver": {"profile": "soft"}})
         self.assertEqual(manifest["physics"]["upper_torso_driver"]["model"],
-                         "inertial_relative_v1")
+                         "inertial_relative_v2")
+
+    def test_v2_state_and_breath_use_pixel_units(self):
+        driver = UpperTorsoSecondaryDriver(model="inertial_relative_v2",
+                                           breath_displacement_px=1.0,
+                                           natural_frequency_hz=2.0,
+                                           damping_ratio=0.7)
+        driver.warmupPhysics(1.0, breath=1.0)
+        self.assertAlmostEqual(driver.snapshot()["value"], 1.0, delta=0.08)
+
+    def test_v2_direct_qa_displacement_is_pixels(self):
+        driver = UpperTorsoSecondaryDriver(model="inertial_relative_v2")
+        snapshot = driver.setRelativeDisplacement(4.0)
+        self.assertAlmostEqual(snapshot["left"].value, 4.0)
+        self.assertAlmostEqual(snapshot["right"].value, 4.0)
+
+    def test_v2_acceleration_is_external_and_legacy_is_unchanged(self):
+        driver = UpperTorsoSecondaryDriver(model="inertial_relative_v2",
+                                           breath_displacement_px=0,
+                                           pose_bias_px=0, inertia_coupling_y=0.22)
+        driver.stepPhysicsFixed(1, body_acceleration=(0, 10))
+        self.assertLess(driver.snapshot()["value"], 0)
+        self.assertEqual(UpperTorsoSecondaryDriver().model, "legacy_target_v1")
+
+    def test_v2_clamps_displacement_in_pixel_units_and_keeps_lobes_independent(self):
+        driver = UpperTorsoSecondaryDriver(model="inertial_relative_v2",
+                                           max_displacement_px=2.0,
+                                           left_material_scale={"frequency": 0.98},
+                                           right_material_scale={"frequency": 1.02})
+        snapshot = driver.setRelativeDisplacement(8.0)
+        self.assertEqual(snapshot["left"].value, 2.0)
+        driver.stepPhysicsFixed(12, body_acceleration=(0, 40))
+        self.assertNotEqual(driver.springs["left"].snapshot().value,
+                            driver.springs["right"].snapshot().value)
