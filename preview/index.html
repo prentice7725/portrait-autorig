@@ -60,6 +60,8 @@
   .hint { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
   .meta { color: var(--muted); font-size: 12px; }
   .warn { color: #ffb454; }
+  #physicsWarning { border: 1px solid #9a5a2b; background: rgba(154,90,43,.18);
+                    border-radius: 6px; padding: 8px; margin-top: 8px; }
   #err { color: #ff8080; white-space: pre-wrap; }
 </style>
 </head>
@@ -84,6 +86,7 @@
 <div id="panel">
   <h2>Run</h2>
   <div class="meta" id="runmeta">no run loaded</div>
+  <div id="physicsWarning" class="warn" hidden></div>
   <div class="meta" id="profiler">profiler waiting</div>
 
   <h2>Idle</h2>

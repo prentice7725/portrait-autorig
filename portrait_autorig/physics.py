@@ -14,7 +14,8 @@ from typing import Any
 
 __all__ = ["INPUT_MODES", "PhysicsMaterial", "PhysicsSnapshot", "DeterministicSpring",
            "StrandSpringDriver", "UpperTorsoSecondaryDriver",
-           "DEFAULT_PHYSICS_CONFIG", "validate_physics_spec"]
+           "DEFAULT_PHYSICS_CONFIG", "default_p2_3_physics_spec",
+           "physics_spec_from_rig_intent", "validate_physics_spec"]
 
 DEFAULT_PHYSICS_CONFIG: dict[str, Any] = {
     "update_hz": 60,
@@ -23,6 +24,69 @@ DEFAULT_PHYSICS_CONFIG: dict[str, Any] = {
     "warmup_seconds": 0.25,
 }
 INPUT_MODES = frozenset({"translation", "angle", "velocity", "acceleration", "impulse"})
+
+P2_3_PROFILE_SEEDS: dict[str, tuple[float, float]] = {
+    "soft": (1.8, 0.75),
+    "firm_bounce": (2.4, 0.55),
+    "springy": (2.2, 0.35),
+}
+
+
+def default_p2_3_physics_spec(response_profile: str = "soft") -> dict[str, Any]:
+    """Return the canonical physics opt-in generated from Composer intent.
+
+    Assembly authoring is the opt-in boundary: once a torso secondary region
+    is enabled, the workflow must not silently fall back to a legacy manifest.
+    The numbers here are compiler-owned P2.3 seeds; the region still owns the
+    qualitative ``response_profile``.
+    """
+    profile = response_profile if response_profile in P2_3_PROFILE_SEEDS else "soft"
+    frequency, damping = P2_3_PROFILE_SEEDS[profile]
+    return {
+        "config": {"update_hz": 60},
+        "upper_torso_driver": {
+            "enabled": True,
+            "model": "inertial_relative_v2",
+            "input_mode": "translation",
+            "profile": profile,
+            "breath_displacement_px": 0.8,
+            "pose_bias_px": 0.15,
+            "inertia_coupling_x": 0.08,
+            "inertia_coupling_y": 0.22,
+            "drag_coupling_x": 0.01,
+            "drag_coupling_y": 0.02,
+            "natural_frequency_hz": frequency,
+            "damping_ratio": damping,
+            "max_displacement_px": 4.0,
+            "max_velocity_px_s": 24.0,
+            "settle_time_scale_s": 0.03,
+            "turn_asymmetry": 0.08,
+        },
+    }
+
+
+def physics_spec_from_rig_intent(rig_intent: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Translate an enabled Composer torso region into the P2.3 spec.
+
+    This deliberately consumes only the Assembly file contract; it does not
+    import Composer or seethrough code.  ``None`` means no authored torso
+    secondary region (or an explicitly disabled one).
+    """
+    if not isinstance(rig_intent, dict):
+        return None
+    aliases = {"topwear", "topwear_with_arms", "topwear_with_handwear"}
+    for region in (rig_intent.get("regions") or {}).values():
+        if not isinstance(region, dict):
+            continue
+        target = str(region.get("target", ""))
+        if target.endswith("__instance"):
+            target = target[:-len("__instance")]
+        if target not in aliases:
+            continue
+        if region.get("enabled", True) is False:
+            return None
+        return default_p2_3_physics_spec(str(region.get("response_profile", "soft")))
+    return None
 
 
 def validate_physics_spec(spec: dict[str, Any]) -> list[str]:

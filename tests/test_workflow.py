@@ -43,3 +43,10 @@ def test_discover_portrait_bundles_can_recurse(tmp_path):
 
     found = discover_portrait_bundles(tmp_path, recursive=True)
     assert [path.name for path in found] == ["A001.portrait", "A003.portrait"]
+
+
+def test_discover_bundle_uses_manifest_format_for_arbitrary_directory_names(tmp_path):
+    bundle = tmp_path / "full_body_character"
+    bundle.mkdir()
+    (bundle / "manifest.json").write_text('{"format":"portrait-assembly"}', encoding="utf-8")
+    assert discover_portrait_bundles(tmp_path) == [bundle]

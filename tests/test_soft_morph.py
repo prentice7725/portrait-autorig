@@ -512,6 +512,15 @@ class RigPreflightAuthoredRegionTests(unittest.TestCase):
         self.assertEqual(preflight["checks"]["upper_torso_soft_morph"]["status"], "DISABLED")
         self.assertIn("no_region", preflight["checks"]["upper_torso_soft_morph"]["reasons"])
 
+    def test_topwear_alias_is_a_valid_torso_surface(self):
+        layers = self._layers()
+        layers["topwear_with_handwear"] = layers.pop("topwear")
+        preflight = rig_preflight(layers)
+        self.assertTrue(preflight["checks"]["topwear"]["available"])
+        self.assertEqual(preflight["checks"]["topwear"]["source_tag"], "topwear_with_handwear")
+        self.assertNotIn("missing_topwear", {warning["code"] for warning in preflight["warnings"]})
+        self.assertEqual(preflight["checks"]["upper_torso_soft_morph"]["status"], "READY")
+
 
 class BuildRigAuthoredRegionTests(unittest.TestCase):
     def _layers(self):

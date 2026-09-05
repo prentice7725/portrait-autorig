@@ -21,6 +21,8 @@
 
 import { createStrandSpringDriver, createUpperTorsoSecondaryDriver } from "./physics.mjs";
 
+export const PREVIEW_RUNTIME_VERSION = "P2.3";
+
 // Parallax strength as a fraction of the canvas, so the same manifest reads
 // the same at any render resolution. Near layers travel further than far ones,
 // which is the entire illusion; these are starting values to be tuned against
@@ -1429,12 +1431,24 @@ export function renderPanel() {
   const anchors = Object.keys(m.anchors || {});
   const verts = state.parts.reduce((n, p) => n + p.mesh.rest.length / 2, 0);
   document.getElementById("runmeta").innerHTML =
+    `<div>AutoRig Preview <b>${PREVIEW_RUNTIME_VERSION}</b></div>` +
     `<div>run <b>${m.source.run_id || "(unnamed)"}</b> &middot; ${m.source.tag_version || "?"}</div>` +
+    `<div>physics: <b>${m.physics?.upper_torso_driver?.model || "legacy/none"}</b></div>` +
     `<div>depth source: <b>${m.source.depth}</b></div>` +
     `<div>${m.parts.length} parts &middot; ${verts} vertices</div>` +
     `<div>anchors: ${anchors.join(", ") || "<span class='warn'>none</span>"}</div>` +
     (anchors.includes("neck_pivot") ? "" :
       "<div class='warn'>no neck_pivot: tilt disabled</div>");
+  const physicsWarning = document.getElementById("physicsWarning");
+  if (physicsWarning) {
+    const torsoPhysics = m.physics?.upper_torso_driver;
+    const active = torsoPhysics && torsoPhysics.enabled !== false
+      && torsoPhysics.model === "inertial_relative_v2";
+    physicsWarning.hidden = !!active;
+    physicsWarning.textContent = active ? ""
+      : "⚠ P2.3 PHYSICS NOT ACTIVE — This Rig Bundle was built without "
+        + "physics.upper_torso_driver. Rebuild the Rig Bundle.";
+  }
 
   const pack = state.parts.filter((p) => p.expression);
   document.getElementById("packmeta").innerHTML = pack.length
