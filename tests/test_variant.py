@@ -37,6 +37,30 @@ def base_layers():
 
 
 class VariantBindingTests(unittest.TestCase):
+    def test_authored_torso_region_auto_wires_p2_3_physics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "A002.assembly"
+            b = AssemblyBundleBuilder(root)
+            b.add_instance("head_i", semantic="head", box=(12, 2, 28, 20))
+            b.add_instance("face_i", semantic="face", box=(14, 6, 26, 18))
+            b.add_instance("neck_i", semantic="neck", box=(18, 18, 22, 28))
+            b.add_instance("topwear_i", semantic="topwear", box=(8, 28, 32, 39))
+            b.rig_intent["regions"]["upper_torso_secondary"] = {
+                "target": "topwear_with_handwear", "enabled": True,
+                "author_strength": 0.9, "response_profile": "springy",
+                "geometry": {
+                    "left": {"center": [0.32, 0.5], "radius": [0.22, 0.2]},
+                    "right": {"center": [0.68, 0.5], "radius": [0.22, 0.2]},
+                }, "locks": {"center": 0.1, "neckline": 0.16},
+            }
+            b.write()
+            manifest_path = compile_assembly_bundle(str(root), str(Path(tmp) / "A002.rig"))
+            manifest = __import__("json").loads(Path(manifest_path).read_text(encoding="utf-8"))
+        driver = manifest["physics"]["upper_torso_driver"]
+        self.assertEqual(driver["model"], "inertial_relative_v2")
+        self.assertEqual(driver["profile"], "springy")
+        self.assertEqual(manifest["physics"]["config"]["update_hz"], 60)
+
     def test_assembly_compile_keeps_all_variant_images_and_reference_fidelity(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "A001.assembly"

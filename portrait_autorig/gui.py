@@ -49,6 +49,13 @@ class _PreviewRequestHandler(SimpleHTTPRequestHandler):
     def log_message(self, _format: str, *_args) -> None:
         return
 
+    def end_headers(self) -> None:
+        # The viewer must always execute the checked-out preview/runtime pair,
+        # never a stale browser-cached module from an earlier build.
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        super().end_headers()
+
 
 def _start_preview_server(run_root: Path) -> tuple[ThreadingHTTPServer, str]:
     preview_root = Path(__file__).resolve().parent.parent / "preview"

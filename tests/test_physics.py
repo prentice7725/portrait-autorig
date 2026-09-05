@@ -7,13 +7,34 @@ import numpy as np
 
 from portrait_autorig.physics import (
     DeterministicSpring, PhysicsMaterial, StrandSpringDriver,
-    UpperTorsoSecondaryDriver, validate_physics_spec,
+    UpperTorsoSecondaryDriver, default_p2_3_physics_spec,
+    physics_spec_from_rig_intent, validate_physics_spec,
 )
 from portrait_autorig.rig import build_rig
 from portrait_autorig.manifest import physics_deformer_entries
 
 
 class DeterministicPhysicsTests(unittest.TestCase):
+    def test_composer_torso_intent_generates_p2_3_physics_spec(self):
+        spec = physics_spec_from_rig_intent({"regions": {
+            "chest": {"target": "topwear_with_handwear", "enabled": True,
+                      "response_profile": "springy"},
+        }})
+        self.assertEqual(spec["config"]["update_hz"], 60)
+        driver = spec["upper_torso_driver"]
+        self.assertTrue(driver["enabled"])
+        self.assertEqual(driver["model"], "inertial_relative_v2")
+        self.assertEqual(driver["profile"], "springy")
+        self.assertEqual(driver["natural_frequency_hz"], 2.2)
+        self.assertEqual(driver["damping_ratio"], 0.35)
+
+    def test_disabled_or_absent_composer_torso_intent_does_not_opt_in(self):
+        self.assertIsNone(physics_spec_from_rig_intent(None))
+        self.assertIsNone(physics_spec_from_rig_intent({"regions": {
+            "chest": {"target": "topwear", "enabled": False},
+        }}))
+        self.assertEqual(default_p2_3_physics_spec("unknown")["upper_torso_driver"]["profile"], "soft")
+
     def test_fixed_steps_are_reproducible(self):
         kwargs = {"rest": 0.0, "material": PhysicsMaterial(stiffness=20, damping=5)}
         a = DeterministicSpring(**kwargs)

@@ -8,6 +8,7 @@ from typing import Callable
 from .assembly import load_assembly_bundle
 from .bundle import load_portrait_bundle
 from .compiler import compile_assembly_bundle, compile_bundle, compile_legacy_run
+from .physics import physics_spec_from_rig_intent
 
 
 @dataclass(frozen=True)
@@ -35,8 +36,27 @@ def default_batch_output_path(input_dir: Path) -> Path:
 
 
 def discover_portrait_bundles(input_dir: Path, *, recursive: bool = False) -> list[Path]:
-    pattern = "**/*.portrait" if recursive else "*.portrait"
-    return sorted(path for path in input_dir.glob(pattern) if path.is_dir())
+    # Discovery follows the Bundle contract, not a directory-name convention.
+    # Keep the historical suffixes for empty test/workflow placeholders, while
+    # also accepting arbitrary directories whose manifest declares a supported
+    # Portrait or Composer Assembly format.
+    pattern = "**/*" if recursive else "*"
+    found: list[Path] = []
+    for path in input_dir.glob(pattern):
+        if not path.is_dir():
+            continue
+        if path.name.endswith((".portrait", ".assembly")):
+            found.append(path)
+            continue
+        manifest_path = path / "manifest.json"
+        try:
+            with manifest_path.open("r", encoding="utf-8") as handle:
+                format_name = json.load(handle).get("format")
+        except (OSError, json.JSONDecodeError, AttributeError):
+            continue
+        if format_name in {"portrait-bundle", "portrait-assembly"}:
+            found.append(path)
+    return sorted(found)
 
 
 def bundle_kind(input_path: Path) -> str:
@@ -75,6 +95,14 @@ def _manifest_status(manifest_path: Path) -> tuple[str, str]:
     return str(preflight), str(fidelity)
 
 
+def _physics_for_bundle(input_path: Path, kind: str) -> dict | None:
+    """Resolve Composer's torso opt-in at the workflow boundary."""
+    if kind != "assembly":
+        return None
+    asset = load_assembly_bundle(input_path)
+    return physics_spec_from_rig_intent(asset.rig_intent)
+
+
 def compile_portrait(
     input_path: Path,
     output_path: Path | None = None,
@@ -85,9 +113,15 @@ def compile_portrait(
     input_path = input_path.expanduser().resolve()
     output_path = (output_path or default_output_path(input_path)).expanduser().resolve()
     gradient = ("back hair",) if soften_back_hair else ()
-    compile_fn = compile_legacy_run if legacy else compile_bundle
+    if legacy:
+        compile_fn = compile_legacy_run
+        physics = None
+    else:
+        kind = bundle_kind(input_path)
+        compile_fn = compile_assembly_bundle if kind == "assembly" else compile_bundle
+        physics = _physics_for_bundle(input_path, kind)
     manifest = Path(
-        compile_fn(str(input_path), str(output_path), gradient_tags=gradient)
+        compile_fn(str(input_path), str(output_path), gradient_tags=gradient, physics=physics)
     ).resolve()
     preflight, fidelity = _manifest_status(manifest)
     return BuildResult(
@@ -115,8 +149,9 @@ def compile_bundle_input(
     kind = bundle_kind(input_path)
     gradient = ("back hair",) if soften_back_hair else ()
     compile_fn = compile_assembly_bundle if kind == "assembly" else compile_bundle
+    physics = _physics_for_bundle(input_path, kind)
     manifest = Path(
-        compile_fn(str(input_path), str(output_path), gradient_tags=gradient)
+        compile_fn(str(input_path), str(output_path), gradient_tags=gradient, physics=physics)
     ).resolve()
     preflight, fidelity = _manifest_status(manifest)
     return BuildResult(

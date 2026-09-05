@@ -217,6 +217,19 @@ topwear vertex 경로를 실행하고, body-stop 시점의 0.15px 이상 follow-
 따라서 synthetic one-vertex probe나 driver-only framerate 검사는 계약을 충족하지
 않는 것으로 취급합니다.
 
+Composer Assembly의 `rig_intent.regions[*]`에서 `topwear`/`topwear_with_arms`/
+`topwear_with_handwear` 대상의 `enabled: true` torso region을 authoring하면,
+GUI workflow와 direct Assembly compiler가 자동으로 `physics.upper_torso_driver`
+를 생성합니다. `response_profile`은 `soft`/`firm_bounce`/`springy` preset으로
+변환되고 새 manifest에는 `model: inertial_relative_v2`가 명시됩니다. 별도 GUI
+checkbox나 seethrough import는 필요하지 않습니다. Composer region이 없거나
+명시적으로 disabled이면 physics opt-in도 생성하지 않습니다.
+
+Preview는 `AutoRig Preview P2.3`와 physics model을 Run 패널에 표시하며, physics
+block이 없는 구형 Rig Bundle은 `P2.3 PHYSICS NOT ACTIVE` 경고를 냅니다. GUI가
+여는 preview server는 no-cache headers를 사용해 현재 checkout의
+`preview/index.html`/`runtime.mjs`/`physics.mjs` 조합을 실행합니다.
+
 Physics는 manifest에서 명시적으로 opt-in합니다. 예시는 다음과 같습니다.
 
 ```json

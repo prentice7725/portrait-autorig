@@ -638,8 +638,15 @@ def rig_preflight(layer_dict: dict[str, np.ndarray], *,
         tag: {"required": True, "available": tag in available}
         for tag in ("head", "face", "mouth")
     }
-    for tag in ("neck", "topwear", "irides", "eyelash"):
+    for tag in ("neck", "irides", "eyelash"):
         checks[tag] = {"required": True, "available": tag in available}
+    torso_aliases = ("topwear", "topwear_with_arms", "topwear_with_handwear")
+    torso_tag = next((tag for tag in torso_aliases if tag in available), None)
+    checks["topwear"] = {
+        "required": True,
+        "available": torso_tag is not None,
+        "source_tag": torso_tag,
+    }
     warnings: list[dict[str, str]] = []
     missing_hard = [tag for tag in ("head", "face") if tag not in available]
     if missing_hard:
@@ -769,18 +776,21 @@ def rig_preflight(layer_dict: dict[str, np.ndarray], *,
         warnings.append({"code": "eyewhite_split_unavailable",
                          "message": "native eyewhite could not be split bilaterally"})
 
-    for tag, capability in (("neck", "neck continuity"), ("topwear", "body motion"),
-                            ("irides", "eye anchors"), ("eyelash", "blink")):
+    for tag, capability in (("neck", "neck continuity"), ("irides", "eye anchors"),
+                            ("eyelash", "blink")):
         if tag not in available:
             warnings.append({"code": f"missing_{tag.replace(' ', '_')}",
                              "message": f"{capability} is unavailable"})
+    if torso_tag is None:
+        warnings.append({"code": "missing_topwear",
+                         "message": "body motion is unavailable"})
     if checks["anchors"]["missing"]:
         warnings.append({"code": "missing_anchors",
                          "message": "anchors unavailable: "
                                     + ", ".join(checks["anchors"]["missing"])})
 
     fully_available = ("mouth" in available and "neck" in available
-                       and "topwear" in available and "eyelash" in available
+                       and torso_tag is not None and "eyelash" in available
                        and bilateral_anchors
                        and (bilateral_eyewhite or derived))
     status = ("READY_WITH_DERIVATION" if fully_available and derived

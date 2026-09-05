@@ -15,6 +15,7 @@ from .assembly import (
     AssemblyAsset, load_assembly_bundle,
 )
 from .bundle import PortraitAsset, load_legacy_run, load_portrait_bundle
+from .physics import physics_spec_from_rig_intent
 from .rig import build_rig, rig_preflight, write_rig_project
 
 
@@ -89,6 +90,10 @@ def compile_assembly_asset(asset: AssemblyAsset, output_dir: str | os.PathLike[s
     C4 authoring actually declared (or explicitly disables it, never a
     guess, when nothing was authored).
     """
+    # Composer's enabled upper-torso region is the physics opt-in boundary.
+    # Keep direct compiler callers on the same P2.3 path as the GUI workflow.
+    if physics is None:
+        physics = physics_spec_from_rig_intent(asset.rig_intent)
     preflight = rig_preflight(asset.layers, original_rgba=None,
                               body_remainder=asset.body_remainder,
                               rig_intent=asset.rig_intent)
