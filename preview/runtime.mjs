@@ -1388,8 +1388,8 @@ export function advancePhysics(now, inputs) {
     state.physicsAccumulator = maxBacklog;
   }
   let count = 0;
-  while (state.physicsAccumulator >= tick && count < PHYSICS_MAX_CATCHUP_STEPS) {
-    state.physicsAccumulator -= tick; count++;
+  while (state.physicsAccumulator + 1e-12 >= tick && count < PHYSICS_MAX_CATCHUP_STEPS) {
+    state.physicsAccumulator = Math.max(0, state.physicsAccumulator - tick); count++;
   }
   const swaySpec = state.bodySwayEnabled ? (state.manifest.motion?.body_sway || {}) : { enabled: false };
   for (let i = 0; i < count; i++) {
@@ -1903,6 +1903,71 @@ export function deform(part, now, motion) {
   }
 }
 
+/**
+ * Pick stable QA probes from the compiled topwear geometry.  The probes are
+ * derived from the authored soft-field weights rather than from a synthetic
+ * vertex or a spring scalar: this is the same mesh/weight data that the
+ * renderer deforms.  A primary probe is the weighted lobe-centre vertex, a
+ * lower probe is the nearest lower lobe vertex, and the lock probe is the
+ * closest vertex owned by neither lobe.
+ */
+export function selectChestProbes(part) {
+  const rest = part?.mesh?.rest;
+  const left = part?.softMorph?.left;
+  const right = part?.softMorph?.right;
+  const lowerBias = part?.softMorph?.lowerBias;
+  if (!rest || !left || !right || rest.length < 2) return null;
+  const count = rest.length / 2;
+  const centroid = (weights) => {
+    let x = 0, y = 0, total = 0;
+    for (let i = 0; i < count; i++) {
+      const w = Math.max(0, Number(weights[i] || 0));
+      x += rest[i * 2] * w; y += rest[i * 2 + 1] * w; total += w;
+    }
+    return total > 0 ? [x / total, y / total] : null;
+  };
+  const centres = { left: centroid(left), right: centroid(right) };
+  const pick = (weights, centre, lower = false) => {
+    if (!centre) return null;
+    let best = null;
+    for (let i = 0; i < count; i++) {
+      const w = Number(weights[i] || 0);
+      if (!(w > 1e-5)) continue;
+      const y = rest[i * 2 + 1];
+      if (lower && y < centre[1]) continue;
+      const distance = Math.hypot(rest[i * 2] - centre[0], y - centre[1]);
+      const candidate = { index: i, distance, weight: w,
+        lower: Number(lowerBias?.[i] || 0) };
+      if (!best || candidate.distance < best.distance
+          || (candidate.distance === best.distance && candidate.weight > best.weight)) best = candidate;
+    }
+    return best?.index ?? null;
+  };
+  const leftPrimary = pick(left, centres.left);
+  const rightPrimary = pick(right, centres.right);
+  const leftLower = pick(left, centres.left, true);
+  const rightLower = pick(right, centres.right, true);
+  const mid = centres.left && centres.right
+    ? [(centres.left[0] + centres.right[0]) * 0.5, (centres.left[1] + centres.right[1]) * 0.5]
+    : centres.left || centres.right;
+  let lock = null, lockDistance = Infinity;
+  if (mid) for (let i = 0; i < count; i++) {
+    if (Number(left[i] || 0) > 1e-5 || Number(right[i] || 0) > 1e-5) continue;
+    const distance = Math.hypot(rest[i * 2] - mid[0], rest[i * 2 + 1] - mid[1]);
+    if (distance < lockDistance) { lockDistance = distance; lock = i; }
+  }
+  return { leftPrimary, rightPrimary, leftLower, rightLower, lock,
+    centres, count };
+}
+
+export function measureProbeDisplacement(part, index) {
+  if (!part?.mesh?.rest || !part?.mesh?.live || !Number.isInteger(index)
+      || index < 0 || index * 2 + 1 >= part.mesh.rest.length) return 0;
+  const x = index * 2;
+  return Math.hypot(part.mesh.live[x] - part.mesh.rest[x],
+    part.mesh.live[x + 1] - part.mesh.rest[x + 1]);
+}
+
 /** Apply declarative N-way seam relations after all parts have been deformed. */
 export function applyBoundaryStitches(parts = state.parts,
                                       constraints = state.manifest?.constraints || []) {
@@ -2085,15 +2150,6 @@ export function frame(now) {
   // render-time sway sample so opening a physics-enabled run does not snap.
   if (state.physicsDrivers && state.physicsLastNow != null)
     motion.bodySwayPosition = [state.bodyMotion.x, state.bodyMotion.y];
-  const calibrationEl = document.getElementById("chestCalibration");
-  if (calibrationEl) {
-    const torso = motion.physics?.torso;
-    if (state.calibrationRequested && torso) {
-      calibrationEl.textContent = `Requested: ${state.calibrationRequested.toFixed(2)}px · `
-        + `Measured L: ${Number(torso.left?.value ?? 0).toFixed(2)}px · `
-        + `Measured R: ${Number(torso.right?.value ?? 0).toFixed(2)}px`;
-    }
-  }
   state.profiler.physicsMs = performance.now() - physicsStart;
 
   // v0.2's manifest phase list is the runtime ordering contract.  The
@@ -2129,6 +2185,23 @@ export function frame(now) {
   const stitchDirty = applyBoundaryStitches(state.parts);
   state.profiler.stitchMs = performance.now() - stitchStart;
   for (const part of stitchDirty) { part.dirty = true; }
+  // Calibration reports displacement of the compiled topwear probes, not the
+  // torso spring scalar.  This keeps the UI honest when authored lobe weights
+  // attenuate the physical output or a lock correctly remains stationary.
+  const calibrationEl = document.getElementById("chestCalibration");
+  if (calibrationEl && state.calibrationRequested) {
+    const topwear = state.parts.find((part) => isSoftMorphTag(part.spec?.tag)
+      && part.mesh?.rest && part.mesh?.live && part.softMorph);
+    const probes = selectChestProbes(topwear);
+    if (probes && probes.leftPrimary != null && probes.rightPrimary != null) {
+      calibrationEl.textContent = `Requested: ${state.calibrationRequested.toFixed(2)}px · `
+        + `Measured L: ${measureProbeDisplacement(topwear, probes.leftPrimary).toFixed(2)}px · `
+        + `Measured R: ${measureProbeDisplacement(topwear, probes.rightPrimary).toFixed(2)}px`;
+    } else {
+      calibrationEl.textContent = `Requested: ${state.calibrationRequested.toFixed(2)}px · `
+        + "Measured: compiled topwear probes unavailable";
+    }
+  }
   const uploadStart = performance.now();
   for (const { part: p, opacity } of drawParts) {
     gl.bindBuffer(gl.ARRAY_BUFFER, p.buf.pos);

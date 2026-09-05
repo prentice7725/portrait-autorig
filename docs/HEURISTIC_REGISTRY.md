@@ -28,6 +28,9 @@ must not silently become defaults.
 | natural frequency / damping defaults | EXPERIMENTAL | profile seeds soft 1.8Hz/.75, firm 2.4Hz/.55, springy 2.2Hz/.35 | calibration harness and settle envelope |
 | geometry distribution gains | EXPERIMENTAL | physical q maps via horizontal .45 / vertical 1.0 defaults | chest geometry parity and lock probes |
 | 1/2/4px QA calibration | ACTIVE QA CONTRACT | measured primary probe must remain within ±15% | `check_physical_response.mjs` |
+| compiled topwear QA probes | ACTIVE QA CONTRACT | probes are selected from the compiled mesh's authored lobe/lock weights; no one-vertex surrogate | `check_physical_response.mjs`, `check_chest_geometry_parity.mjs` |
+| body-kick follow-through gate | ACTIVE QA CONTRACT | body-stop interval requires ≥0.15px chest follow-through and final ≤0.05px settle | `check_body_kick_pipeline.mjs` |
+| runtime geometry FPS parity | ACTIVE QA CONTRACT | the real Body Kick pipeline must keep final probe coordinates within 0.02px at 30/60/120 FPS | `check_motion_framerate_parity.mjs` |
 | inertia gains / velocity drag | EXPERIMENTAL | explicit X/Y coefficients; acceleration is external force, never equilibrium | inertial kick and breath-only regressions |
 | L/R material asymmetry | EXPERIMENTAL | tiny deterministic stiffness/damping/mass scales when omitted by a new inertial manifest | independent lobe output and bounded displacement clamps |
 | settle_gain | EXPERIMENTAL | lower-lobe vertical response uses spring velocity × settle gain | lock-preservation and bounded settle tests |
