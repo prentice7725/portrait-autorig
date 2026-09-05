@@ -260,8 +260,10 @@ export const state = {
   profiler: { fps: 0, physicsMs: 0, deformMs: 0, stitchMs: 0, uploadMs: 0,
               activeVertices: 0, totalVertices: 0, backlogDropped: 0, lastAt: -Infinity },
   motionQA: { inertia: true, inertiaOnly: false, asymmetry: 1, inertiaMultiplier: 1,
-              settleMultiplier: 1, kickX: 0, kickY: 0 },
+              settleMultiplier: 1, chestImpulseX: 0, chestImpulseY: 0 },
+  bodyPulse: { x: 0, y: 0, vx: 0, vy: 0 },
   motionGraph: [],
+  calibrationRequested: 0,
   shells: null,           // fitted in build(); null disables the shell path
   variantSets: {},
   variantSelections: {},
@@ -1040,6 +1042,9 @@ export function build(manifest, images) {
   state.physicsLastNow = null;
   state.bodySwayEnabled = false;
   state.physicsSimTime = 0;
+  state.bodyPulse = { x: 0, y: 0, vx: 0, vy: 0 };
+  state.motionGraph = [];
+  state.calibrationRequested = 0;
   const physicsSpec = manifest.physics || null;
   if (physicsSpec) {
     const config = physicsSpec.config || {};
@@ -1070,6 +1075,17 @@ export function build(manifest, images) {
         settleGain: torsoSpec.settle_gain ?? 0.08,
         leftMaterialScale: torsoSpec.left_material_scale || {},
         rightMaterialScale: torsoSpec.right_material_scale || {},
+        breathDisplacementPx: torsoSpec.breath_displacement_px ?? 0.8,
+        poseBiasPx: torsoSpec.pose_bias_px ?? 0.15,
+        inertiaCouplingX: torsoSpec.inertia_coupling_x ?? 0.08,
+        inertiaCouplingY: torsoSpec.inertia_coupling_y ?? 0.22,
+        dragCouplingX: torsoSpec.drag_coupling_x ?? 0.01,
+        dragCouplingY: torsoSpec.drag_coupling_y ?? 0.02,
+        naturalFrequencyHz: torsoSpec.natural_frequency_hz,
+        dampingRatio: torsoSpec.damping_ratio,
+        maxDisplacementPx: torsoSpec.max_displacement_px ?? 4,
+        maxVelocityPxS: torsoSpec.max_velocity_px_s ?? 24,
+        settleTimeScaleS: torsoSpec.settle_time_scale_s ?? 0.03,
         inputMode: torsoSpec.input_mode || "translation",
         config,
       });
@@ -1308,7 +1324,9 @@ export function resetPhysics() {
   state.physicsSimTime = 0;
   state.bodyMotion = { x: 0, y: 0, prevX: 0, prevY: 0, vx: 0, vy: 0,
     prevVx: 0, prevVy: 0, ax: 0, ay: 0 };
+  state.bodyPulse = { x: 0, y: 0, vx: 0, vy: 0 };
   state.motionGraph = [];
+  state.calibrationRequested = 0;
   if (!state.physicsDrivers) return {};
   state.physicsOutputs = {};
   for (const [name, driver] of Object.entries(state.physicsDrivers)) {
@@ -1323,6 +1341,7 @@ export function warmupPhysics(seconds, inputs = {}) {
   state.physicsSimTime = 0;
   state.bodyMotion = { x: 0, y: 0, prevX: 0, prevY: 0, vx: 0, vy: 0,
     prevVx: 0, prevVy: 0, ax: 0, ay: 0 };
+  state.bodyPulse = { x: 0, y: 0, vx: 0, vy: 0 };
   state.motionGraph = [];
   if (!state.physicsDrivers) return {};
   for (const [name, driver] of Object.entries(state.physicsDrivers)) {
@@ -1353,7 +1372,7 @@ export function stepPhysicsFixed(count = 1, inputs = {}) {
   return state.physicsOutputs;
 }
 
-function advancePhysics(now, inputs) {
+export function advancePhysics(now, inputs) {
   if (!state.physicsDrivers) return {};
   const previousNow = state.physicsLastNow;
   const elapsed = previousNow == null ? 0 : Math.max(0, (now - previousNow) / 1000);
@@ -1375,9 +1394,17 @@ function advancePhysics(now, inputs) {
   const swaySpec = state.bodySwayEnabled ? (state.manifest.motion?.body_sway || {}) : { enabled: false };
   for (let i = 0; i < count; i++) {
     const body = state.bodyMotion;
+    const pulse = state.bodyPulse;
+    // QA body kicks are root motion pulses. The pulse is integrated here,
+    // before derivatives are measured, so chest inertia observes the actual
+    // body movement rather than receiving a direct chest-only impulse.
+    pulse.vx += (-pulse.x * 18 - pulse.vx * 7) * tick;
+    pulse.vy += (-pulse.y * 18 - pulse.vy * 7) * tick;
+    pulse.x += pulse.vx * tick; pulse.y += pulse.vy * tick;
     const previousX = body.x, previousY = body.y;
     const previousVx = body.vx, previousVy = body.vy;
-    const [x, y] = bodySwayPosition(state.physicsSimTime + tick, swaySpec);
+    const [swayX, swayY] = bodySwayPosition(state.physicsSimTime + tick, swaySpec);
+    const x = swayX + pulse.x, y = swayY + pulse.y;
     body.prevX = previousX; body.prevY = previousY;
     body.prevVx = previousVx; body.prevVy = previousVy;
     body.x = x; body.y = y;
@@ -1390,9 +1417,9 @@ function advancePhysics(now, inputs) {
       breath: inputs.breath * (qa.inertiaOnly ? 0 : 1),
       bodyVelocityX: body.vx * inertia, bodyVelocityY: body.vy * inertia,
       bodyAccelerationX: body.ax * inertia, bodyAccelerationY: body.ay * inertia,
-      impulseX: qa.kickX * inertia, impulseY: qa.kickY * inertia,
+      impulseX: qa.chestImpulseX * inertia, impulseY: qa.chestImpulseY * inertia,
     });
-    qa.kickX *= 0.82; qa.kickY *= 0.82;
+    qa.chestImpulseX *= 0.82; qa.chestImpulseY *= 0.82;
   }
   return state.physicsOutputs;
 }
@@ -1824,22 +1851,38 @@ export function deform(part, now, motion) {
             const settleGain = Number(torso?.settleGain ?? 0.08)
               * Number(state.motionQA?.settleMultiplier ?? 1);
             const baseAmount = sm.strength * sm.morph;
-            const leftAmount = baseAmount + leftPhysics;
-            const rightAmount = baseAmount + rightPhysics;
-            if (leftAmount !== 0 || rightAmount !== 0) {
+            const physicalPx = torso?.model === "inertial_relative_v2";
+            const leftAmount = physicalPx ? baseAmount : baseAmount + leftPhysics;
+            const rightAmount = physicalPx ? baseAmount : baseAmount + rightPhysics;
+            if (leftAmount !== 0 || rightAmount !== 0
+                || (physicalPx && (leftPhysics !== 0 || rightPhysics !== 0))) {
               const wl = part.softMorph.left[i], wr = part.softMorph.right[i];
               if (wl > 0 || wr > 0) {
-                x += sm.horizontalPx * (rightAmount * wr - leftAmount * wl);
-                // Preserve the legacy max-weight result when both sides are
-                // equal, while allowing independent lobe spring amplitudes.
                 const lobeWeight = Math.max(wl, wr);
                 const totalWeight = wl + wr;
+                x += sm.horizontalPx * (rightAmount * wr - leftAmount * wl);
+                if (physicalPx) {
+                  const horizontalGain = Number(sm.physicsDistribution?.horizontal_gain ?? 0.45);
+                  const verticalGain = Number(sm.physicsDistribution?.vertical_gain ?? 1);
+                  x += horizontalGain * (rightPhysics * wr - leftPhysics * wl);
+                  const qVolume = totalWeight > 0
+                    ? (leftPhysics * wl + rightPhysics * wr) / totalWeight : 0;
+                  const qVelocity = totalWeight > 0
+                    ? (leftVelocity * wl + rightVelocity * wr) / totalWeight : 0;
+                  y += (qVolume * verticalGain
+                    + qVelocity * Number(torso?.settleTimeScaleS ?? 0.03))
+                    * lobeWeight * Number(part.softMorph.lowerBias[i] ?? 0);
+                }
+                // Preserve the legacy max-weight result when both sides are
+                // equal, while allowing independent lobe spring amplitudes.
                 const weighted = totalWeight > 0
                   ? (leftAmount * wl + rightAmount * wr) / totalWeight : 0;
                 const weightedVelocity = totalWeight > 0
                   ? (leftVelocity * wl + rightVelocity * wr) / totalWeight : 0;
-                y += sm.verticalPx * (weighted + weightedVelocity * settleGain)
-                  * lobeWeight * part.softMorph.lowerBias[i];
+                if (!physicalPx) {
+                  y += sm.verticalPx * (weighted + weightedVelocity * settleGain)
+                    * lobeWeight * part.softMorph.lowerBias[i];
+                }
               }
             }
           }
@@ -2023,6 +2066,7 @@ export function frame(now) {
       strength: parseFloat(document.getElementById("softStrength").value),
       horizontalPx: parseFloat(document.getElementById("softHoriz").value),
       verticalPx: parseFloat(document.getElementById("softVert").value),
+      physicsDistribution: state.manifest.motion.upper_torso_soft_morph?.physics_distribution || {},
     },
     overrides: {
       ghost: document.getElementById("ghost").checked,
@@ -2036,6 +2080,20 @@ export function frame(now) {
     angleY: motion.turnY,
     strandTarget: motion.turnY,
   });
+  // Once a fixed tick has run, use the measured root position (including any
+  // QA body pulse) for the primary deformer. Before the first tick, retain the
+  // render-time sway sample so opening a physics-enabled run does not snap.
+  if (state.physicsDrivers && state.physicsLastNow != null)
+    motion.bodySwayPosition = [state.bodyMotion.x, state.bodyMotion.y];
+  const calibrationEl = document.getElementById("chestCalibration");
+  if (calibrationEl) {
+    const torso = motion.physics?.torso;
+    if (state.calibrationRequested && torso) {
+      calibrationEl.textContent = `Requested: ${state.calibrationRequested.toFixed(2)}px · `
+        + `Measured L: ${Number(torso.left?.value ?? 0).toFixed(2)}px · `
+        + `Measured R: ${Number(torso.right?.value ?? 0).toFixed(2)}px`;
+    }
+  }
   state.profiler.physicsMs = performance.now() - physicsStart;
 
   // v0.2's manifest phase list is the runtime ordering contract.  The
@@ -2203,6 +2261,22 @@ document.getElementById("softVert").addEventListener("input", () => {
 });
 document.getElementById("doSoftMorph").addEventListener("change", updateQaBadge);
 
+function calibrateChest(requestedPx) {
+  const driver = state.physicsDrivers?.torso;
+  if (!driver?.setRelativeDisplacement) {
+    const el = document.getElementById("chestCalibration");
+    if (el) el.textContent = "Chest px calibration requires inertial_relative_v2";
+    return;
+  }
+  state.calibrationRequested = requestedPx;
+  const soft = document.getElementById("doSoftMorph");
+  if (soft) soft.checked = true;
+  state.physicsOutputs.torso = driver.setRelativeDisplacement(requestedPx);
+}
+document.getElementById("chest1px").addEventListener("click", () => calibrateChest(1));
+document.getElementById("chest2px").addEventListener("click", () => calibrateChest(2));
+document.getElementById("chest4px").addEventListener("click", () => calibrateChest(4));
+
 document.getElementById("chestInertia").addEventListener("change", (event) => {
   state.motionQA.inertia = event.target.checked;
 });
@@ -2210,12 +2284,16 @@ document.getElementById("asymmetry").addEventListener("input", (event) => {
   state.motionQA.asymmetry = Number(event.target.value);
   document.getElementById("asymmetryv").textContent = state.motionQA.asymmetry.toFixed(2);
 });
-document.getElementById("kickX").addEventListener("click", () => { state.motionQA.kickX += 2; });
-document.getElementById("kickY").addEventListener("click", () => { state.motionQA.kickY += 3; });
+document.getElementById("kickX").addEventListener("click", () => { state.bodyPulse.vx += 36; });
+document.getElementById("kickY").addEventListener("click", () => { state.bodyPulse.vy += 48; });
+document.getElementById("chestImpulseY").addEventListener("click", () => {
+  state.motionQA.chestImpulseY += 3;
+});
 document.getElementById("stopBody").addEventListener("click", () => {
   state.bodySwayEnabled = false;
   const toggle = document.getElementById("bodySway"); if (toggle) toggle.checked = false;
-  state.motionQA.kickX = 0; state.motionQA.kickY = 0;
+  state.bodyPulse.vx = 0; state.bodyPulse.vy = 0;
+  state.motionQA.chestImpulseX = 0; state.motionQA.chestImpulseY = 0;
 });
 document.getElementById("breathOnly").addEventListener("click", () => {
   state.motionQA.inertia = false; state.motionQA.inertiaOnly = false;
@@ -2226,8 +2304,8 @@ document.getElementById("inertiaOnly").addEventListener("click", () => {
   document.getElementById("chestInertia").checked = true;
 });
 document.getElementById("resetMotion").addEventListener("click", () => {
-  state.motionQA = { inertia: true, asymmetry: 1, inertiaMultiplier: 1,
-    settleMultiplier: 1, kickX: 0, kickY: 0, inertiaOnly: false };
+  state.motionQA = { inertia: true, inertiaOnly: false, asymmetry: 1, inertiaMultiplier: 1,
+    settleMultiplier: 1, chestImpulseX: 0, chestImpulseY: 0 };
   const toggle = document.getElementById("bodySway"); if (toggle) toggle.checked = true;
   resetPhysics();
 });

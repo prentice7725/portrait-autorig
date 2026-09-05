@@ -84,6 +84,46 @@ export function deformReference(part, motion, operations) {
             }
           }
           break;
+        case "local_soft_field": {
+          const sm = motion.softMorph;
+          if (part.softMorph && sm?.enabled) {
+            const torso = motion.physics?.torso || {};
+            const mean = (Number(torso.left?.value ?? torso.value ?? 0)
+              + Number(torso.right?.value ?? torso.value ?? 0)) * 0.5;
+            const asym = Number(motion.qaAsymmetry ?? 1);
+            const leftPhysics = mean + (Number(torso.left?.value ?? torso.value ?? 0) - mean) * asym;
+            const rightPhysics = mean + (Number(torso.right?.value ?? torso.value ?? 0) - mean) * asym;
+            const leftVelocity = Number(torso.left?.velocity ?? torso.velocity ?? 0);
+            const rightVelocity = Number(torso.right?.velocity ?? torso.velocity ?? 0);
+            const settleGain = Number(torso.settleGain ?? 0.08) * Number(motion.settleMultiplier ?? 1);
+            const physicalPx = torso.model === "inertial_relative_v2";
+            const baseAmount = Number(sm.strength ?? 0) * Number(sm.morph ?? 0);
+            const leftAmount = physicalPx ? baseAmount : baseAmount + leftPhysics;
+            const rightAmount = physicalPx ? baseAmount : baseAmount + rightPhysics;
+            const wl = Number(part.softMorph.left?.[i] ?? 0), wr = Number(part.softMorph.right?.[i] ?? 0);
+            if (wl > 0 || wr > 0) {
+              const horizontal = Number(sm.horizontalPx ?? 0);
+              const vertical = Number(sm.verticalPx ?? 0);
+              const maxWeight = Math.max(wl, wr), total = wl + wr;
+              const volume = total > 0 ? (leftAmount * wl + rightAmount * wr) / total : 0;
+              const velocity = total > 0 ? (leftVelocity * wl + rightVelocity * wr) / total : 0;
+              x += horizontal * (rightAmount * wr - leftAmount * wl);
+              if (physicalPx) {
+                const horizontalGain = Number(sm.physicsDistribution?.horizontal_gain ?? 0.45);
+                const verticalGain = Number(sm.physicsDistribution?.vertical_gain ?? 1);
+                const qVolume = total > 0 ? (leftPhysics * wl + rightPhysics * wr) / total : 0;
+                const qVelocity = total > 0 ? (leftVelocity * wl + rightVelocity * wr) / total : 0;
+                x += horizontalGain * (rightPhysics * wr - leftPhysics * wl);
+                y += (qVolume * verticalGain + qVelocity * Number(torso.settleTimeScaleS ?? 0.03))
+                  * maxWeight * Number(part.softMorph.lowerBias?.[i] ?? 0);
+              } else {
+                y += vertical * (volume + velocity * settleGain) * maxWeight
+                  * Number(part.softMorph.lowerBias?.[i] ?? 0);
+              }
+            }
+          }
+          break;
+        }
         default:
           // Unsupported optional operations are intentionally inert in the
           // oracle; parity tests list the operations they cover explicitly.

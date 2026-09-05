@@ -3,7 +3,7 @@ import { createUpperTorsoSecondaryDriver } from "./physics.mjs";
 
 function run(fps) {
   const driver = createUpperTorsoSecondaryDriver({
-    model: "inertial_relative_v1", breathGain: 0.25, inertiaGainY: 0.2,
+    model: "inertial_relative_v2", breathDisplacementPx: 0.25, inertiaCouplingY: 0.2,
   });
   const tick = 1 / 60, frame = 1 / fps;
   let accumulator = 0, simTime = 0;

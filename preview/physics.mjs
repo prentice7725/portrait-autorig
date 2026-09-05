@@ -5,6 +5,21 @@ export const DEFAULT_PHYSICS_CONFIG = Object.freeze({
   update_hz: 60, reference_scale: 768, reset_policy: "rest", warmup_seconds: 0.25,
 });
 
+export function calibratePhysicalResponse({ desiredPeakPx = 2, desiredSettleS = 0.6,
+                                             desiredOvershootRatio = 0.1,
+                                             profile = "soft" } = {}) {
+  if (!(Number.isFinite(desiredPeakPx) && desiredPeakPx > 0
+      && Number.isFinite(desiredSettleS) && desiredSettleS > 0
+      && Number.isFinite(desiredOvershootRatio) && desiredOvershootRatio >= 0))
+    throw new Error("physical response targets must be finite and positive");
+  const zeta = Math.max(0.25, Math.min(0.9,
+    desiredOvershootRatio === 0 ? 0.8 : 1 / Math.sqrt(1 + Math.PI ** 2
+      / Math.max(1e-6, Math.log(Math.max(1.01, 1 / desiredOvershootRatio)) ** 2))));
+  const frequencyHz = Math.max(0.5, Math.min(4, 4 / (zeta * desiredSettleS)));
+  return { profile, desired_peak_px: desiredPeakPx, natural_frequency_hz: frequencyHz,
+    damping_ratio: zeta, calibrated_impulse_px_s: desiredPeakPx * 2 * Math.PI * frequencyHz };
+}
+
 export function createPhysicsState({ rest = 0, stiffness = 18, damping = 6, mass = 1,
                                       config = {} } = {}) {
   const options = { ...DEFAULT_PHYSICS_CONFIG, ...config };
@@ -100,10 +115,16 @@ export function createUpperTorsoSecondaryDriver({ profile = "soft", model = "leg
                                                   settleGain = 0.08, turnAsymmetry = 0.08,
                                                   velocityGain = 0.03, accelerationGain = 0.005,
                                                   leftMaterialScale = {}, rightMaterialScale = {},
+                                                  breathDisplacementPx = 0.8, poseBiasPx = 0.15,
+                                                  inertiaCouplingX = 0.08, inertiaCouplingY = 0.22,
+                                                  dragCouplingX = 0.01, dragCouplingY = 0.02,
+                                                  naturalFrequencyHz = null, dampingRatio = null,
+                                                  maxDisplacementPx = 4, maxVelocityPxS = 24,
+                                                  settleTimeScaleS = 0.03,
                                                   inputMode = "translation", config = {} } = {}) {
   const materials = { soft: [12, 5], firm_bounce: [24, 3.5], springy: [16, 1.8] };
   if (!materials[profile]) throw new Error(`unknown torso response profile: ${profile}`);
-  if (!["legacy_target_v1", "inertial_relative_v1"].includes(model))
+  if (!["legacy_target_v1", "inertial_relative_v1", "inertial_relative_v2"].includes(model))
     throw new Error(`unknown torso driver model: ${model}`);
   if (!["translation", "angle", "velocity", "acceleration", "impulse"].includes(inputMode))
     throw new Error(`unknown torso input mode: ${inputMode}`);
@@ -113,10 +134,26 @@ export function createUpperTorsoSecondaryDriver({ profile = "soft", model = "leg
     throw new Error("torso velocity/acceleration gains must be finite");
   // New inertial drivers get a tiny deterministic material asymmetry even
   // when the manifest omits optional scales. Legacy manifests remain exact.
+  const profileUnits = { soft: [1.8, 0.75], firm_bounce: [2.4, 0.55], springy: [2.2, 0.35] };
+  const [profileFrequency, profileDamping] = profileUnits[profile];
+  naturalFrequencyHz = Number(naturalFrequencyHz ?? profileFrequency);
+  dampingRatio = Number(dampingRatio ?? profileDamping);
+  if (![breathDisplacementPx, poseBiasPx, inertiaCouplingX, inertiaCouplingY,
+    dragCouplingX, dragCouplingY, naturalFrequencyHz, dampingRatio,
+    maxDisplacementPx, maxVelocityPxS, settleTimeScaleS].every(Number.isFinite))
+    throw new Error("torso physical-unit coefficients must be finite");
+  if (!(naturalFrequencyHz > 0 && dampingRatio >= 0 && maxDisplacementPx > 0
+      && maxVelocityPxS > 0 && settleTimeScaleS >= 0))
+    throw new Error("torso physical-unit coefficients are out of range");
   if (model === "inertial_relative_v1" && Object.keys(leftMaterialScale).length === 0 &&
       Object.keys(rightMaterialScale).length === 0) {
     leftMaterialScale = { stiffness: 0.98, damping: 1.02, mass: 1.03 };
     rightMaterialScale = { stiffness: 1.02, damping: 0.98, mass: 0.97 };
+  }
+  if (model === "inertial_relative_v2" && Object.keys(leftMaterialScale).length === 0 &&
+      Object.keys(rightMaterialScale).length === 0) {
+    leftMaterialScale = { frequency: 0.98, damping: 1.02 };
+    rightMaterialScale = { frequency: 1.02, damping: 0.98 };
   }
   const scale = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
   const scales = {
@@ -126,7 +163,17 @@ export function createUpperTorsoSecondaryDriver({ profile = "soft", model = "leg
   for (const side of ["left", "right"])
     if (!(scales[side].stiffness > 0 && scales[side].damping > 0 && scales[side].mass > 0))
       throw new Error("torso material scales must be positive");
-  const springs = {
+  const v2Material = (side) => {
+    const materialScale = side === "left" ? leftMaterialScale : rightMaterialScale;
+    const frequency = scale(materialScale.frequency, 1);
+    const damping = scale(materialScale.damping, 1);
+    const omega = 2 * Math.PI * naturalFrequencyHz * frequency;
+    return { stiffness: omega * omega, damping: 2 * dampingRatio * omega * damping, mass: 1 };
+  };
+  const springs = model === "inertial_relative_v2" ? {
+    left: createPhysicsState({ ...v2Material("left"), config }),
+    right: createPhysicsState({ ...v2Material("right"), config }),
+  } : {
     left: createPhysicsState({ stiffness: materials[profile][0] * scales.left.stiffness,
       damping: materials[profile][1] * scales.left.damping,
       mass: scales.left.mass, config }),
@@ -147,6 +194,16 @@ export function createUpperTorsoSecondaryDriver({ profile = "soft", model = "leg
     accelerationY = clamp(Number(accelerationY), maxAcceleration);
     impulseX = clamp(Number(impulseX), maxImpulse);
     impulseY = clamp(Number(impulseY), maxImpulse);
+    if (model === "inertial_relative_v2") {
+      const equilibrium = Number(breath) * breathDisplacementPx + Number(angleY) * poseBiasPx;
+      const external = -Number(accelerationX) * inertiaCouplingX
+        - Number(accelerationY) * inertiaCouplingY
+        - Number(velocityX) * dragCouplingX
+        - Number(velocityY) * dragCouplingY
+        + Number(impulseX) + Number(impulseY);
+      return equilibrium + clamp(external, maxVelocityPxS * 2 * Math.PI * naturalFrequencyHz)
+        / Math.max(1e-6, spring.state.stiffness);
+    }
     const equilibrium = Number(breath) * breathGain + Number(angleY) * poseBiasGain;
     const force = clamp(-Number(accelerationX) * inertiaGainX
       - Number(accelerationY) * inertiaGainY
@@ -158,14 +215,18 @@ export function createUpperTorsoSecondaryDriver({ profile = "soft", model = "leg
   const enforceLimits = (spring) => {
     const maxDisplacement = Number(config.max_relative_displacement ?? 4);
     const maxVelocity = Number(config.max_lobe_velocity ?? 12);
-    if (Math.abs(spring.state.value) > maxDisplacement) {
-      spring.state.value = clamp(spring.state.value, maxDisplacement);
-      spring.state.velocity = clamp(spring.state.velocity, maxVelocity);
-      spring.state.degraded = true; spring.state.diagnostic = "relative_displacement_clamp";
+    const displacementLimit = model === "inertial_relative_v2" ? maxDisplacementPx : maxDisplacement;
+    const velocityLimit = model === "inertial_relative_v2" ? maxVelocityPxS : maxVelocity;
+    if (Math.abs(spring.state.value) > displacementLimit) {
+      spring.state.value = clamp(spring.state.value, displacementLimit);
+      spring.state.velocity = clamp(spring.state.velocity, velocityLimit);
+      spring.state.degraded = true; spring.state.diagnostic = model === "inertial_relative_v2"
+        ? "chest_displacement_clamped_px" : "relative_displacement_clamp";
     }
-    if (Math.abs(spring.state.velocity) > maxVelocity) {
-      spring.state.velocity = clamp(spring.state.velocity, maxVelocity);
-      spring.state.degraded = true; spring.state.diagnostic = "lobe_velocity_clamp";
+    if (Math.abs(spring.state.velocity) > velocityLimit) {
+      spring.state.velocity = clamp(spring.state.velocity, velocityLimit);
+      spring.state.degraded = true; spring.state.diagnostic = model === "inertial_relative_v2"
+        ? "chest_velocity_clamped_px_s" : "lobe_velocity_clamp";
     }
   };
   const snapshot = () => {
@@ -173,17 +234,30 @@ export function createUpperTorsoSecondaryDriver({ profile = "soft", model = "leg
     return { value: (left.value + right.value) * 0.5,
       velocity: (left.velocity + right.velocity) * 0.5,
       degraded: left.degraded || right.degraded,
-      diagnostic: left.diagnostic || right.diagnostic, settleGain, left, right };
+      diagnostic: left.diagnostic || right.diagnostic,
+      model, units: model === "inertial_relative_v2" ? "px" : "normalized",
+      settleGain, settleTimeScaleS, left, right };
   };
   return {
+    setRelativeDisplacement: (value) => {
+      if (model !== "inertial_relative_v2")
+        throw new Error("relative pixel displacement requires inertial_relative_v2");
+      const limited = clamp(Number(value), maxDisplacementPx);
+      for (const spring of Object.values(springs)) {
+        spring.resetPhysics(limited);
+      }
+      return snapshot();
+    },
     resetPhysics: () => {
       previousInput = 0; previousVelocity = 0;
       springs.left.resetPhysics(); springs.right.resetPhysics();
       return snapshot();
     },
     warmupPhysics: (seconds, breath = 0, angleY = 0) => {
-      const source = model === "inertial_relative_v1"
-        ? Number(breath) * breathGain + Number(angleY) * poseBiasGain : target(breath, angleY);
+      const source = model === "inertial_relative_v2"
+        ? Number(breath) * breathDisplacementPx + Number(angleY) * poseBiasPx
+        : model === "inertial_relative_v1"
+          ? Number(breath) * breathGain + Number(angleY) * poseBiasGain : target(breath, angleY);
       const asym = Math.max(-1, Math.min(1, angleY * turnAsymmetry));
       const count = Math.ceil((seconds ?? config.warmup_seconds ?? DEFAULT_PHYSICS_CONFIG.warmup_seconds)
                               * Number(config.update_hz || 60));
@@ -202,7 +276,7 @@ export function createUpperTorsoSecondaryDriver({ profile = "soft", model = "leg
                        impulseY = 0, impulseX = 0) => {
       const asym = Math.max(-1, Math.min(1, angleY * turnAsymmetry));
       let leftTarget, rightTarget;
-      if (model === "inertial_relative_v1") {
+      if (model === "inertial_relative_v1" || model === "inertial_relative_v2") {
         // Inertial input is already expressed in px/s and px/s². It must not
         // pass through the legacy source reinterpretation/history channel.
         leftTarget = inertialTarget(breath, angleY, bodyVelocityX, bodyVelocity,
