@@ -123,6 +123,9 @@ RIG_SUBDIR = "rig"
 DEFAULT_MOTION: dict[str, Any] = {
     "head_turn": {"max_x": 0.8, "max_y": 0.8},
     "head_tilt": {"max_deg": 2.0, "pivot": "neck_pivot"},
+    "body_sway": {"enabled": True, "amplitude_x_px": 1.8, "amplitude_y_px": 1.2,
+                   "period_x_s": 7.3, "period_y_s": 5.9,
+                   "phase_x": 0.4, "phase_y": 1.2, "secondary_harmonic": 0.18},
     "breathing": {"period_s": 4.0, "amplitude_px": 3.0},
     #  places the closed lid inside the eye opening: 1.0 is the
     # lower lid, 0.5 the centre. Closing onto the centre leaves the lash as a
@@ -1434,7 +1437,13 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         physics_errors = validate_physics_spec(physics)
         if physics_errors:
             raise ValueError("invalid physics spec: " + "; ".join(physics_errors))
-        manifest["physics"] = json.loads(json.dumps(physics))
+        physics_payload = json.loads(json.dumps(physics))
+        torso_driver = physics_payload.get("upper_torso_driver")
+        if isinstance(torso_driver, dict):
+            # New compiler output opts into the separated inertial model;
+            # manifests loaded without this field remain legacy at runtime.
+            torso_driver.setdefault("model", "inertial_relative_v1")
+        manifest["physics"] = physics_payload
     if provenance is not None:
         # Provenance is a Composer-owned opaque payload.  AutoRig forwards it
         # verbatim and only adds operation provenance for derived semantics.

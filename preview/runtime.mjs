@@ -149,6 +149,10 @@ export const PHASE_DEFORMER_HANDLERS = {
   shell_turn(deformer, context) { registerDeformerOperation(deformer, context); },
   weighted_rotation(deformer, context) { registerDeformerOperation(deformer, context); },
   continuous_field(deformer, context) { registerDeformerOperation(deformer, context); },
+  body_sway(deformer, context) {
+    registerDeformerOperation(deformer, context);
+    if (context.motion) context.motion.bodySway = deformer.config || {};
+  },
   eye_fold(deformer, context) { registerDeformerOperation(deformer, context); },
   gaze(deformer, context) {
     registerDeformerOperation(deformer, context);
@@ -247,11 +251,17 @@ export const state = {
   physicsOutputs: {},
   physicsAccumulator: 0,
   physicsLastNow: null,
-  physicsInput: { turnY: 0, velocity: 0 },
+  bodyMotion: { x: 0, y: 0, prevX: 0, prevY: 0, vx: 0, vy: 0,
+                prevVx: 0, prevVy: 0, ax: 0, ay: 0 },
+  bodySwayEnabled: false,
+  physicsSimTime: 0,
   idleUiLast: -Infinity,
   overlayVisible: false,
   profiler: { fps: 0, physicsMs: 0, deformMs: 0, stitchMs: 0, uploadMs: 0,
-              activeVertices: 0, totalVertices: 0, lastAt: -Infinity },
+              activeVertices: 0, totalVertices: 0, backlogDropped: 0, lastAt: -Infinity },
+  motionQA: { inertia: true, inertiaOnly: false, asymmetry: 1, inertiaMultiplier: 1,
+              settleMultiplier: 1, kickX: 0, kickY: 0 },
+  motionGraph: [],
   shells: null,           // fitted in build(); null disables the shell path
   variantSets: {},
   variantSelections: {},
@@ -1000,6 +1010,9 @@ export function motionFromDeformers(manifest) {
   const tilt = (byKind.weighted_rotation || [])[0];
   if (tilt) motion.head_tilt = tilt.config;
 
+  const bodySway = (byKind.body_sway || [])[0];
+  if (bodySway) motion.body_sway = bodySway.config || {};
+
   const breathing = (byKind.continuous_field || [])
     .find((d) => (d.parameters || []).includes("ParamBreath"));
   if (breathing) motion.breathing = breathing.config;
@@ -1025,6 +1038,8 @@ export function build(manifest, images) {
   state.physicsOutputs = {};
   state.physicsAccumulator = 0;
   state.physicsLastNow = null;
+  state.bodySwayEnabled = false;
+  state.physicsSimTime = 0;
   const physicsSpec = manifest.physics || null;
   if (physicsSpec) {
     const config = physicsSpec.config || {};
@@ -1039,12 +1054,22 @@ export function build(manifest, images) {
     const torsoSpec = physicsSpec.upper_torso_driver;
     if (torsoSpec?.enabled !== false && torsoSpec) {
       state.physicsDrivers.torso = createUpperTorsoSecondaryDriver({
+        model: torsoSpec.model || "legacy_target_v1",
         profile: torsoSpec.profile || "soft",
         translationGain: torsoSpec.translation_gain ?? 1,
         angleGain: torsoSpec.angle_gain ?? 0.25,
         turnAsymmetry: torsoSpec.turn_asymmetry ?? 0.08,
         velocityGain: torsoSpec.velocity_gain ?? 0.03,
         accelerationGain: torsoSpec.acceleration_gain ?? 0.005,
+        breathGain: torsoSpec.breath_gain ?? 1,
+        poseBiasGain: torsoSpec.pose_bias_gain ?? 0.05,
+        inertiaGainX: torsoSpec.inertia_gain_x ?? 0.015,
+        inertiaGainY: torsoSpec.inertia_gain_y ?? 0.045,
+        velocityDragX: torsoSpec.velocity_drag_x ?? 0.002,
+        velocityDragY: torsoSpec.velocity_drag_y ?? 0.006,
+        settleGain: torsoSpec.settle_gain ?? 0.08,
+        leftMaterialScale: torsoSpec.left_material_scale || {},
+        rightMaterialScale: torsoSpec.right_material_scale || {},
         inputMode: torsoSpec.input_mode || "translation",
         config,
       });
@@ -1278,22 +1303,28 @@ export function build(manifest, images) {
 }
 
 export function resetPhysics() {
+  state.physicsAccumulator = 0;
+  state.physicsLastNow = null;
+  state.physicsSimTime = 0;
+  state.bodyMotion = { x: 0, y: 0, prevX: 0, prevY: 0, vx: 0, vy: 0,
+    prevVx: 0, prevVy: 0, ax: 0, ay: 0 };
+  state.motionGraph = [];
   if (!state.physicsDrivers) return {};
   state.physicsOutputs = {};
   for (const [name, driver] of Object.entries(state.physicsDrivers)) {
     state.physicsOutputs[name] = driver.resetPhysics();
   }
-  state.physicsAccumulator = 0;
-  state.physicsInput = { turnY: 0, velocity: 0 };
-  state.physicsLastNow = null;
   return state.physicsOutputs;
 }
 
 export function warmupPhysics(seconds, inputs = {}) {
-  if (!state.physicsDrivers) return {};
-  state.physicsInput = { turnY: 0, velocity: 0 };
   state.physicsLastNow = null;
   state.physicsAccumulator = 0;
+  state.physicsSimTime = 0;
+  state.bodyMotion = { x: 0, y: 0, prevX: 0, prevY: 0, vx: 0, vy: 0,
+    prevVx: 0, prevVy: 0, ax: 0, ay: 0 };
+  state.motionGraph = [];
+  if (!state.physicsDrivers) return {};
   for (const [name, driver] of Object.entries(state.physicsDrivers)) {
     state.physicsOutputs[name] = name === "torso"
       ? driver.warmupPhysics(seconds, inputs.breath || 0, inputs.angleY || 0)
@@ -1313,7 +1344,10 @@ export function stepPhysicsFixed(count = 1, inputs = {}) {
   for (const [name, driver] of Object.entries(state.physicsDrivers)) {
     state.physicsOutputs[name] = name === "torso"
       ? driver.stepPhysicsFixed(count, inputs.breath || 0, inputs.angleY || 0,
-          inputs.bodyVelocity || 0, inputs.bodyAcceleration || 0)
+          inputs.bodyVelocityY || inputs.bodyVelocity || 0,
+          inputs.bodyAccelerationY || inputs.bodyAcceleration || 0,
+          inputs.bodyVelocityX || 0, inputs.bodyAccelerationX || 0,
+          inputs.impulseY || 0, inputs.impulseX || 0)
       : driver.stepPhysicsFixed(count, inputs.strandTarget || 0);
   }
   return state.physicsOutputs;
@@ -1327,20 +1361,39 @@ function advancePhysics(now, inputs) {
   state.physicsLastNow = now;
   const hz = Number((state.manifest.physics?.config || {}).update_hz || 60);
   const tick = 1 / Math.max(1, hz);
-  const previousTurnY = state.physicsInput.turnY;
-  const previousVelocity = state.physicsInput.velocity;
-  const bodyVelocity = elapsed > 0 ? (Number(inputs.angleY || 0) - previousTurnY) / elapsed : 0;
-  const bodyAcceleration = elapsed > 0 ? (bodyVelocity - previousVelocity) / elapsed : 0;
-  state.physicsInput = { turnY: Number(inputs.angleY || 0), velocity: bodyVelocity };
   // Drop an excessive backlog instead of turning one late frame into a
   // physics spiral. At 60Hz this still permits roughly 66ms of catch-up.
-  state.physicsAccumulator = Math.min(state.physicsAccumulator,
-                                      tick * PHYSICS_MAX_CATCHUP_STEPS);
+  const maxBacklog = tick * PHYSICS_MAX_CATCHUP_STEPS;
+  if (state.physicsAccumulator > maxBacklog) {
+    state.profiler.backlogDropped += 1;
+    state.physicsAccumulator = maxBacklog;
+  }
   let count = 0;
   while (state.physicsAccumulator >= tick && count < PHYSICS_MAX_CATCHUP_STEPS) {
     state.physicsAccumulator -= tick; count++;
   }
-  if (count) stepPhysicsFixed(count, { ...inputs, bodyVelocity, bodyAcceleration });
+  const swaySpec = state.bodySwayEnabled ? (state.manifest.motion?.body_sway || {}) : { enabled: false };
+  for (let i = 0; i < count; i++) {
+    const body = state.bodyMotion;
+    const previousX = body.x, previousY = body.y;
+    const previousVx = body.vx, previousVy = body.vy;
+    const [x, y] = bodySwayPosition(state.physicsSimTime + tick, swaySpec);
+    body.prevX = previousX; body.prevY = previousY;
+    body.prevVx = previousVx; body.prevVy = previousVy;
+    body.x = x; body.y = y;
+    body.vx = (x - previousX) / tick; body.vy = (y - previousY) / tick;
+    body.ax = (body.vx - previousVx) / tick; body.ay = (body.vy - previousVy) / tick;
+    state.physicsSimTime += tick;
+    const qa = state.motionQA;
+    const inertia = qa.inertia ? qa.inertiaMultiplier : 0;
+    stepPhysicsFixed(1, { ...inputs,
+      breath: inputs.breath * (qa.inertiaOnly ? 0 : 1),
+      bodyVelocityX: body.vx * inertia, bodyVelocityY: body.vy * inertia,
+      bodyAccelerationX: body.ax * inertia, bodyAccelerationY: body.ay * inertia,
+      impulseX: qa.kickX * inertia, impulseY: qa.kickY * inertia,
+    });
+    qa.kickX *= 0.82; qa.kickY *= 0.82;
+  }
   return state.physicsOutputs;
 }
 
@@ -1461,7 +1514,50 @@ function updateProfiler(now, frameMs, activeVertices, totalVertices) {
   const p = state.profiler;
   el.textContent = `FPS ${p.fps.toFixed(0)} · physics ${p.physicsMs.toFixed(2)}ms · `
     + `deform ${p.deformMs.toFixed(2)}ms · stitch ${p.stitchMs.toFixed(2)}ms · `
-    + `upload ${p.uploadMs.toFixed(2)}ms · vertices ${p.activeVertices}/${p.totalVertices}`;
+    + `upload ${p.uploadMs.toFixed(2)}ms · vertices ${p.activeVertices}/${p.totalVertices}`
+    + ` · backlog drops ${p.backlogDropped}`;
+}
+
+function drawMotionGraph() {
+  const canvas = document.getElementById("motionGraph");
+  if (!canvas?.getContext) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const history = state.motionGraph;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (history.length < 2) return;
+  const values = history.flatMap((sample) => [sample.body, sample.left, sample.right]);
+  const min = Math.min(-1, ...values), max = Math.max(1, ...values), span = max - min;
+  const draw = (key, color) => {
+    ctx.strokeStyle = color; ctx.beginPath();
+    history.forEach((sample, index) => {
+      const x = index * (canvas.width - 1) / (history.length - 1);
+      const y = canvas.height - 1 - (sample[key] - min) / span * (canvas.height - 2);
+      if (index) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+    });
+    ctx.stroke();
+  };
+  draw("body", "#8ec5ff"); draw("left", "#ffc27d"); draw("right", "#d8a2ff");
+}
+
+export function bodySwayPosition(seconds, spec = {}) {
+  if (spec.enabled === false) return [0, 0];
+  const ax = Number(spec.amplitude_x_px ?? 1.8), ay = Number(spec.amplitude_y_px ?? 1.2);
+  const px = Math.max(0.1, Number(spec.period_x_s ?? 7.3));
+  const py = Math.max(0.1, Number(spec.period_y_s ?? 5.9));
+  const harmonic = Math.max(0, Math.min(0.45, Number(spec.secondary_harmonic ?? 0.18)));
+  const wx = 2 * Math.PI / px, wy = 2 * Math.PI / py;
+  const x = ax * ((1 - harmonic) * Math.sin(seconds * wx + Number(spec.phase_x ?? 0.4))
+    + harmonic * Math.sin(seconds * wx * 1.37 + Number(spec.phase_x ?? 0.4) * 1.7));
+  const y = ay * ((1 - harmonic) * Math.sin(seconds * wy + Number(spec.phase_y ?? 1.2))
+    + harmonic * Math.sin(seconds * wy * 1.29 + Number(spec.phase_y ?? 1.2) * 1.6));
+  return [x, y];
+}
+
+function bodySwayInfluence(part) {
+  // Body sway is a root-level upper-body translation. Keeping one influence
+  // across head/neck/body avoids introducing a seam at their attachment.
+  return ["head", "neck", "body", "body_remainder", "hair"].includes(part.spec?.group) ? 1 : 0;
 }
 
 export function scheduleBlink(now) {
@@ -1648,6 +1744,12 @@ export function deform(part, now, motion) {
 
     for (const operation of operations) {
       switch (operation.kind) {
+        case "body_sway": {
+          const sway = motion.bodySwayPosition || motion.bodySway || [0, 0];
+          const influence = bodySwayInfluence(part);
+          if (influence) { x += Number(sway[0] || 0) * influence; y += Number(sway[1] || 0) * influence; }
+          break;
+        }
         case "eye_fold": {
           if (part.isEye && blink > 0) {
             const floor = part.isLid ? motion.lidThickness : 0;
@@ -1707,10 +1809,20 @@ export function deform(part, now, motion) {
             // a second uniform topwear translation. This preserves lobe,
             // neckline, center, and occluder locks already encoded in weights.
             const torso = motion.physics?.torso;
-            const leftPhysics = isSoftMorphTag(part.spec.tag)
+            let leftPhysics = isSoftMorphTag(part.spec.tag)
               ? Number(torso?.left?.value ?? torso?.value ?? 0) : 0;
-            const rightPhysics = isSoftMorphTag(part.spec.tag)
+            let rightPhysics = isSoftMorphTag(part.spec.tag)
               ? Number(torso?.right?.value ?? torso?.value ?? 0) : 0;
+            const qaAsym = Number(state.motionQA?.asymmetry ?? 1);
+            const qaMean = (leftPhysics + rightPhysics) * 0.5;
+            leftPhysics = qaMean + (leftPhysics - qaMean) * qaAsym;
+            rightPhysics = qaMean + (rightPhysics - qaMean) * qaAsym;
+            const leftVelocity = isSoftMorphTag(part.spec.tag)
+              ? Number(torso?.left?.velocity ?? torso?.velocity ?? 0) : 0;
+            const rightVelocity = isSoftMorphTag(part.spec.tag)
+              ? Number(torso?.right?.velocity ?? torso?.velocity ?? 0) : 0;
+            const settleGain = Number(torso?.settleGain ?? 0.08)
+              * Number(state.motionQA?.settleMultiplier ?? 1);
             const baseAmount = sm.strength * sm.morph;
             const leftAmount = baseAmount + leftPhysics;
             const rightAmount = baseAmount + rightPhysics;
@@ -1724,7 +1836,10 @@ export function deform(part, now, motion) {
                 const totalWeight = wl + wr;
                 const weighted = totalWeight > 0
                   ? (leftAmount * wl + rightAmount * wr) / totalWeight : 0;
-                y += sm.verticalPx * weighted * lobeWeight * part.softMorph.lowerBias[i];
+                const weightedVelocity = totalWeight > 0
+                  ? (leftVelocity * wl + rightVelocity * wr) / totalWeight : 0;
+                y += sm.verticalPx * (weighted + weightedVelocity * settleGain)
+                  * lobeWeight * part.softMorph.lowerBias[i];
               }
             }
           }
@@ -1801,7 +1916,7 @@ function motionGeometryKey(motion) {
     softMorph: motion.softMorph, physics: {
       torso: [torso.value ?? 0, torso.left?.value ?? null, torso.right?.value ?? null],
       strand,
-    }, overrides: motion.overrides,
+    }, bodySwayPosition: motion.bodySwayPosition, overrides: motion.overrides,
   });
 }
 
@@ -1811,7 +1926,9 @@ export function frame(now) {
   const t = (now - state.t0) / 1000;
   const dt = Math.min(0.1, (now - (state.lastFrame || now)) / 1000);
   state.lastFrame = now;
-  if (document.getElementById("autoIdle").checked) {
+  const autoIdle = !!document.getElementById("autoIdle")?.checked;
+  state.bodySwayEnabled = !!document.getElementById("bodySway")?.checked && autoIdle;
+  if (autoIdle) {
     // Two incommensurable periods so the loop never visibly repeats, and the
     // turn held well inside where it starts to cost something.
     const turn = state.manifest.motion.head_turn;
@@ -1893,6 +2010,9 @@ export function frame(now) {
     squash: { l: swap.l.squash, r: swap.r.squash },
     swap,
     breath: breathSin,
+    bodySway: state.manifest.motion.body_sway || {},
+    bodySwayPosition: state.bodySwayEnabled
+      ? bodySwayPosition(t, state.manifest.motion.body_sway || {}) : [0, 0],
     breathAmp: parseFloat(document.getElementById("breathAmp").value),
     lidRatio: parseFloat(document.getElementById("lidLine").value),
     lidThickness: parseFloat(document.getElementById("lidThick").value),
@@ -1989,6 +2109,11 @@ export function frame(now) {
   }
   state.profiler.uploadMs = performance.now() - uploadStart;
   updateProfiler(now, performance.now() - frameStart, activeVertices, totalVertices);
+  const torsoGraph = motion.physics?.torso || {};
+  state.motionGraph.push({ body: state.bodyMotion.y, left: torsoGraph.left?.value ?? 0,
+    right: torsoGraph.right?.value ?? 0 });
+  if (state.motionGraph.length > 300) state.motionGraph.shift();
+  drawMotionGraph();
   drawSoftRegionOverlay();
   requestAnimationFrame(frame);
 }
@@ -2008,6 +2133,16 @@ export function syncSlider(id) {
   if (id === "tilt") { state.tiltDeg = value; document.getElementById("tiltv").textContent = value.toFixed(1) + "°"; }
   if (id === "gazeX") { setParameter("ParamEyeBallX", value); document.getElementById("gazeXv").textContent = value.toFixed(2); }
   if (id === "gazeY") { setParameter("ParamEyeBallY", value); document.getElementById("gazeYv").textContent = value.toFixed(2); }
+}
+
+function updateQaBadge() {
+  const badge = document.getElementById("qaBadge");
+  if (!badge) return;
+  const active = document.getElementById("doSoftMorph")?.checked
+    && (Number(document.getElementById("softStrength")?.value || 0) > 0
+      || Number(document.getElementById("softHoriz")?.value || 0) > 0
+      || Number(document.getElementById("softVert")?.value || 0) > 0);
+  badge.hidden = !active;
 }
 
 document.getElementById("gazeX").addEventListener("input", () => syncSlider("gazeX"));
@@ -2054,14 +2189,47 @@ document.getElementById("breathAmp").addEventListener("input", () => {
 document.getElementById("softStrength").addEventListener("input", () => {
   document.getElementById("softStrengthv").textContent =
     parseFloat(document.getElementById("softStrength").value).toFixed(2);
+  updateQaBadge();
 });
 document.getElementById("softHoriz").addEventListener("input", () => {
   document.getElementById("softHorizv").textContent =
     parseFloat(document.getElementById("softHoriz").value).toFixed(1) + "px";
+  updateQaBadge();
 });
 document.getElementById("softVert").addEventListener("input", () => {
   document.getElementById("softVertv").textContent =
     parseFloat(document.getElementById("softVert").value).toFixed(1) + "px";
+  updateQaBadge();
+});
+document.getElementById("doSoftMorph").addEventListener("change", updateQaBadge);
+
+document.getElementById("chestInertia").addEventListener("change", (event) => {
+  state.motionQA.inertia = event.target.checked;
+});
+document.getElementById("asymmetry").addEventListener("input", (event) => {
+  state.motionQA.asymmetry = Number(event.target.value);
+  document.getElementById("asymmetryv").textContent = state.motionQA.asymmetry.toFixed(2);
+});
+document.getElementById("kickX").addEventListener("click", () => { state.motionQA.kickX += 2; });
+document.getElementById("kickY").addEventListener("click", () => { state.motionQA.kickY += 3; });
+document.getElementById("stopBody").addEventListener("click", () => {
+  state.bodySwayEnabled = false;
+  const toggle = document.getElementById("bodySway"); if (toggle) toggle.checked = false;
+  state.motionQA.kickX = 0; state.motionQA.kickY = 0;
+});
+document.getElementById("breathOnly").addEventListener("click", () => {
+  state.motionQA.inertia = false; state.motionQA.inertiaOnly = false;
+  document.getElementById("chestInertia").checked = false;
+});
+document.getElementById("inertiaOnly").addEventListener("click", () => {
+  state.motionQA.inertia = true; state.motionQA.inertiaOnly = true;
+  document.getElementById("chestInertia").checked = true;
+});
+document.getElementById("resetMotion").addEventListener("click", () => {
+  state.motionQA = { inertia: true, asymmetry: 1, inertiaMultiplier: 1,
+    settleMultiplier: 1, kickX: 0, kickY: 0, inertiaOnly: false };
+  const toggle = document.getElementById("bodySway"); if (toggle) toggle.checked = true;
+  resetPhysics();
 });
 
 document.getElementById("blinkNow").addEventListener("click",

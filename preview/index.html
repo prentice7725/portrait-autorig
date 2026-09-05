@@ -88,12 +88,28 @@
 
   <h2>Idle</h2>
   <label class="row"><input type="checkbox" id="autoIdle"> Auto idle motion</label>
+  <label class="row"><input type="checkbox" id="bodySway" checked> Body sway</label>
+  <label class="row"><input type="checkbox" id="chestInertia" checked> Chest inertia</label>
+  <label>L/R asymmetry <span class="val" id="asymmetryv">1.00</span>
+    <input type="range" id="asymmetry" min="0" max="1" step="0.01" value="1"></label>
+  <div class="row">
+    <button id="kickX">Body Kick X</button>
+    <button id="kickY">Body Kick Y</button>
+    <button id="stopBody">Stop Body</button>
+  </div>
+  <div class="row">
+    <button id="breathOnly">Breath Only</button>
+    <button id="inertiaOnly">Inertia Only</button>
+    <button id="resetMotion">Reset Motion</button>
+  </div>
+  <canvas id="motionGraph" width="360" height="100" aria-label="Body and chest motion graph"></canvas>
   <p class="hint">Off by default: the page opens on the rest pose, so what you
      see first is the decomposition rather than the animation. Idle turns no
      further than &plusmn;0.3, which is below where the reveal along an edge
      merges into one tear; the sliders reach 1.5 for finding that. Idle slider
      labels are sampled at 10Hz so the animation does not pay a DOM write per
-     frame.</p>
+     frame. The graph shows body Y and independent chest L/R response over the
+     last five seconds; QA buttons never modify the manifest.</p>
   <label class="row"><input type="checkbox" id="doBlink" checked> Blink</label>
   <label class="row"><input type="checkbox" id="doBreathe" checked> Breathing</label>
   <label>Breath <span class="val" id="breathAmpv">3.0px</span>
@@ -113,7 +129,7 @@
   <p class="hint">Wink buttons exercise the left/right eye split (H4).</p>
 
   <h2>Chest Soft Morph</h2>
-  <div class="meta" id="softMeta">not available in this run</div>
+  <div class="meta" id="softMeta">not available in this run <span id="qaBadge" class="warn" hidden>QA OVERRIDE</span></div>
   <label class="row"><input type="checkbox" id="doSoftMorph"> Chest Soft Morph</label>
   <label>Strength <span class="val" id="softStrengthv">0.00</span>
     <input type="range" id="softStrength" min="0" max="1" step="0.01" value="0"></label>

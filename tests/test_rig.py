@@ -437,7 +437,7 @@ class BuildRigTests(unittest.TestCase):
         deformer_kinds = {d["kind"] for d in manifest["deformers"]}
         self.assertEqual(deformer_kinds,
                          {"parallax_turn", "shell_turn", "weighted_rotation",
-                          "continuous_field", "eye_fold", "gaze"})
+                          "continuous_field", "body_sway", "eye_fold", "gaze"})
 
     def test_every_part_carries_a_frozen_mesh_topology_hash(self):
         # directive v0.2 #11-12 (P0-G): generate mesh -> hash -> freeze.

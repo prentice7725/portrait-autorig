@@ -14,6 +14,7 @@ const { deformReference, applyBoundaryStitchesReference } = await import(new URL
 
 const operations = [
   { id: "turn", kind: "parallax_turn", phase: "primary" },
+  { id: "sway", kind: "body_sway", phase: "primary" },
   { id: "tilt", kind: "weighted_rotation", phase: "primary" },
   { id: "breath", kind: "continuous_field", phase: "primary" },
 ];
@@ -31,6 +32,7 @@ const motion = {
   overrides: { ghost: false, neck: "normal", collar: null },
   squash: { l: 0, r: 0 }, blink: { l: 0, r: 0 }, lidRatio: 0.85,
   lidThickness: 0.18, softMorph: { enabled: false },
+  bodySwayPosition: [1.25, -0.5],
 };
 state.manifest = { anchors: { neck_pivot: [120, 100] } };
 state.canvasW = 256; state.canvasH = 256; state.frameOperations = operations;

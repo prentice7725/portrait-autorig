@@ -46,6 +46,7 @@ DEFORMER_PARALLAX_TURN = "parallax_turn"
 DEFORMER_SHELL_TURN = "shell_turn"
 DEFORMER_WEIGHTED_ROTATION = "weighted_rotation"
 DEFORMER_CONTINUOUS_FIELD = "continuous_field"
+DEFORMER_BODY_SWAY = "body_sway"
 DEFORMER_EYE_FOLD = "eye_fold"
 DEFORMER_GAZE = "gaze"
 DEFORMER_SPRITE_SWAP = "sprite_swap"
@@ -58,7 +59,7 @@ DEFORMER_STRAND_SPRING = "strand_spring"
 DEFORMER_UPPER_TORSO_PHYSICS = "upper_torso_physics"
 DEFORMER_KINDS = frozenset({
     DEFORMER_PARALLAX_TURN, DEFORMER_SHELL_TURN, DEFORMER_WEIGHTED_ROTATION,
-    DEFORMER_CONTINUOUS_FIELD, DEFORMER_EYE_FOLD, DEFORMER_GAZE, DEFORMER_SPRITE_SWAP,
+    DEFORMER_CONTINUOUS_FIELD, DEFORMER_BODY_SWAY, DEFORMER_EYE_FOLD, DEFORMER_GAZE, DEFORMER_SPRITE_SWAP,
     DEFORMER_VISIBILITY_CURVE,
     DEFORMER_LOCAL_SOFT_FIELD,
     DEFORMER_STRAND_SPRING, DEFORMER_UPPER_TORSO_PHYSICS,
@@ -140,6 +141,15 @@ def deformers_from_motion(motion: dict[str, Any]) -> list[dict[str, Any]]:
             "id": "head_tilt", "kind": DEFORMER_WEIGHTED_ROTATION,
             "parameters": [PARAM_ANGLE_Z],
             "targets": {"scope": "all"}, "config": dict(head_tilt), "phase": PHASE_PRIMARY,
+        })
+
+    body_sway = motion.get("body_sway")
+    if body_sway:
+        deformers.append({
+            "id": "body_sway", "kind": DEFORMER_BODY_SWAY,
+            "parameters": [PARAM_ANGLE_X, PARAM_ANGLE_Y],
+            "targets": {"scope": "upper_body"}, "config": dict(body_sway),
+            "phase": PHASE_PRIMARY,
         })
 
     breathing = motion.get("breathing")
