@@ -35,10 +35,12 @@ const motion = {
   overrides: { ghost: false, neck: "normal", collar: null },
   squash: { l: 0, r: 0 }, blink: { l: 0, r: 0 }, lidRatio: 0.85,
   lidThickness: 0.18,
-  softMorph: { enabled: true, morph: 0.5, strength: 0.4, horizontalPx: 2, verticalPx: 1 },
+  softMorph: { enabled: true, morph: 0.5, strength: 0.4, horizontalPx: 2, verticalPx: 1,
+    physicsDistribution: { version: 2, horizontal_gain: 0.45, vertical_gain: 1.0, vertical_floor: 0.35 } },
   bodySwayPosition: [1.25, -0.5],
-  physics: { torso: { left: { value: 0.1, velocity: 0.05 },
-    right: { value: 0.2, velocity: 0.1 }, settleGain: 0.08 } },
+  physics: { torso: { model: "inertial_relative_v2",
+    left: { value: 0.1, velocity: 0.05 }, right: { value: 0.2, velocity: 0.1 },
+    settleGain: 0.08, settleTimeScaleS: 0.03 } },
 };
 state.manifest = { anchors: { neck_pivot: [120, 100] } };
 state.canvasW = 256; state.canvasH = 256; state.frameOperations = operations;

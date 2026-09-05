@@ -12,6 +12,17 @@ export const TURN_BASE = 0.015;
 export const TURN_SPAN = 0.045;
 export const TURN_Y_SCALE = 0.7;
 
+function physicalDistribution(spec) {
+  const raw = spec?.physicsDistribution || {};
+  if (Number(raw.version ?? 1) < 2 || raw.vertical_floor == null)
+    return { horizontalGain: 0.45, verticalGain: 1.0, verticalFloor: 0.35 };
+  return {
+    horizontalGain: Number(raw.horizontal_gain ?? 0.45),
+    verticalGain: Number(raw.vertical_gain ?? 1.0),
+    verticalFloor: Math.max(0, Math.min(1, Number(raw.vertical_floor ?? 0.35))),
+  };
+}
+
 function weightAt(part, index, y) {
   const weight = part.weight || { mode: "constant", value: 1 };
   if (weight.mode !== "gradient_y") return Number(weight.value ?? 1);
@@ -109,13 +120,17 @@ export function deformReference(part, motion, operations) {
               const velocity = total > 0 ? (leftVelocity * wl + rightVelocity * wr) / total : 0;
               x += horizontal * (rightAmount * wr - leftAmount * wl);
               if (physicalPx) {
-                const horizontalGain = Number(sm.physicsDistribution?.horizontal_gain ?? 0.45);
-                const verticalGain = Number(sm.physicsDistribution?.vertical_gain ?? 1);
+                const distribution = physicalDistribution(sm);
+                const horizontalGain = distribution.horizontalGain;
+                const verticalGain = distribution.verticalGain;
+                const verticalFloor = distribution.verticalFloor;
                 const qVolume = total > 0 ? (leftPhysics * wl + rightPhysics * wr) / total : 0;
                 const qVelocity = total > 0 ? (leftVelocity * wl + rightVelocity * wr) / total : 0;
                 x += horizontalGain * (rightPhysics * wr - leftPhysics * wl);
+                const verticalShape = verticalFloor
+                  + (1 - verticalFloor) * Number(part.softMorph.lowerBias?.[i] ?? 0);
                 y += (qVolume * verticalGain + qVelocity * Number(torso.settleTimeScaleS ?? 0.03))
-                  * maxWeight * Number(part.softMorph.lowerBias?.[i] ?? 0);
+                  * maxWeight * verticalShape;
               } else {
                 y += vertical * (volume + velocity * settleGain) * maxWeight
                   * Number(part.softMorph.lowerBias?.[i] ?? 0);

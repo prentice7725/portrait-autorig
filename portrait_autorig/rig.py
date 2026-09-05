@@ -867,7 +867,8 @@ def detect_anchors(layer_dict: dict[str, np.ndarray], frame_size: tuple[int, int
             put("neck_pivot", (face_center[0], float(head_box[3])))
 
     body_box = None
-    topwear = layer_dict.get("topwear")
+    topwear = next((layer_dict.get(tag) for tag in soft_morph.SOFT_MORPH_TAGS
+                    if layer_dict.get(tag) is not None), None)
     if topwear is not None:
         body_box = _bbox(_mask_of(topwear, alpha_threshold))
     if body_box is None:
@@ -1457,15 +1458,19 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
                 torso_driver.setdefault("breath_displacement_px", 0.8)
                 torso_driver.setdefault("pose_bias_px", 0.15)
                 torso_driver.setdefault("inertia_coupling_x", 0.08)
-                torso_driver.setdefault("inertia_coupling_y", 0.22)
+                torso_driver.setdefault("inertia_coupling_y", 0.3)
                 torso_driver.setdefault("drag_coupling_x", 0.01)
                 torso_driver.setdefault("drag_coupling_y", 0.02)
+                torso_driver.setdefault("lag_seconds_x", 0.12)
+                torso_driver.setdefault("lag_seconds_y", 1.4)
+                torso_driver.setdefault("idle_lag_max_px", 5.0)
+                torso_driver.setdefault("kick_lag_max_px", 12.0)
                 profile_seeds = {"soft": (1.8, 0.75), "firm_bounce": (2.4, 0.55),
                                  "springy": (2.2, 0.35)}
                 frequency, damping = profile_seeds.get(torso_driver.get("profile", "soft"), (1.8, 0.75))
                 torso_driver.setdefault("natural_frequency_hz", frequency)
                 torso_driver.setdefault("damping_ratio", damping)
-                torso_driver.setdefault("max_displacement_px", 4.0)
+                torso_driver.setdefault("max_displacement_px", 16.0)
                 torso_driver.setdefault("max_velocity_px_s", 24.0)
                 torso_driver.setdefault("settle_time_scale_s", 0.03)
                 torso_driver.setdefault("left_material_scale", {"frequency": 0.98, "damping": 1.02})

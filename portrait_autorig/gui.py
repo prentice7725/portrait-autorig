@@ -404,13 +404,20 @@ class PortraitAutorigApp:
         if not manifests:
             messagebox.showerror("Portrait AutoRig", f"Rig manifest를 찾을 수 없습니다:\n{run_root}")
             return
+        # A run directory can contain manifests from repeated builds.  Never
+        # let lexical ordering silently open an older artifact: the canonical
+        # compiler output wins, otherwise use the newest generated manifest.
+        canonical = run_root / "portrait_rig_manifest.json"
+        manifest = canonical if canonical.exists() else max(
+            manifests, key=lambda path: path.stat().st_mtime
+        )
         try:
             if self._preview_server is not None:
                 self._preview_server.shutdown()
                 self._preview_server.server_close()
             self._preview_server, base_url = _start_preview_server(run_root)
             manifest_url = base_url + "?manifest=" + urllib.parse.quote(
-                "/run/" + manifests[0].name, safe="/"
+                "/run/" + manifest.name, safe="/"
             )
             if not webbrowser.open(manifest_url):
                 raise RuntimeError("기본 브라우저를 열지 못했습니다.")

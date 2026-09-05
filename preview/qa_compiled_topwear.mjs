@@ -43,7 +43,7 @@ export function makeChestMotion(physics, overrides = {}) {
     bodySway: { enabled: false },
     softMorph: { enabled: true, morph: 0, strength: 0,
       horizontalPx: 0, verticalPx: 0, physicsDistribution: {
-        horizontal_gain: 0.45, vertical_gain: 1,
+        version: 2, horizontal_gain: 0.45, vertical_gain: 1.0, vertical_floor: 0.35,
       } },
     physics: { torso: physics },
     overrides: { ghost: false, neck: "normal", collar: null, ...overrides },

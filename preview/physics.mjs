@@ -118,6 +118,8 @@ export function createUpperTorsoSecondaryDriver({ profile = "soft", model = "leg
                                                   breathDisplacementPx = 0.8, poseBiasPx = 0.15,
                                                   inertiaCouplingX = 0.08, inertiaCouplingY = 0.22,
                                                   dragCouplingX = 0.01, dragCouplingY = 0.02,
+                                                  lagSecondsX = 0, lagSecondsY = 0,
+                                                  idleLagMaxPx = 0.8, kickLagMaxPx = 2.0,
                                                   naturalFrequencyHz = null, dampingRatio = null,
                                                   maxDisplacementPx = 4, maxVelocityPxS = 24,
                                                   settleTimeScaleS = 0.03,
@@ -139,11 +141,13 @@ export function createUpperTorsoSecondaryDriver({ profile = "soft", model = "leg
   naturalFrequencyHz = Number(naturalFrequencyHz ?? profileFrequency);
   dampingRatio = Number(dampingRatio ?? profileDamping);
   if (![breathDisplacementPx, poseBiasPx, inertiaCouplingX, inertiaCouplingY,
-    dragCouplingX, dragCouplingY, naturalFrequencyHz, dampingRatio,
+    dragCouplingX, dragCouplingY, lagSecondsX, lagSecondsY, idleLagMaxPx,
+    kickLagMaxPx, naturalFrequencyHz, dampingRatio,
     maxDisplacementPx, maxVelocityPxS, settleTimeScaleS].every(Number.isFinite))
     throw new Error("torso physical-unit coefficients must be finite");
   if (!(naturalFrequencyHz > 0 && dampingRatio >= 0 && maxDisplacementPx > 0
-      && maxVelocityPxS > 0 && settleTimeScaleS >= 0))
+      && maxVelocityPxS > 0 && settleTimeScaleS >= 0 && lagSecondsX >= 0
+      && lagSecondsY >= 0 && idleLagMaxPx > 0 && kickLagMaxPx > 0))
     throw new Error("torso physical-unit coefficients are out of range");
   if (model === "inertial_relative_v1" && Object.keys(leftMaterialScale).length === 0 &&
       Object.keys(rightMaterialScale).length === 0) {
@@ -196,12 +200,17 @@ export function createUpperTorsoSecondaryDriver({ profile = "soft", model = "leg
     impulseY = clamp(Number(impulseY), maxImpulse);
     if (model === "inertial_relative_v2") {
       const equilibrium = Number(breath) * breathDisplacementPx + Number(angleY) * poseBiasPx;
+      const lag = -(Number(velocityX) * lagSecondsX + Number(velocityY) * lagSecondsY);
+      const lagLimit = Math.hypot(accelerationX, accelerationY) > 4
+        || Math.hypot(impulseX, impulseY) > 0.5 ? kickLagMaxPx : idleLagMaxPx;
+      const relativeLag = clamp(lag, lagLimit);
       const external = -Number(accelerationX) * inertiaCouplingX
         - Number(accelerationY) * inertiaCouplingY
         - Number(velocityX) * dragCouplingX
         - Number(velocityY) * dragCouplingY
         + Number(impulseX) + Number(impulseY);
-      return equilibrium + clamp(external, maxVelocityPxS * 2 * Math.PI * naturalFrequencyHz)
+      return equilibrium + relativeLag
+        + clamp(external, maxVelocityPxS * 2 * Math.PI * naturalFrequencyHz)
         / Math.max(1e-6, spring.state.stiffness);
     }
     const equilibrium = Number(breath) * breathGain + Number(angleY) * poseBiasGain;

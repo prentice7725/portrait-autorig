@@ -52,12 +52,16 @@ def default_p2_3_physics_spec(response_profile: str = "soft") -> dict[str, Any]:
             "breath_displacement_px": 0.8,
             "pose_bias_px": 0.15,
             "inertia_coupling_x": 0.08,
-            "inertia_coupling_y": 0.22,
+            "inertia_coupling_y": 0.3,
             "drag_coupling_x": 0.01,
             "drag_coupling_y": 0.02,
+            "lag_seconds_x": 0.12,
+            "lag_seconds_y": 1.4,
+            "idle_lag_max_px": 5.0,
+            "kick_lag_max_px": 12.0,
             "natural_frequency_hz": frequency,
             "damping_ratio": damping,
-            "max_displacement_px": 4.0,
+            "max_displacement_px": 16.0,
             "max_velocity_px_s": 24.0,
             "settle_time_scale_s": 0.03,
             "turn_asymmetry": 0.08,
@@ -128,6 +132,7 @@ def validate_physics_spec(spec: dict[str, Any]) -> list[str]:
                       "velocity_drag_x", "velocity_drag_y", "settle_gain",
                       "breath_displacement_px", "pose_bias_px", "inertia_coupling_x",
                       "inertia_coupling_y", "drag_coupling_x", "drag_coupling_y",
+                      "lag_seconds_x", "lag_seconds_y", "idle_lag_max_px", "kick_lag_max_px",
                       "natural_frequency_hz", "damping_ratio", "max_displacement_px",
                       "max_velocity_px_s", "settle_time_scale_s"):
             if field in torso:
@@ -143,6 +148,20 @@ def validate_physics_spec(spec: dict[str, Any]) -> list[str]:
         except (TypeError, ValueError):
             errors.append("upper_torso_driver.turn_asymmetry must be finite and in [0, 1]")
         for field in ("natural_frequency_hz", "max_displacement_px", "max_velocity_px_s"):
+            if field in torso:
+                try:
+                    if float(torso[field]) <= 0:
+                        errors.append(f"upper_torso_driver.{field} must be positive")
+                except (TypeError, ValueError):
+                    pass
+        for field in ("lag_seconds_x", "lag_seconds_y"):
+            if field in torso:
+                try:
+                    if float(torso[field]) < 0:
+                        errors.append(f"upper_torso_driver.{field} must be non-negative")
+                except (TypeError, ValueError):
+                    pass
+        for field in ("idle_lag_max_px", "kick_lag_max_px"):
             if field in torso:
                 try:
                     if float(torso[field]) <= 0:
@@ -337,6 +356,8 @@ class UpperTorsoSecondaryDriver:
                  breath_displacement_px: float = 0.8, pose_bias_px: float = 0.15,
                  inertia_coupling_x: float = 0.08, inertia_coupling_y: float = 0.22,
                  drag_coupling_x: float = 0.01, drag_coupling_y: float = 0.02,
+                 lag_seconds_x: float = 0.0, lag_seconds_y: float = 0.0,
+                 idle_lag_max_px: float = 0.8, kick_lag_max_px: float = 2.0,
                  natural_frequency_hz: float | None = None, damping_ratio: float | None = None,
                  max_displacement_px: float = 4.0, max_velocity_px_s: float = 24.0,
                  settle_time_scale_s: float = 0.03,
@@ -357,6 +378,10 @@ class UpperTorsoSecondaryDriver:
         self.inertia_gain_y = float(inertia_gain_y)
         self.velocity_drag_x = float(velocity_drag_x)
         self.velocity_drag_y = float(velocity_drag_y)
+        self.lag_seconds_x = float(lag_seconds_x)
+        self.lag_seconds_y = float(lag_seconds_y)
+        self.idle_lag_max_px = float(idle_lag_max_px)
+        self.kick_lag_max_px = float(kick_lag_max_px)
         self.settle_gain = float(settle_gain)
         if not all(math.isfinite(value) for value in (
                 self.breath_gain, self.pose_bias_gain, self.inertia_gain_x,
@@ -389,12 +414,16 @@ class UpperTorsoSecondaryDriver:
                 self.breath_displacement_px, self.pose_bias_px,
                 self.inertia_coupling_x, self.inertia_coupling_y,
                 self.drag_coupling_x, self.drag_coupling_y,
+                self.lag_seconds_x, self.lag_seconds_y,
+                self.idle_lag_max_px, self.kick_lag_max_px,
                 self.natural_frequency_hz, self.damping_ratio,
                 self.max_displacement_px, self.max_velocity_px_s,
                 self.settle_time_scale_s)):
             raise ValueError("torso physical-unit coefficients must be finite")
         if self.natural_frequency_hz <= 0 or self.damping_ratio < 0 or self.max_displacement_px <= 0 \
-                or self.max_velocity_px_s <= 0 or self.settle_time_scale_s < 0:
+                or self.max_velocity_px_s <= 0 or self.settle_time_scale_s < 0 \
+                or self.lag_seconds_x < 0 or self.lag_seconds_y < 0 \
+                or self.idle_lag_max_px <= 0 or self.kick_lag_max_px <= 0:
             raise ValueError("torso physical-unit coefficients are out of range")
         self._previous_input = 0.0
         self._previous_velocity = 0.0
@@ -533,12 +562,23 @@ class UpperTorsoSecondaryDriver:
             ix, iy = max(-max_impulse, min(max_impulse, ix)), max(-max_impulse, min(max_impulse, iy))
             if is_v2:
                 omega = 2.0 * math.pi * self.natural_frequency_hz
+                # Soft-tissue lag is an animation-space relative target, not
+                # a force divided by spring stiffness.  Acceleration remains
+                # a small directional kick; slow sway is visible because
+                # velocity (px/s) is integrated over an authored lag time.
+                lag_target = -(vx * self.lag_seconds_x + vy * self.lag_seconds_y)
+                lag_limit = (self.kick_lag_max_px
+                             if math.hypot(ax, ay) > 4.0 or math.hypot(ix, iy) > 0.5
+                             else self.idle_lag_max_px)
+                lag_target = max(-lag_limit, min(lag_limit, lag_target))
                 external = (-ax * self.inertia_coupling_x - ay * self.inertia_coupling_y
                             -vx * self.drag_coupling_x - vy * self.drag_coupling_y + ix + iy)
                 force = max(-self.max_velocity_px_s * omega,
                             min(self.max_velocity_px_s * omega, external))
-                left_target = (equilibrium_value + force / max(1e-6, self.springs["left"].material.stiffness)) * (1.0 - asym)
-                right_target = (equilibrium_value + force / max(1e-6, self.springs["right"].material.stiffness)) * (1.0 + asym)
+                left_target = (equilibrium_value + lag_target
+                               + force / max(1e-6, self.springs["left"].material.stiffness)) * (1.0 - asym)
+                right_target = (equilibrium_value + lag_target
+                                + force / max(1e-6, self.springs["right"].material.stiffness)) * (1.0 + asym)
             else:
                 force = max(-4.0, min(4.0,
                     -ax * self.inertia_gain_x - ay * self.inertia_gain_y

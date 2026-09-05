@@ -449,6 +449,13 @@ def authored_upper_torso_soft_morph_spec(region: dict[str, Any],
         "strength": round(float(strength), 3),
         "horizontal_px": DEFAULT_HORIZONTAL_PX,
         "vertical_px": DEFAULT_VERTICAL_PX,
+        # v2 physical q is attenuated by the authored lobe weights.  Keep the
+        # shape gain explicit so a runtime can tune visibility without
+        # changing the Composer-owned region or its locks.
+        "physics_distribution": {
+            "version": 2, "horizontal_gain": 0.45, "vertical_gain": 1.0,
+            "vertical_floor": 0.35,
+        },
         "center_lock": (region_geometry or {}).get("center_lock", CENTER_LOCK_WIDTH),
         "neckline_lock": (region_geometry or {}).get("neckline_lock", NECKLINE_LOCK_WIDTH),
         "confidence": verdict["confidence"],
