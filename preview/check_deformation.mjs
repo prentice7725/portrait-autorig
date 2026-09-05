@@ -745,6 +745,22 @@ console.log("\nP2 physics geometry bindings");
   check("torso physics preserves authored lobe/lock weights",
         near(torso.mesh.live[0], 8) && near(torso.mesh.live[1], 22)
         && near(torso.mesh.live[2], 30) && near(torso.mesh.live[3], 20));
+  // P2: independent spring outputs must reach their authored lobe weights.
+  const independentTorso = {
+    spec: torso.spec,
+    mesh: { rest: new Float32Array([10, 20, 30, 20]), live: new Float32Array([10, 20, 30, 20]),
+      weight: new Float32Array([1, 1]) },
+    softMorph: { left: new Float32Array([1, 0]), right: new Float32Array([0, 1]),
+      lowerBias: new Float32Array([1, 1]) },
+    eyeSide: null, isEye: false, isLid: false, shell: null,
+  };
+  deform(independentTorso, 0, { ...still, physics: { torso: {
+    left: { value: 2 }, right: { value: -1 },
+  } }, softMorph: { enabled: true, strength: 0, morph: 0,
+    horizontalPx: 1, verticalPx: 1 } });
+  check("independent torso lobe physics reaches local_soft_field",
+        near(independentTorso.mesh.live[0], 8) && near(independentTorso.mesh.live[1], 22)
+        && near(independentTorso.mesh.live[2], 29) && near(independentTorso.mesh.live[3], 19));
   state.manifest = savedManifest; state.frameOperations = savedOperations;
 }
 

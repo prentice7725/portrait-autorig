@@ -1020,6 +1020,7 @@ export function build(manifest, images) {
         profile: torsoSpec.profile || "soft",
         translationGain: torsoSpec.translation_gain ?? 1,
         angleGain: torsoSpec.angle_gain ?? 0.25,
+        turnAsymmetry: torsoSpec.turn_asymmetry ?? 0.08,
         inputMode: torsoSpec.input_mode || "translation",
         config,
       });
@@ -1618,14 +1619,25 @@ export function deform(part, now, motion) {
             // P2 torso physics feeds the authored local field; it never adds
             // a second uniform topwear translation. This preserves lobe,
             // neckline, center, and occluder locks already encoded in weights.
-            const physicsAmount = isSoftMorphTag(part.spec.tag)
-              ? Number(motion.physics?.torso?.value || 0) : 0;
-            const amount = sm.strength * sm.morph + physicsAmount;
-            if (amount !== 0) {
+            const torso = motion.physics?.torso;
+            const leftPhysics = isSoftMorphTag(part.spec.tag)
+              ? Number(torso?.left?.value ?? torso?.value ?? 0) : 0;
+            const rightPhysics = isSoftMorphTag(part.spec.tag)
+              ? Number(torso?.right?.value ?? torso?.value ?? 0) : 0;
+            const baseAmount = sm.strength * sm.morph;
+            const leftAmount = baseAmount + leftPhysics;
+            const rightAmount = baseAmount + rightPhysics;
+            if (leftAmount !== 0 || rightAmount !== 0) {
               const wl = part.softMorph.left[i], wr = part.softMorph.right[i];
               if (wl > 0 || wr > 0) {
-                x += sm.horizontalPx * amount * (wr - wl);
-                y += sm.verticalPx * amount * Math.max(wl, wr) * part.softMorph.lowerBias[i];
+                x += sm.horizontalPx * (rightAmount * wr - leftAmount * wl);
+                // Preserve the legacy max-weight result when both sides are
+                // equal, while allowing independent lobe spring amplitudes.
+                const lobeWeight = Math.max(wl, wr);
+                const totalWeight = wl + wr;
+                const weighted = totalWeight > 0
+                  ? (leftAmount * wl + rightAmount * wr) / totalWeight : 0;
+                y += sm.verticalPx * weighted * lobeWeight * part.softMorph.lowerBias[i];
               }
             }
           }

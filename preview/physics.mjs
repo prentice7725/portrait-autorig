@@ -93,18 +93,42 @@ export function createStrandSpringDriver(strands, options = {}) {
 }
 
 export function createUpperTorsoSecondaryDriver({ profile = "soft", translationGain = 1,
-                                                  angleGain = 0.25, inputMode = "translation",
-                                                  config = {} } = {}) {
+                                                  angleGain = 0.25, turnAsymmetry = 0.08,
+                                                  inputMode = "translation", config = {} } = {}) {
   const materials = { soft: [12, 5], firm_bounce: [24, 3.5], springy: [16, 1.8] };
   if (!materials[profile]) throw new Error(`unknown torso response profile: ${profile}`);
   if (!["translation", "angle", "velocity", "acceleration", "impulse"].includes(inputMode))
     throw new Error(`unknown torso input mode: ${inputMode}`);
-  const spring = createPhysicsState({ stiffness: materials[profile][0], damping: materials[profile][1], config });
+  if (!Number.isFinite(turnAsymmetry) || turnAsymmetry < 0 || turnAsymmetry > 1)
+    throw new Error("turnAsymmetry must be finite and in [0, 1]");
+  const springs = {
+    left: createPhysicsState({ stiffness: materials[profile][0], damping: materials[profile][1], config }),
+    right: createPhysicsState({ stiffness: materials[profile][0], damping: materials[profile][1], config }),
+  };
   let previousInput = 0, previousVelocity = 0;
   const target = (breath, angleY) => Number(breath) * translationGain + Number(angleY) * angleGain;
+  const snapshot = () => {
+    const left = springs.left.snapshot(), right = springs.right.snapshot();
+    return { value: (left.value + right.value) * 0.5,
+      velocity: (left.velocity + right.velocity) * 0.5,
+      degraded: left.degraded || right.degraded,
+      diagnostic: left.diagnostic || right.diagnostic, left, right };
+  };
   return {
-    resetPhysics: () => { previousInput = 0; previousVelocity = 0; return spring.resetPhysics(); },
-    warmupPhysics: (seconds, breath = 0, angleY = 0) => spring.warmupPhysics(seconds, target(breath, angleY)),
+    resetPhysics: () => {
+      previousInput = 0; previousVelocity = 0;
+      springs.left.resetPhysics(); springs.right.resetPhysics();
+      return snapshot();
+    },
+    warmupPhysics: (seconds, breath = 0, angleY = 0) => {
+      const source = target(breath, angleY), asym = Math.max(-1, Math.min(1, angleY * turnAsymmetry));
+      const count = Math.ceil((seconds ?? config.warmup_seconds ?? DEFAULT_PHYSICS_CONFIG.warmup_seconds)
+                              * Number(config.update_hz || 60));
+      springs.left.resetPhysics(); springs.right.resetPhysics();
+      springs.left.stepPhysicsFixed(count, source * (1 - asym));
+      springs.right.stepPhysicsFixed(count, source * (1 + asym));
+      return snapshot();
+    },
     stepPhysicsFixed: (count = 1, breath = 0, angleY = 0) => {
       const source = target(breath, angleY), dt = 1 / Number(config.update_hz || 60);
       const velocity = (source - previousInput) / dt;
@@ -112,7 +136,10 @@ export function createUpperTorsoSecondaryDriver({ profile = "soft", translationG
       const interpreted = { translation: source, angle: source, velocity,
         acceleration, impulse: source - previousInput }[inputMode];
       previousInput = source; previousVelocity = velocity;
-      return spring.stepPhysicsFixed(count, interpreted);
+      const asym = Math.max(-1, Math.min(1, angleY * turnAsymmetry));
+      springs.left.stepPhysicsFixed(count, interpreted * (1 - asym));
+      springs.right.stepPhysicsFixed(count, interpreted * (1 + asym));
+      return snapshot();
     },
   };
 }

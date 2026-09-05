@@ -229,6 +229,9 @@ def upper_torso_secondary_entries(
         "output": PARAM_UPPER_TORSO_SECONDARY,
         "response_profile": spec.get("response_profile"),
         "response_config": spec.get("response_config"),
+        # P2 keeps the authored field as the geometry backend while exposing
+        # a small, explicit left/right turn coupling for the runtime spring.
+        "turn_asymmetry": spec.get("turn_asymmetry", 0.08),
         "phase": PHASE_SECONDARY,
     }
     return deformer, driver
