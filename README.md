@@ -205,6 +205,18 @@ Reset Motion 역시 manifest를 저장하지 않는 실험용 입력이며, 최�
 Body Y/Chest L/R를 motion graph로 표시합니다. profiler에는 physics backlog drop 횟수도 표시되어
 정상 idle에서 반복적으로 증가하면 성능 문제로 판정할 수 있습니다.
 
+P2.3의 physical-unit QA는 spring scalar를 그대로 읽어 PASS시키지 않습니다.
+실제 compiled `topwear` mesh의 authored lobe/lock weight에서 deterministic
+probe를 선택하고, rest vertex와 live vertex의 실제 픽셀 변위를 측정합니다.
+`Chest 1px/2px/4px`는 좌우 primary probe가 요청값의 ±15% 안에 들어와야 하며,
+lock probe는 0.05px 이하로 유지되어야 합니다. Body Kick 회귀도 root pulse →
+fixed-tick velocity/acceleration → torso spring → `local_soft_field` → 최종
+topwear vertex 경로를 실행하고, body-stop 시점의 0.15px 이상 follow-through와
+최종 0.05px 이하 settle을 검사합니다. 30/60/120 FPS 검사는 같은 Body Kick을
+실제 runtime pipeline으로 재생한 최종 probe 좌표를 비교하며 허용오차는 0.02px입니다.
+따라서 synthetic one-vertex probe나 driver-only framerate 검사는 계약을 충족하지
+않는 것으로 취급합니다.
+
 Physics는 manifest에서 명시적으로 opt-in합니다. 예시는 다음과 같습니다.
 
 ```json
