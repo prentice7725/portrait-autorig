@@ -49,6 +49,13 @@ def validate_physics_spec(spec: dict[str, Any]) -> list[str]:
             errors.append(f"unsupported upper_torso_driver.profile: {torso.get('profile')!r}")
         if torso.get("input_mode", "translation") not in INPUT_MODES:
             errors.append(f"unsupported upper_torso_driver.input_mode: {torso.get('input_mode')!r}")
+        for field in ("translation_gain", "angle_gain", "velocity_gain", "acceleration_gain"):
+            if field in torso:
+                try:
+                    if not math.isfinite(float(torso[field])):
+                        errors.append(f"upper_torso_driver.{field} must be finite")
+                except (TypeError, ValueError):
+                    errors.append(f"upper_torso_driver.{field} must be finite")
         try:
             asymmetry = float(torso.get("turn_asymmetry", 0.08))
             if not math.isfinite(asymmetry) or not 0 <= asymmetry <= 1:
@@ -227,6 +234,7 @@ class UpperTorsoSecondaryDriver:
 
     def __init__(self, *, profile: str = "soft", translation_gain: float = 1.0,
                  angle_gain: float = 0.25, turn_asymmetry: float = 0.08,
+                 velocity_gain: float = 0.03, acceleration_gain: float = 0.005,
                  config: dict[str, Any] | None = None,
                  input_mode: str = "translation") -> None:
         if profile not in self.PROFILES:
@@ -235,6 +243,10 @@ class UpperTorsoSecondaryDriver:
             raise ValueError(f"unknown torso input mode: {input_mode!r}")
         self.translation_gain = float(translation_gain)
         self.angle_gain = float(angle_gain)
+        self.velocity_gain = float(velocity_gain)
+        self.acceleration_gain = float(acceleration_gain)
+        if not math.isfinite(self.velocity_gain) or not math.isfinite(self.acceleration_gain):
+            raise ValueError("velocity/acceleration gains must be finite")
         self.turn_asymmetry = float(turn_asymmetry)
         if not math.isfinite(self.turn_asymmetry) or self.turn_asymmetry < 0 or self.turn_asymmetry > 1:
             raise ValueError("turn_asymmetry must be finite and in [0, 1]")
@@ -298,11 +310,15 @@ class UpperTorsoSecondaryDriver:
 
     def stepPhysicsFixed(self, n: int = 1, *, breath: float = 0.0,
                          angle_y: float = 0.0, input_mode: str | None = None,
-                         input_value: float | None = None) -> PhysicsSnapshot:
+                         input_value: float | None = None,
+                         body_velocity: float = 0.0,
+                         body_acceleration: float = 0.0) -> PhysicsSnapshot:
         mode = self.input_mode if input_mode is None else input_mode
         if mode not in INPUT_MODES:
             raise ValueError(f"unknown torso input mode: {mode!r}")
         source = (breath * self.translation_gain + angle_y * self.angle_gain
+                  + body_velocity * self.velocity_gain
+                  + body_acceleration * self.acceleration_gain
                   if input_value is None else float(input_value))
         target = self._interpret(source, mode)
         asym = max(-1.0, min(1.0, angle_y * self.turn_asymmetry))

@@ -42,4 +42,10 @@ const afterWarmup = warmedAfterHistory.stepPhysicsFixed(1, 1, 0);
 const cleanStep = cleanReference.stepPhysicsFixed(1, 1, 0);
 if (afterWarmup.left.value !== cleanStep.left.value || afterWarmup.right.value !== cleanStep.right.value)
   throw new Error("torso warmup did not clear input history");
+const coupled = createUpperTorsoSecondaryDriver({ velocityGain: 1, accelerationGain: 0 });
+const uncoupled = createUpperTorsoSecondaryDriver({ velocityGain: 0, accelerationGain: 0 });
+const coupledFrame = coupled.stepPhysicsFixed(1, 0, 0, 1, 0);
+const uncoupledFrame = uncoupled.stepPhysicsFixed(1, 0, 0, 1, 0);
+if (!(coupledFrame.value > uncoupledFrame.value))
+  throw new Error("torso body velocity coupling was not applied");
 console.log("capture physics golden check passed");

@@ -51,6 +51,7 @@ const isSoftMorphTag = (tag) => SOFT_MORPH_TAGS.has(tag);
 export const SOFT_MORPH_DEFLATE_SCALE = 0.35; // exhale moves less than inhale (design doc 9)
 export const SOFT_MORPH_CENTER_TRANSITION = 0.15; // fraction of topwear width past center_lock
                                             // before the lock fully releases (design doc 8.2)
+export const PHYSICS_MAX_CATCHUP_STEPS = 4;
 
 // Groups that can legitimately draw *over* `topwear` at rest -- crossed-arm
 // `handwear`, a `neckwear` layered on top -- mirrors `rig.chest_occluder_alpha`'s
@@ -246,6 +247,11 @@ export const state = {
   physicsOutputs: {},
   physicsAccumulator: 0,
   physicsLastNow: null,
+  physicsInput: { turnY: 0, velocity: 0 },
+  idleUiLast: -Infinity,
+  overlayVisible: false,
+  profiler: { fps: 0, physicsMs: 0, deformMs: 0, stitchMs: 0, uploadMs: 0,
+              activeVertices: 0, totalVertices: 0, lastAt: -Infinity },
   shells: null,           // fitted in build(); null disables the shell path
   variantSets: {},
   variantSelections: {},
@@ -700,13 +706,29 @@ export function shellDelta(shell, x, y, yaw, pitch, out = SHELL_OUT) {
 function gridVertexList(part) {
   const [x1, y1, x2, y2] = part.xyxy;
   const cell = Math.max(4, part.mesh.cell);
-  const cols = Math.max(1, Math.round((x2 - x1) / cell));
-  const rows = Math.max(1, Math.round((y2 - y1) / cell));
+  const refinement = part.mesh.refinement;
+  const axis = (start, end, baseCell, refineStart, refineEnd, refineCell) => {
+    const count = Math.max(1, Math.round((end - start) / baseCell));
+    const values = Array.from({ length: count + 1 }, (_, i) =>
+      start + (end - start) * i / count);
+    if (!(Number.isFinite(refineStart) && Number.isFinite(refineEnd)
+          && refineEnd > refineStart && refineCell > 0)) return values;
+    for (let value = Math.max(start, refineStart); value <= Math.min(end, refineEnd) + 1e-6;
+         value += refineCell) values.push(value);
+    values.push(Math.max(start, refineStart), Math.min(end, refineEnd));
+    return [...new Set(values.map((value) => Number(value.toFixed(4))))].sort((a, b) => a - b);
+  };
+  const region = refinement?.region;
+  const refineCell = Math.max(8, Number(refinement?.cell || 0));
+  const xs = axis(x1, x2, cell, region?.[0], region?.[2], refineCell);
+  const ys = axis(y1, y2, cell, region?.[1], region?.[3], refineCell);
+  const cols = xs.length - 1, rows = ys.length - 1;
   const pts = [];
   for (let r = 0; r <= rows; r++) {
     for (let c = 0; c <= cols; c++) {
-      const u = c / cols, v = r / rows;
-      pts.push({ x: x1 + (x2 - x1) * u, y: y1 + (y2 - y1) * v, u, v });
+      const x = xs[c], y = ys[r];
+      pts.push({ x, y, u: (x - x1) / Math.max(1, x2 - x1),
+        v: (y - y1) / Math.max(1, y2 - y1) });
     }
   }
   const idx = [], wire = [];
@@ -1021,6 +1043,8 @@ export function build(manifest, images) {
         translationGain: torsoSpec.translation_gain ?? 1,
         angleGain: torsoSpec.angle_gain ?? 0.25,
         turnAsymmetry: torsoSpec.turn_asymmetry ?? 0.08,
+        velocityGain: torsoSpec.velocity_gain ?? 0.03,
+        accelerationGain: torsoSpec.acceleration_gain ?? 0.005,
         inputMode: torsoSpec.input_mode || "translation",
         config,
       });
@@ -1260,11 +1284,16 @@ export function resetPhysics() {
     state.physicsOutputs[name] = driver.resetPhysics();
   }
   state.physicsAccumulator = 0;
+  state.physicsInput = { turnY: 0, velocity: 0 };
+  state.physicsLastNow = null;
   return state.physicsOutputs;
 }
 
 export function warmupPhysics(seconds, inputs = {}) {
   if (!state.physicsDrivers) return {};
+  state.physicsInput = { turnY: 0, velocity: 0 };
+  state.physicsLastNow = null;
+  state.physicsAccumulator = 0;
   for (const [name, driver] of Object.entries(state.physicsDrivers)) {
     state.physicsOutputs[name] = name === "torso"
       ? driver.warmupPhysics(seconds, inputs.breath || 0, inputs.angleY || 0)
@@ -1283,7 +1312,8 @@ export function stepPhysicsFixed(count = 1, inputs = {}) {
   if (!state.physicsDrivers) return {};
   for (const [name, driver] of Object.entries(state.physicsDrivers)) {
     state.physicsOutputs[name] = name === "torso"
-      ? driver.stepPhysicsFixed(count, inputs.breath || 0, inputs.angleY || 0)
+      ? driver.stepPhysicsFixed(count, inputs.breath || 0, inputs.angleY || 0,
+          inputs.bodyVelocity || 0, inputs.bodyAcceleration || 0)
       : driver.stepPhysicsFixed(count, inputs.strandTarget || 0);
   }
   return state.physicsOutputs;
@@ -1291,14 +1321,26 @@ export function stepPhysicsFixed(count = 1, inputs = {}) {
 
 function advancePhysics(now, inputs) {
   if (!state.physicsDrivers) return {};
-  if (state.physicsLastNow == null) state.physicsLastNow = now;
-  state.physicsAccumulator += Math.max(0, Math.min(0.1, (now - state.physicsLastNow) / 1000));
+  const previousNow = state.physicsLastNow;
+  const elapsed = previousNow == null ? 0 : Math.max(0, (now - previousNow) / 1000);
+  state.physicsAccumulator += Math.max(0, Math.min(0.1, elapsed));
   state.physicsLastNow = now;
   const hz = Number((state.manifest.physics?.config || {}).update_hz || 60);
   const tick = 1 / Math.max(1, hz);
+  const previousTurnY = state.physicsInput.turnY;
+  const previousVelocity = state.physicsInput.velocity;
+  const bodyVelocity = elapsed > 0 ? (Number(inputs.angleY || 0) - previousTurnY) / elapsed : 0;
+  const bodyAcceleration = elapsed > 0 ? (bodyVelocity - previousVelocity) / elapsed : 0;
+  state.physicsInput = { turnY: Number(inputs.angleY || 0), velocity: bodyVelocity };
+  // Drop an excessive backlog instead of turning one late frame into a
+  // physics spiral. At 60Hz this still permits roughly 66ms of catch-up.
+  state.physicsAccumulator = Math.min(state.physicsAccumulator,
+                                      tick * PHYSICS_MAX_CATCHUP_STEPS);
   let count = 0;
-  while (state.physicsAccumulator >= tick && count < 8) { state.physicsAccumulator -= tick; count++; }
-  if (count) stepPhysicsFixed(count, inputs);
+  while (state.physicsAccumulator >= tick && count < PHYSICS_MAX_CATCHUP_STEPS) {
+    state.physicsAccumulator -= tick; count++;
+  }
+  if (count) stepPhysicsFixed(count, { ...inputs, bodyVelocity, bodyAcceleration });
   return state.physicsOutputs;
 }
 
@@ -1340,12 +1382,28 @@ export function renderPanel() {
  *  the WebGL one so the geometry can be checked without touching the render
  *  path. No-ops when the checkbox is off or this run has no region. */
 export function drawSoftRegionOverlay() {
-  const ctx = document.getElementById("regionOverlay").getContext("2d");
+  const canvas = document.getElementById("regionOverlay");
+  const enabled = !!document.getElementById("softRegion").checked;
+  // Avoid a full overlay-canvas clear on every frame when the debug toggle is
+  // off. Clear once on the transition so disabling the overlay never leaves a
+  // stale outline behind.
+  if (!enabled) {
+    if (state.overlayVisible) {
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, state.canvasW, state.canvasH);
+      state.overlayVisible = false;
+    }
+    return;
+  }
+  const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, state.canvasW, state.canvasH);
-  if (!document.getElementById("softRegion").checked) return;
   const spec = (state.manifest.motion || {}).upper_torso_soft_morph;
   const topwear = state.parts.find((p) => isSoftMorphTag(p.spec.tag));
-  if (!spec || !spec.left || !spec.right || !topwear) return;
+  if (!spec || !spec.left || !spec.right || !topwear) {
+    state.overlayVisible = false;
+    return;
+  }
+  state.overlayVisible = true;
 
   const [x1, y1, x2, y2] = topwear.spec.xyxy;
   const local = spec.coordinate_space !== "canvas_normalized";
@@ -1376,6 +1434,35 @@ export function drawSoftRegionOverlay() {
 }
 
 /* ---------- animation ---------- */
+
+function updateIdleControls(now) {
+  if (now - state.idleUiLast < 100) return;
+  state.idleUiLast = now;
+  // UI writes are intentionally throttled. The animation state is updated at
+  // render rate below; only the human-facing slider/label is sampled at 10Hz.
+  for (const [id, value, digits] of [["turnX", state.turnX, 2],
+                                     ["turnY", state.turnY, 2],
+                                     ["tilt", state.tiltDeg, 1]]) {
+    const slider = document.getElementById(id);
+    if (slider) slider.value = value;
+    const label = document.getElementById(`${id}v`);
+    if (label) label.textContent = Number(value).toFixed(digits) + (id === "tilt" ? "°" : "");
+  }
+}
+
+function updateProfiler(now, frameMs, activeVertices, totalVertices) {
+  state.profiler.activeVertices = activeVertices;
+  state.profiler.totalVertices = totalVertices;
+  if (now - state.profiler.lastAt < 100) return;
+  state.profiler.lastAt = now;
+  state.profiler.fps = frameMs > 0 ? 1000 / frameMs : 0;
+  const el = document.getElementById("profiler");
+  if (!el) return;
+  const p = state.profiler;
+  el.textContent = `FPS ${p.fps.toFixed(0)} · physics ${p.physicsMs.toFixed(2)}ms · `
+    + `deform ${p.deformMs.toFixed(2)}ms · stitch ${p.stitchMs.toFixed(2)}ms · `
+    + `upload ${p.uploadMs.toFixed(2)}ms · vertices ${p.activeVertices}/${p.totalVertices}`;
+}
 
 export function scheduleBlink(now) {
   const cfg = state.manifest.motion.blink;
@@ -1662,6 +1749,7 @@ export function deform(part, now, motion) {
 export function applyBoundaryStitches(parts = state.parts,
                                       constraints = state.manifest?.constraints || []) {
   const byName = new Map(parts.map((part) => [part.spec?.name || part.name, part]));
+  const dirty = new Set();
   for (const constraint of constraints) {
     if (constraint.kind !== "boundary_stitch") continue;
     const tolerance = Math.max(0, Number(constraint.tolerance_px ?? 0));
@@ -1688,15 +1776,38 @@ export function applyBoundaryStitches(parts = state.parts,
         target[1] += point[1] * weights[index] / total;
       });
       for (const { member, part } of members) {
-        part.mesh.live[member.vertex * 2] = target[0];
-        part.mesh.live[member.vertex * 2 + 1] = target[1];
+        const xIndex = member.vertex * 2, yIndex = xIndex + 1;
+        if (part.mesh.live[xIndex] !== target[0] || part.mesh.live[yIndex] !== target[1]) {
+          part.mesh.live[xIndex] = target[0];
+          part.mesh.live[yIndex] = target[1];
+          dirty.add(part);
+        }
       }
     }
   }
+  return dirty;
+}
+
+function motionGeometryKey(motion) {
+  const physics = motion.physics || {};
+  const torso = physics.torso || {};
+  const strand = Object.fromEntries(Object.entries(physics.strand || {})
+    .map(([id, value]) => [id, value?.value ?? 0]));
+  return JSON.stringify({
+    turnX: motion.turnX, turnY: motion.turnY, tiltRad: motion.tiltRad,
+    shell: motion.shell, blink: motion.blink, squash: motion.squash,
+    mouthOpen: motion.mouthOpen, breath: motion.breath, breathAmp: motion.breathAmp,
+    lidRatio: motion.lidRatio, lidThickness: motion.lidThickness, chestX: motion.chestX,
+    softMorph: motion.softMorph, physics: {
+      torso: [torso.value ?? 0, torso.left?.value ?? null, torso.right?.value ?? null],
+      strand,
+    }, overrides: motion.overrides,
+  });
 }
 
 export function frame(now) {
   const gl = state.gl, loc = state.loc;
+  const frameStart = performance.now();
   const t = (now - state.t0) / 1000;
   const dt = Math.min(0.1, (now - (state.lastFrame || now)) / 1000);
   state.lastFrame = now;
@@ -1705,9 +1816,10 @@ export function frame(now) {
     // turn held well inside where it starts to cost something.
     const turn = state.manifest.motion.head_turn;
     const limit = Math.min(turn.max_x, IDLE_TURN);
-    setSlider("turnX", (Math.sin(t * 0.37) * 0.73 + Math.sin(t * 0.13) * 0.27) * limit);
-    setSlider("turnY", Math.sin(t * 0.29 + 1.1) * 0.45 * Math.min(turn.max_y, IDLE_TURN));
-    setSlider("tilt", Math.sin(t * 0.23 + 0.6) * state.manifest.motion.head_tilt.max_deg);
+    state.turnX = (Math.sin(t * 0.37) * 0.73 + Math.sin(t * 0.13) * 0.27) * limit;
+    state.turnY = Math.sin(t * 0.29 + 1.1) * 0.45 * Math.min(turn.max_y, IDLE_TURN);
+    state.tiltDeg = Math.sin(t * 0.23 + 0.6) * state.manifest.motion.head_tilt.max_deg;
+    updateIdleControls(now);
   }
 
   if (document.getElementById("doBlink").checked) {
@@ -1798,11 +1910,13 @@ export function frame(now) {
       collar: state.collarOverride,
     },
   };
+  const physicsStart = performance.now();
   motion.physics = advancePhysics(now, {
     breath: motion.breath,
     angleY: motion.turnY,
     strandTarget: motion.turnY,
   });
+  state.profiler.physicsMs = performance.now() - physicsStart;
 
   // v0.2's manifest phase list is the runtime ordering contract.  The
   // deformation math below remains the legacy-compatible render backend, but
@@ -1814,19 +1928,33 @@ export function frame(now) {
   gl.clear(gl.COLOR_BUFFER_BIT);
 
   const wire = document.getElementById("wire").checked;
+  const geometryKey = motionGeometryKey(motion);
   const drawParts = [];
+  let activeVertices = 0, totalVertices = 0;
+  const deformStart = performance.now();
   for (const p of state.parts) {
     if (!p.visible) continue;
     const opacity = opacityOf(p, motion);
     if (opacity <= 0.002) continue;
-    deform(p, now, motion);
+    totalVertices += p.mesh.rest.length / 2;
+    const partKey = `${geometryKey}|${opacity}`;
+    p.dirty = p.lastDeformKey !== partKey;
+    if (p.dirty) {
+      deform(p, now, motion);
+      p.lastDeformKey = partKey;
+      activeVertices += p.mesh.rest.length / 2;
+    }
     drawParts.push({ part: p, opacity });
   }
-  applyBoundaryStitches(state.parts);
+  state.profiler.deformMs = performance.now() - deformStart;
+  const stitchStart = performance.now();
+  const stitchDirty = applyBoundaryStitches(state.parts);
+  state.profiler.stitchMs = performance.now() - stitchStart;
+  for (const part of stitchDirty) { part.dirty = true; }
+  const uploadStart = performance.now();
   for (const { part: p, opacity } of drawParts) {
-
     gl.bindBuffer(gl.ARRAY_BUFFER, p.buf.pos);
-    gl.bufferSubData(gl.ARRAY_BUFFER, 0, p.mesh.live);
+    if (p.dirty) gl.bufferSubData(gl.ARRAY_BUFFER, 0, p.mesh.live);
     gl.enableVertexAttribArray(loc.pos);
     gl.vertexAttribPointer(loc.pos, 2, gl.FLOAT, false, 0, 0);
 
@@ -1859,6 +1987,8 @@ export function frame(now) {
       gl.drawElements(gl.LINES, p.mesh.wireCount, gl.UNSIGNED_SHORT, 0);
     }
   }
+  state.profiler.uploadMs = performance.now() - uploadStart;
+  updateProfiler(now, performance.now() - frameStart, activeVertices, totalVertices);
   drawSoftRegionOverlay();
   requestAnimationFrame(frame);
 }

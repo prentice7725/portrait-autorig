@@ -134,3 +134,10 @@ class DeterministicPhysicsTests(unittest.TestCase):
             "unsupported strand_driver.input_mode: 'angular_velocity'",
             "unsupported upper_torso_driver.input_mode: 'angular_velocity'",
         ])
+
+    def test_torso_body_velocity_coupling_is_optional_and_small(self):
+        coupled = UpperTorsoSecondaryDriver(velocity_gain=1.0, acceleration_gain=0.0)
+        baseline = UpperTorsoSecondaryDriver(velocity_gain=0.0, acceleration_gain=0.0)
+        coupled.stepPhysicsFixed(1, body_velocity=1.0)
+        baseline.stepPhysicsFixed(1, body_velocity=1.0)
+        self.assertGreater(coupled.snapshot()["value"], baseline.snapshot()["value"])

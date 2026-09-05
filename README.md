@@ -163,11 +163,25 @@ P1은 위 항목과 parity/QA gate를 충족하여 `CLOSED/FROZEN` 상태입니�
   `turn_asymmetry`(기본 0.08)로 작은 고개 회전 비대칭을 주며, 출력은
   별도 uniform 이동 없이 Composer-authored `local_soft_field`의 lobe/lock
   weights를 통해 적용됩니다. scalar `torso.value`도 하위 호환 fallback으로
-  지원합니다. strand output은 `strand_spring` secondary operation으로 hair
+  지원합니다. `velocity_gain`/`acceleration_gain`은 body turn의 변화량을
+  아주 작게 secondary target에 섞어 정착감을 만들며 기본값은 각각 0.03/0.005입니다.
+  strand output은 `strand_spring` secondary operation으로 hair
   topology에 적용됩니다. physics manifest preflight와 capture reset/warmup
   golden QA, 좌우 독립 출력 회귀를 포함해 Phase 2 계약을 고정했습니다. 현재
   profile 값은 `EXPERIMENTAL` tuning registry로 관리합니다. 프로파일 envelope는
   `node preview/check_physics_tuning.mjs`로 재현할 수 있습니다.
+
+P2.1 품질/성능 패스도 preview에 반영되어 있습니다. Auto Idle은 매 프레임
+slider DOM을 쓰지 않고 상태만 갱신하며 UI 표시는 10Hz로 제한합니다. 변형이
+없는 part는 CPU deformation과 `bufferSubData`를 재사용하고, boundary stitch는
+실제 좌표가 바뀐 participant만 dirty 처리합니다. region overlay는 켜지는
+순간에만 canvas를 지우고, Run 패널의 profiler에서 FPS/physics/deform/stitch/
+upload 시간과 active/total vertex 수를 확인할 수 있습니다. Chest Soft Morph
+는 authored lobe bounding box에만 18px local refinement를 추가하고 바깥
+topwear grid는 기존 cell을 유지합니다. 슬라이더는 hard-morph QA를 위해
+확장했으며 canonical manifest의 authored amplitude는 변경하지 않습니다.
+Fixed-step backlog는 프레임당 최대 4 tick으로 제한해 지연 프레임에서 physics
+spiral이 발생하지 않도록 합니다.
 
 Physics는 manifest에서 명시적으로 opt-in합니다. 예시는 다음과 같습니다.
 
@@ -186,7 +200,9 @@ Physics는 manifest에서 명시적으로 opt-in합니다. 예시는 다음과 �
       "profile": "soft",
       "translation_gain": 1.0,
       "angle_gain": 0.25,
-      "turn_asymmetry": 0.08
+      "turn_asymmetry": 0.08,
+      "velocity_gain": 0.03,
+      "acceleration_gain": 0.005
     }
   }
 }
