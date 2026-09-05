@@ -33,4 +33,13 @@ asymmetric.resetPhysics();
 const asymmetricFrame = asymmetric.stepPhysicsFixed(8, 1, 0.5);
 if (!(asymmetricFrame.left.value !== asymmetricFrame.right.value))
   throw new Error("torso turn asymmetry did not produce independent lobe outputs");
+const warmedAfterHistory = createUpperTorsoSecondaryDriver({ profile: "soft", inputMode: "velocity" });
+warmedAfterHistory.stepPhysicsFixed(1, 1, 0);
+warmedAfterHistory.warmupPhysics(0, 0, 0);
+const cleanReference = createUpperTorsoSecondaryDriver({ profile: "soft", inputMode: "velocity" });
+cleanReference.warmupPhysics(0, 0, 0);
+const afterWarmup = warmedAfterHistory.stepPhysicsFixed(1, 1, 0);
+const cleanStep = cleanReference.stepPhysicsFixed(1, 1, 0);
+if (afterWarmup.left.value !== cleanStep.left.value || afterWarmup.right.value !== cleanStep.right.value)
+  throw new Error("torso warmup did not clear input history");
 console.log("capture physics golden check passed");

@@ -124,6 +124,9 @@ export function createUpperTorsoSecondaryDriver({ profile = "soft", translationG
       const source = target(breath, angleY), asym = Math.max(-1, Math.min(1, angleY * turnAsymmetry));
       const count = Math.ceil((seconds ?? config.warmup_seconds ?? DEFAULT_PHYSICS_CONFIG.warmup_seconds)
                               * Number(config.update_hz || 60));
+      // Warm-up is a standalone state transition: do not carry velocity or
+      // acceleration history into the first post-warmup fixed tick.
+      previousInput = 0; previousVelocity = 0;
       springs.left.resetPhysics(); springs.right.resetPhysics();
       springs.left.stepPhysicsFixed(count, source * (1 - asym));
       springs.right.stepPhysicsFixed(count, source * (1 + asym));
