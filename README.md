@@ -217,6 +217,21 @@ topwear vertex 경로를 실행하고, body-stop 시점의 0.15px 이상 follow-
 따라서 synthetic one-vertex probe나 driver-only framerate 검사는 계약을 충족하지
 않는 것으로 취급합니다.
 
+P2.4 motion calibration에서는 느린 Auto Idle의 상대 지연을 acceleration-only
+force로 만들지 않습니다. `body velocity (px/s) × lag_seconds`를 bounded relative
+pixel target으로 사용하고, acceleration은 방향 전환 시의 작은 kick으로만
+남깁니다. 기본 lag는 X 0.12초/Y 1.4초이며 idle cap은 5.0px, kick cap은
+12.0px입니다 (idle 상태에서도 실제로 보이는 가슴 출렁임이 나오도록 0.25초/
+0.8px/2.0px에서 올린 값이며, 이에 맞춰 spring의 `max_displacement_px`도
+4px에서 16px로 올렸습니다 — 그렇지 않으면 spring이 새 lag target에 도달하기
+전에 clamp에 먼저 걸립니다). 따라서 breathing은 볼륨, velocity는 phase lag, acceleration은
+짧은 kick, spring은 follow-through/settle을 담당합니다. physical shape gain은
+1/2/4px 응답 QA(hypot(dx, dy) ±15%)에 맞춰 calibrate된 horizontal 0.45 /
+vertical 1.0을 그대로 유지합니다. authored lobe weight(`lowerBias`)가 로브
+중심에서 0에 가까워 q가 화면에서 사라지던 문제는 게인이 아니라 vertical floor
+0.35로 고칩니다 — 로브 하단(QA probe 지점)은 그대로 두고 중심부에도 최소 35%
+반응을 보장합니다. 이 보정은 region/lock geometry를 바꾸지 않습니다.
+
 Composer Assembly의 `rig_intent.regions[*]`에서 `topwear`/`topwear_with_arms`/
 `topwear_with_handwear` 대상의 `enabled: true` torso region을 authoring하면,
 GUI workflow와 direct Assembly compiler가 자동으로 `physics.upper_torso_driver`
@@ -248,11 +263,15 @@ Physics는 manifest에서 명시적으로 opt-in합니다. 예시는 다음과 �
       "profile": "soft",
       "breath_displacement_px": 0.8,
       "pose_bias_px": 0.15,
-      "inertia_coupling_y": 0.22,
+      "inertia_coupling_y": 0.3,
       "drag_coupling_y": 0.02,
+      "lag_seconds_x": 0.12,
+      "lag_seconds_y": 1.4,
+      "idle_lag_max_px": 5.0,
+      "kick_lag_max_px": 12.0,
       "natural_frequency_hz": 1.8,
       "damping_ratio": 0.75,
-      "max_displacement_px": 4.0,
+      "max_displacement_px": 16.0,
       "max_velocity_px_s": 24.0,
       "settle_time_scale_s": 0.03
     }
@@ -272,12 +291,24 @@ Physics는 manifest에서 명시적으로 opt-in합니다. 예시는 다음과 �
 `upper_torso_driver`의 결과는 기존 `local_soft_field`에 합쳐지므로
 two-lobe/center/neckline/shoulder lock과 author strength가 유지됩니다. physics
 block이 없거나 driver가 비활성화되면 기존 rest reference 경로를 그대로 사용합니다.
+새로 생성되는 authored soft-morph manifest에는 이 gain이
+`motion.upper_torso_soft_morph.physics_distribution`로 기록되고, 이전 v2
+manifest는 preview의 보수적 fallback으로 읽힙니다.
 
 Composer가 authoring한 `upper_torso_secondary`의 lobe 중심/반경은 target instance
 정규화 좌표입니다. Assembly compile은 이를 `coordinate_space:
 "canvas_normalized"`로 manifest에 표시하고, preview는 cropped topwear bbox로
 재정규화하지 않습니다. 따라서 Composer overlay와 Rig overlay가 같은 캔버스 위치를
 가리키며, AutoRig가 별도의 가슴 영역을 다시 추정하지 않습니다.
+
+`center_lock`/`neckline_lock`/center transition은 반대로 **항상 topwear crop
+자기 자신의 width/height 기준 fraction**입니다 (`coordinate_space`와 무관).
+lobe 위치만 canvas-normalized 기준을 쓰고 lock 영역까지 canvas 기준으로 계산하면,
+캔버스 폭이 topwear crop보다 훨씬 넓은 캐릭터(대부분의 경우)에서 lock/transition
+영역이 실제 의도보다 훨씬 넓어져 lobe 중심 자체가 "부분 lock" 구간에 걸리고, 전체
+가슴 영역의 weight가 어디서도 1에 못 미치게 눌립니다 — morph나 physics 신호를
+아무리 키워도 화면에서 거의 안 움직이는 것처럼 보이는 근본 원인이었습니다
+(`node preview/check_lock_zone_basis.mjs`로 회귀 확인).
 
 주요 회귀 검증은 다음 명령으로 재현할 수 있습니다.
 
@@ -292,6 +323,7 @@ node preview/check_physical_response.mjs
 node preview/check_body_kick_pipeline.mjs
 node preview/check_motion_framerate_parity.mjs
 node preview/check_chest_geometry_parity.mjs
+node preview/check_lock_zone_basis.mjs
 ```
 
 테스트 의존성에는 원본 Composer schema를 직접 검증하기 위한 `jsonschema`가 포함되어

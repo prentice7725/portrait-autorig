@@ -219,6 +219,25 @@ class DeterministicPhysicsTests(unittest.TestCase):
         self.assertLess(driver.snapshot()["value"], 0)
         self.assertEqual(UpperTorsoSecondaryDriver().model, "legacy_target_v1")
 
+    def test_v2_velocity_uses_bounded_relative_lag_target(self):
+        lagged = UpperTorsoSecondaryDriver(model="inertial_relative_v2",
+            breath_displacement_px=0, pose_bias_px=0, inertia_coupling_y=0,
+            drag_coupling_y=0, lag_seconds_y=0.25, idle_lag_max_px=0.8)
+        direct = UpperTorsoSecondaryDriver(model="inertial_relative_v2",
+            breath_displacement_px=0, pose_bias_px=0, inertia_coupling_y=0,
+            drag_coupling_y=0, lag_seconds_y=0)
+        for _ in range(120):
+            lagged.stepPhysicsFixed(1, body_velocity=(0, 1), body_acceleration=(0, 0))
+            direct.stepPhysicsFixed(1, body_velocity=(0, 1), body_acceleration=(0, 0))
+        self.assertLess(lagged.snapshot()["value"], -0.2)
+        self.assertAlmostEqual(direct.snapshot()["value"], 0.0, delta=1e-6)
+        capped = UpperTorsoSecondaryDriver(model="inertial_relative_v2",
+            breath_displacement_px=0, pose_bias_px=0, inertia_coupling_y=0,
+            drag_coupling_y=0, lag_seconds_y=0.25, idle_lag_max_px=0.8)
+        for _ in range(120):
+            capped.stepPhysicsFixed(1, body_velocity=(0, 10), body_acceleration=(0, 0))
+        self.assertAlmostEqual(capped.snapshot()["value"], -0.8, delta=0.05)
+
     def test_v2_clamps_displacement_in_pixel_units_and_keeps_lobes_independent(self):
         driver = UpperTorsoSecondaryDriver(model="inertial_relative_v2",
                                            max_displacement_px=2.0,

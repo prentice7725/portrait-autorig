@@ -50,6 +50,19 @@ export const CHEST_WIDEN = 0.004; // ribcage expansion, as a fraction of chest w
 export const SOFT_MORPH_TAG = "topwear";     // canonical torso semantic
 export const SOFT_MORPH_TAGS = new Set(["topwear", "topwear_with_arms", "topwear_with_handwear"]);
 const isSoftMorphTag = (tag) => SOFT_MORPH_TAGS.has(tag);
+function physicalDistribution(spec) {
+  const raw = spec?.physicsDistribution || {};
+  // v2.4 distributions were compiler-owned. A pre-floor manifest cannot
+  // express the visible physical shape, so migrate its legacy pair.
+  if (Number(raw.version ?? 1) < 2 || raw.vertical_floor == null) {
+    return { horizontalGain: 0.45, verticalGain: 1.0, verticalFloor: 0.35 };
+  }
+  return {
+    horizontalGain: Number(raw.horizontal_gain ?? 0.45),
+    verticalGain: Number(raw.vertical_gain ?? 1.0),
+    verticalFloor: Math.max(0, Math.min(1, Number(raw.vertical_floor ?? 0.35))),
+  };
+}
 export const SOFT_MORPH_DEFLATE_SCALE = 0.35; // exhale moves less than inhale (design doc 9)
 export const SOFT_MORPH_CENTER_TRANSITION = 0.15; // fraction of topwear width past center_lock
                                             // before the lock fully releases (design doc 8.2)
@@ -880,10 +893,20 @@ export function buildSoftMorphWeights(part, mesh, spec, occluders) {
   const by1 = canvasSpace ? 0 : y1;
   const bw = canvasSpace ? state.canvasW : width;
   const bh = canvasSpace ? state.canvasH : height;
-  const centerX = bx1 + bw / 2;
-  const neckLockBottom = by1 + bh * spec.neckline_lock;
-  const centerLockHalf = spec.center_lock * bw;
-  const centerLockOuter = centerLockHalf + SOFT_MORPH_CENTER_TRANSITION * bw;
+  // center_lock/neckline_lock/SOFT_MORPH_CENTER_TRANSITION are authored as
+  // fractions of the *topwear crop's own* width/height (see their definitions
+  // in soft_morph.py), never of the whole canvas. Using the canvas-normalized
+  // basis here inflates the lock/transition zone by canvas/garment-width for
+  // any character whose torso doesn't span the full canvas -- wide enough
+  // that a lobe's own center can land inside the "partially locked"
+  // transition band and be crushed to a fraction of its weight everywhere,
+  // which read as "the chest doesn't move" no matter how strong the morph or
+  // physics signal was. Lobe center/radius still use the canvas-normalized
+  // basis above; only the lock geometry is always part-local.
+  const centerX = x1 + width / 2;
+  const neckLockBottom = y1 + height * spec.neckline_lock;
+  const centerLockHalf = spec.center_lock * width;
+  const centerLockOuter = centerLockHalf + SOFT_MORPH_CENTER_TRANSITION * width;
 
   const lobeGeom = (lobe) => ({
     cx: bx1 + lobe.center[0] * bw, cy: by1 + lobe.center[1] * bh,
@@ -899,7 +922,7 @@ export function buildSoftMorphWeights(part, mesh, spec, occluders) {
     // manifest's `neckline_lock` fraction of its height. Center lock (8.2):
     // 0 within `center_lock` of the button/seam line, released over the
     // fixed transition band above.
-    let lock = smoothstep(by1, neckLockBottom, y) * smoothstep(centerLockHalf, centerLockOuter, Math.abs(x - centerX));
+    let lock = smoothstep(y1, neckLockBottom, y) * smoothstep(centerLockHalf, centerLockOuter, Math.abs(x - centerX));
     if (lock > 0) {
       for (const occ of occluders) {
         if (occluderAlphaAt(occ, x, y) > 10) { lock = 0; break; }
@@ -1080,12 +1103,16 @@ export function build(manifest, images) {
         breathDisplacementPx: torsoSpec.breath_displacement_px ?? 0.8,
         poseBiasPx: torsoSpec.pose_bias_px ?? 0.15,
         inertiaCouplingX: torsoSpec.inertia_coupling_x ?? 0.08,
-        inertiaCouplingY: torsoSpec.inertia_coupling_y ?? 0.22,
+        inertiaCouplingY: torsoSpec.inertia_coupling_y ?? 0.3,
         dragCouplingX: torsoSpec.drag_coupling_x ?? 0.01,
         dragCouplingY: torsoSpec.drag_coupling_y ?? 0.02,
+        lagSecondsX: torsoSpec.lag_seconds_x ?? 0,
+        lagSecondsY: torsoSpec.lag_seconds_y ?? 1.4,
+        idleLagMaxPx: torsoSpec.idle_lag_max_px ?? 5.0,
+        kickLagMaxPx: torsoSpec.kick_lag_max_px ?? 12.0,
         naturalFrequencyHz: torsoSpec.natural_frequency_hz,
         dampingRatio: torsoSpec.damping_ratio,
-        maxDisplacementPx: torsoSpec.max_displacement_px ?? 4,
+        maxDisplacementPx: torsoSpec.max_displacement_px ?? 16,
         maxVelocityPxS: torsoSpec.max_velocity_px_s ?? 24,
         settleTimeScaleS: torsoSpec.settle_time_scale_s ?? 0.03,
         inputMode: torsoSpec.input_mode || "translation",
@@ -1259,7 +1286,7 @@ export function build(manifest, images) {
   // torso proper; body_remainder can reach far up the canvas and would drag the
   // band with it, so it is only a fallback.
   const torso = state.parts.filter((p) => p.spec.group === "body");
-  const chest = torso.find((p) => p.spec.tag === "topwear") || torso[0];
+  const chest = torso.find((p) => isSoftMorphTag(p.spec.tag)) || torso[0];
   state.breathTop = chest ? chest.spec.xyxy[1] : 0;
   state.breathBottom = anchors.body_pivot ? anchors.body_pivot[1]
                      : chest ? chest.spec.xyxy[3] : state.canvasH;
@@ -1876,16 +1903,34 @@ export function deform(part, now, motion) {
                 const totalWeight = wl + wr;
                 x += sm.horizontalPx * (rightAmount * wr - leftAmount * wl);
                 if (physicalPx) {
-                  const horizontalGain = Number(sm.physicsDistribution?.horizontal_gain ?? 0.45);
-                  const verticalGain = Number(sm.physicsDistribution?.vertical_gain ?? 1);
+                  // The physical q is a relative pixel displacement in the
+                  // same units the 1/2/4px response QA calibrates against
+                  // (check_physical_response.mjs, check_chest_geometry_parity.mjs
+                  // measure hypot(dx, dy) at the probe and require it stay
+                  // within +-15% of the requested q). Keep horizontal/vertical
+                  // gain at their calibrated 0.45/1.0 so that contract holds;
+                  // see vertical_floor below for the part of the response that
+                  // actually needed a fix.
+                  const distribution = physicalDistribution(sm);
+                  const horizontalGain = distribution.horizontalGain;
+                  const verticalGain = distribution.verticalGain;
+                  const verticalFloor = distribution.verticalFloor;
                   x += horizontalGain * (rightPhysics * wr - leftPhysics * wl);
                   const qVolume = totalWeight > 0
                     ? (leftPhysics * wl + rightPhysics * wr) / totalWeight : 0;
                   const qVelocity = totalWeight > 0
                     ? (leftVelocity * wl + rightVelocity * wr) / totalWeight : 0;
+                  // lowerBias still concentrates the response toward the
+                  // lower curve, but a zero bias at the lobe centre made the
+                  // physical pixel response disappear after the authored
+                  // locks were applied.  The floor is multiplied by the
+                  // already-locked lobe weight, so neckline/center locks stay
+                  // exact while the soft-tissue volume remains visible.
+                  const verticalShape = verticalFloor
+                    + (1 - verticalFloor) * Number(part.softMorph.lowerBias[i] ?? 0);
                   y += (qVolume * verticalGain
                     + qVelocity * Number(torso?.settleTimeScaleS ?? 0.03))
-                    * lobeWeight * Number(part.softMorph.lowerBias[i] ?? 0);
+                    * lobeWeight * verticalShape;
                 }
                 // Preserve the legacy max-weight result when both sides are
                 // equal, while allowing independent lobe spring amplitudes.

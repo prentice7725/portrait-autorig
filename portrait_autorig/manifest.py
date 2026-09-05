@@ -227,6 +227,10 @@ def upper_torso_secondary_entries(
             "left": spec.get("left"), "right": spec.get("right"),
             "center_lock": spec.get("center_lock"), "neckline_lock": spec.get("neckline_lock"),
             "horizontal_px": spec.get("horizontal_px"), "vertical_px": spec.get("vertical_px"),
+            "physics_distribution": spec.get("physics_distribution") or {
+                "version": 2, "horizontal_gain": 0.45, "vertical_gain": 1.0,
+                "vertical_floor": 0.35,
+            },
         },
         "phase": PHASE_SECONDARY,
     }

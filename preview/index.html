@@ -114,24 +114,6 @@
      labels are sampled at 10Hz so the animation does not pay a DOM write per
      frame. The graph shows body Y and independent chest L/R response over the
      last five seconds; QA buttons never modify the manifest.</p>
-  <label class="row"><input type="checkbox" id="doBlink" checked> Blink</label>
-  <label class="row"><input type="checkbox" id="doBreathe" checked> Breathing</label>
-  <label>Breath <span class="val" id="breathAmpv">3.0px</span>
-    <input type="range" id="breathAmp" min="0" max="20" step="0.5" value="3"></label>
-  <label>Lid line <span class="val" id="lidLinev">0.85</span>
-    <input type="range" id="lidLine" min="0.5" max="1" step="0.01" value="0.85"></label>
-  <label>Lid thickness <span class="val" id="lidThickv">0.18</span>
-    <input type="range" id="lidThick" min="0.02" max="0.6" step="0.01" value="0.18"></label>
-  <p class="hint">A closed eye should read as one clean line. The lash layer
-     holds an upper and a lower stroke: squash too far and they average into a
-     grey band, too little and they stay two lines.</p>
-  <div class="row">
-    <button id="winkL">Wink L</button>
-    <button id="winkR">Wink R</button>
-    <button id="blinkNow">Blink</button>
-  </div>
-  <p class="hint">Wink buttons exercise the left/right eye split (H4).</p>
-
   <h2>Chest Soft Morph</h2>
   <div class="meta" id="softMeta">not available in this run <span id="qaBadge" class="warn" hidden>QA OVERRIDE</span></div>
   <div class="meta" id="chestCalibration">Chest response: no probe</div>
@@ -154,6 +136,24 @@
      run's preflight could not derive a confident region (design doc 15).
      The extended slider range is for hard-morph QA; production manifests keep
      their authored amplitude.</p>
+
+  <label class="row"><input type="checkbox" id="doBlink" checked> Blink</label>
+  <label class="row"><input type="checkbox" id="doBreathe" checked> Breathing</label>
+  <label>Breath <span class="val" id="breathAmpv">3.0px</span>
+    <input type="range" id="breathAmp" min="0" max="20" step="0.5" value="3"></label>
+  <label>Lid line <span class="val" id="lidLinev">0.85</span>
+    <input type="range" id="lidLine" min="0.5" max="1" step="0.01" value="0.85"></label>
+  <label>Lid thickness <span class="val" id="lidThickv">0.18</span>
+    <input type="range" id="lidThick" min="0.02" max="0.6" step="0.01" value="0.18"></label>
+  <p class="hint">A closed eye should read as one clean line. The lash layer
+     holds an upper and a lower stroke: squash too far and they average into a
+     grey band, too little and they stay two lines.</p>
+  <div class="row">
+    <button id="winkL">Wink L</button>
+    <button id="winkR">Wink R</button>
+    <button id="blinkNow">Blink</button>
+  </div>
+  <p class="hint">Wink buttons exercise the left/right eye split (H4).</p>
 
   <h2>Expression pack</h2>
   <div class="meta" id="packmeta">no pack in this run</div>

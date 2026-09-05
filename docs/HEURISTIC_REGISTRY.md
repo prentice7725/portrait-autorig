@@ -25,6 +25,8 @@ must not silently become defaults.
 | `upper_torso_driver.model` | ACTIVE | new compiler output uses `inertial_relative_v2`; P2.2 manifests remain `inertial_relative_v1`, missing model remains `legacy_target_v1` | explicit model field and legacy-load regression |
 | physical spring state in px | ACTIVE | v2 q/v are px and px/s; no hidden stiffness-to-morph scaling | 1/2/4px response probes |
 | `inertial_relative_v2` semantics | ACTIVE | frequency/damping-ratio spring with explicit pixel equilibrium and external acceleration | unit validation and runtime parity |
+| velocity relative-lag target | ACTIVE | body velocity × lag seconds becomes a bounded relative px target; acceleration remains a small directional kick | idle/Body Kick follow-through and pixel response QA |
+| torso lag envelope | EXPERIMENTAL | x 0.12s, y 1.4s; idle cap 5.0px, kick cap 12.0px (raised from 0.25s/0.8px/2.0px so idle sway and Body Kick read as a visible bust jiggle instead of sub-pixel motion) | runtime motion review and geometry gates |
 | natural frequency / damping defaults | EXPERIMENTAL | profile seeds soft 1.8Hz/.75, firm 2.4Hz/.55, springy 2.2Hz/.35 | calibration harness and settle envelope |
 | geometry distribution gains | EXPERIMENTAL | physical q maps via horizontal .45 / vertical 1.0 defaults | chest geometry parity and lock probes |
 | 1/2/4px QA calibration | ACTIVE QA CONTRACT | measured primary probe must remain within ±15% | `check_physical_response.mjs` |
@@ -36,8 +38,9 @@ must not silently become defaults.
 | settle_gain | EXPERIMENTAL | lower-lobe vertical response uses spring velocity × settle gain | lock-preservation and bounded settle tests |
 | hard-morph QA slider maximum | ACTIVE | 24px horizontal / 12px vertical; QA-only override | canonical manifest remains unchanged |
 | authored lobe adaptive refinement | ACTIVE | 18px cell only inside Composer-authored lobe union; outer topwear grid unchanged | topology hash, lock preservation, rest-reference parity |
+| lock-zone geometry basis | ACTIVE | `center_lock`/`neckline_lock`/center transition are always fractions of the topwear crop's own width/height, never of the canvas -- only lobe center/radius use the canvas-normalized basis when `coordinate_space: canvas_normalized` | `buildSoftMorphWeights`; regression: a `canvas_normalized` region whose lobes sit closer to the body midline than the transition band no longer crushes lobe weight everywhere (previously capped near 0.35 max weight on affected assets, e.g. A002) |
 | fixed-tick catch-up cap | ACTIVE | at most 4 physics ticks per render frame | prevents spiral-of-death; framerate parity check |
-| inertial safety clamps | ACTIVE | force ±4, relative displacement ±4, lobe velocity ±12; input acceleration/impulse are bounded | deterministic clamp diagnostics and rollback |
+| inertial safety clamps | ACTIVE | force ±4 (legacy v1 model), relative displacement ±`max_displacement_px` (v2 default now 16px, raised from 4px for a visible jiggle), lobe velocity ±12; input acceleration/impulse are bounded | deterministic clamp diagnostics and rollback |
 
 ## Status vocabulary
 
