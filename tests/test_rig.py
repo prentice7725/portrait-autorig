@@ -12,7 +12,8 @@ from portrait_autorig.rig import (
     GROUP_BODY, GROUP_HEAD, GROUP_NECK,
     HEAD_REMAINDER, HEAD_WEIGHT, NECK_REMAINDER,
     RIG_Z_ORDER, build_rig, depth_table, derive_missing_eyewhite, detect_anchors,
-    group_for_tag, render_rig_rest, rig_preflight, split_eyes, split_remainder,
+    detect_variant_eye_metadata,
+    group_for_tag, depth_owner_for_tag, render_rig_rest, rig_preflight, split_eyes, split_remainder,
     write_rig_project,
 )
 
@@ -389,6 +390,25 @@ class AnchorTests(unittest.TestCase):
         layers.update(split_eyes(layers, face_center_x=64.0))
         anchors = detect_anchors(layers, (CANVAS, CANVAS))
         self.assertLess(anchors["eye_left"][0], anchors["eye_right"][0])
+
+    def test_unsuffixed_variant_eye_metadata_uses_alpha_components(self):
+        image = np.zeros((CANVAS, CANVAS, 4), dtype=np.uint8)
+        image[40:48, 30:42, 3] = 255
+        image[42:50, 78:90, 3] = 255
+        metadata = detect_variant_eye_metadata(
+            {"eyes_open": image}, {"eyes_open": "eyewhite"}
+        )
+        self.assertIsNotNone(metadata)
+        anchors, openings = metadata
+        self.assertLess(anchors["eye_left"][0], anchors["eye_right"][0])
+        self.assertEqual(openings["l"], [30, 40, 42, 48])
+        self.assertEqual(openings["r"], [78, 42, 90, 50])
+
+    def test_expression_donors_follow_head_motion_plane(self):
+        self.assertEqual(group_for_tag("eye_closed"), GROUP_HEAD)
+        self.assertEqual(group_for_tag("mouth_open"), GROUP_HEAD)
+        self.assertEqual(depth_owner_for_tag("eye_closed"), "eyewhite")
+        self.assertEqual(depth_owner_for_tag("mouth_open"), "mouth")
 
 
 class BuildRigTests(unittest.TestCase):

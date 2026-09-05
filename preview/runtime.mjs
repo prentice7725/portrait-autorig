@@ -45,7 +45,9 @@ export const CHEST_WIDEN = 0.004; // ribcage expansion, as a fraction of chest w
 // Upper Torso Soft Morph (docs/PORTRAIT_AUTORIG_CHEST_SOFT_MORPH_DESIGN_v0.1.md).
 // A local two-lobe volume response layered on top of breathing, confined to
 // `topwear` -- CHEST_WIDEN above stays exactly as it is; this is additive.
-export const SOFT_MORPH_TAG = "topwear";     // Phase 1 scope: this tag only (design doc 5)
+export const SOFT_MORPH_TAG = "topwear";     // canonical torso semantic
+export const SOFT_MORPH_TAGS = new Set(["topwear", "topwear_with_arms", "topwear_with_handwear"]);
+const isSoftMorphTag = (tag) => SOFT_MORPH_TAGS.has(tag);
 export const SOFT_MORPH_DEFLATE_SCALE = 0.35; // exhale moves less than inhale (design doc 9)
 export const SOFT_MORPH_CENTER_TRANSITION = 0.15; // fraction of topwear width past center_lock
                                             // before the lock fully releases (design doc 8.2)
@@ -286,6 +288,42 @@ function parameterValue(id, motion = {}) {
 /** Runtime binding for Composer VariantSets (P0-F2).  Composer instance ids
  * are resolved through manifest.member_bindings; no semantic-name guessing is
  * performed here. */
+function visibleVariantMembers(spec, selected) {
+  const groupId = spec?.state_labels?.[selected];
+  const grouped = groupId == null ? null : spec?.state_groups?.[groupId];
+  return Array.isArray(grouped) ? new Set(grouped) : new Set([selected]);
+}
+
+// Composer owns feature state for Assembly inputs. Keep the lookup explicit
+// and label-driven: a closed/open state is selected from state_labels and
+// member_bindings, never guessed from a generated rig part name.
+function variantSetForFeature(feature) {
+  const needle = String(feature).toLowerCase();
+  for (const [setId, spec] of Object.entries(state.variantSets || {})) {
+    if (String(setId).toLowerCase().includes(needle)) return [setId, spec];
+    const tags = Object.values(spec.member_bindings || {})
+      .map((binding) => String(binding.tag || "").toLowerCase());
+    if (tags.some((tag) => tag.includes(needle))) return [setId, spec];
+  }
+  return null;
+}
+
+function variantMemberForLabel(spec, label) {
+  const labels = spec?.state_labels || {};
+  const found = Object.entries(labels).find(([, value]) => value === label);
+  return found ? found[0] : null;
+}
+
+function applyVariantLabel(feature, label) {
+  const found = variantSetForFeature(feature);
+  if (!found) return false;
+  const [setId, spec] = found;
+  const member = variantMemberForLabel(spec, label);
+  if (!member || state.variantSelections[setId] === member) return false;
+  applyVariantSet(setId, member, { transition: "discrete" });
+  return true;
+}
+
 export function applyVariantSet(setId, memberId, options = {}) {
   const spec = state.manifest && (state.manifest.variant_sets || {})[setId];
   if (!spec || !spec.members.includes(memberId)) {
@@ -310,8 +348,9 @@ export function applyVariantSet(setId, memberId, options = {}) {
     for (const id of spec.members) byName.get(spec.member_bindings[id].part).visible = true;
   } else {
     delete state.variantFades[setId];
+    const visible = visibleVariantMembers(spec, memberId);
     for (const id of spec.members) {
-      byName.get(spec.member_bindings[id].part).visible = id === memberId;
+      byName.get(spec.member_bindings[id].part).visible = visible.has(id);
     }
   }
   return { set: setId, member: memberId, transition };
@@ -758,10 +797,10 @@ export function readAlpha(bitmap) {
  *  point can be tested against it directly without re-deriving anything the
  *  manifest already computed for the part itself. */
 export function gatherChestOccluders(manifest, images) {
-  const topwear = manifest.parts.find((p) => p.tag === SOFT_MORPH_TAG);
+  const topwear = manifest.parts.find((p) => isSoftMorphTag(p.tag));
   if (!topwear) return [];
   return manifest.parts
-    .filter((p) => p.tag !== SOFT_MORPH_TAG && p.z > topwear.z
+    .filter((p) => !isSoftMorphTag(p.tag) && p.z > topwear.z
                 && SOFT_MORPH_OCCLUDER_GROUPS.has(p.group))
     .map((p) => {
       const bitmap = images.get(p.name);
@@ -796,14 +835,23 @@ export function occluderAlphaAt(occluder, x, y) {
 export function buildSoftMorphWeights(part, mesh, spec, occluders) {
   const [x1, y1, x2, y2] = part.xyxy;
   const width = x2 - x1, height = y2 - y1;
-  const centerX = (x1 + x2) / 2;
-  const neckLockBottom = y1 + height * spec.neckline_lock;
-  const centerLockHalf = spec.center_lock * width;
-  const centerLockOuter = centerLockHalf + SOFT_MORPH_CENTER_TRANSITION * width;
+  // AutoRig-derived regions are normalized to the cropped part. Composer's
+  // authored RigIntent is normalized to its target instance (canvas-sized in
+  // the Assembly contract). Never reinterpret authored coordinates against
+  // the cropped alpha bbox: doing so moves A002's chest lobes down and inward.
+  const canvasSpace = spec.coordinate_space === "canvas_normalized";
+  const bx1 = canvasSpace ? 0 : x1;
+  const by1 = canvasSpace ? 0 : y1;
+  const bw = canvasSpace ? state.canvasW : width;
+  const bh = canvasSpace ? state.canvasH : height;
+  const centerX = bx1 + bw / 2;
+  const neckLockBottom = by1 + bh * spec.neckline_lock;
+  const centerLockHalf = spec.center_lock * bw;
+  const centerLockOuter = centerLockHalf + SOFT_MORPH_CENTER_TRANSITION * bw;
 
   const lobeGeom = (lobe) => ({
-    cx: x1 + lobe.center[0] * width, cy: y1 + lobe.center[1] * height,
-    rx: Math.max(1e-6, lobe.radius[0] * width), ry: Math.max(1e-6, lobe.radius[1] * height),
+    cx: bx1 + lobe.center[0] * bw, cy: by1 + lobe.center[1] * bh,
+    rx: Math.max(1e-6, lobe.radius[0] * bw), ry: Math.max(1e-6, lobe.radius[1] * bh),
   });
   const left = lobeGeom(spec.left), right = lobeGeom(spec.right);
 
@@ -815,7 +863,7 @@ export function buildSoftMorphWeights(part, mesh, spec, occluders) {
     // manifest's `neckline_lock` fraction of its height. Center lock (8.2):
     // 0 within `center_lock` of the button/seam line, released over the
     // fixed transition band above.
-    let lock = smoothstep(y1, neckLockBottom, y) * smoothstep(centerLockHalf, centerLockOuter, Math.abs(x - centerX));
+    let lock = smoothstep(by1, neckLockBottom, y) * smoothstep(centerLockHalf, centerLockOuter, Math.abs(x - centerX));
     if (lock > 0) {
       for (const occ of occluders) {
         if (occluderAlphaAt(occ, x, y) > 10) { lock = 0; break; }
@@ -997,8 +1045,9 @@ export function build(manifest, images) {
 
   // The eye opening, per side, taken from whichever layer actually draws it --
   // the lash's own box includes the upper lashes and sits too high to close on.
-  const opening = {};
+  const opening = manifest.eye_opening || {};
   for (const suffix of ["l", "r", ""]) {
+    if (opening[suffix]) continue;
     for (const base of EYE_OPENING_TAGS) {
       const found = manifest.parts.find((p) => p.tag === base + suffix);
       if (found) { opening[suffix] = found.xyxy; break; }
@@ -1041,6 +1090,31 @@ export function build(manifest, images) {
     const side = !isEye ? null : part.tag.endsWith("l") ? "l" : part.tag.endsWith("r") ? "r" : null;
     const eyeAnchor = side === "l" ? anchors.eye_left : side === "r" ? anchors.eye_right : null;
     const box = opening[side || ""] || part.xyxy;
+    // Composer may keep both eyes in one unsuffixed sprite.  Its overall
+    // bbox can span the whole face, so use the eye-anchor midpoint to derive
+    // independent opening bounds for each half instead of folding both eyes
+    // toward the sprite's global bottom edge.
+    let eyeOpenings = null;
+    if (isEye && !side) {
+      eyeOpenings = { l: opening.l || null, r: opening.r || null };
+    }
+    if (isEye && !side && anchors.eye_left && anchors.eye_right
+        && (!eyeOpenings?.l || !eyeOpenings?.r)) {
+      const midpoint = (anchors.eye_left[0] + anchors.eye_right[0]) / 2;
+      const halves = { l: [Infinity, Infinity, -Infinity, -Infinity],
+                       r: [Infinity, Infinity, -Infinity, -Infinity] };
+      for (let i = 0; i < mesh.rest.length; i += 2) {
+        const half = mesh.rest[i] < midpoint ? halves.l : halves.r;
+        half[0] = Math.min(half[0], mesh.rest[i]);
+        half[1] = Math.min(half[1], mesh.rest[i + 1]);
+        half[2] = Math.max(half[2], mesh.rest[i]);
+        half[3] = Math.max(half[3], mesh.rest[i + 1]);
+      }
+      eyeOpenings = eyeOpenings || {};
+      for (const [key, half] of Object.entries(halves)) {
+        if (!eyeOpenings[key]) eyeOpenings[key] = Number.isFinite(half[0]) ? half : null;
+      }
+    }
     return {
       spec: part, mesh, visible: part.visible !== false,
       tex: makeTexture(gl, images.get(part.name)),
@@ -1060,11 +1134,12 @@ export function build(manifest, images) {
       shell: !state.shells || part.group === "body" ? null
            : HAIR_SHELL_TAGS.has(part.tag) ? state.shells.hair : state.shells.head,
       eyeSide: side,
+      eyeOpenings,
       eyeCenterY: eyeAnchor ? eyeAnchor[1] : (part.xyxy[1] + part.xyxy[3]) / 2,
       openTop: box[1],
       openBottom: box[3],
       // Phase 1 scope (design doc 5): only `topwear` deforms.
-      softMorph: (hasSoftRegion && part.tag === SOFT_MORPH_TAG)
+      softMorph: (hasSoftRegion && isSoftMorphTag(part.tag))
         ? buildSoftMorphWeights(part, mesh, softSpec, chestOccluders) : null,
     };
   });
@@ -1089,10 +1164,11 @@ export function build(manifest, images) {
     state.variantSelections[setId] = spec.default;
     // The manifest marks the default member visible; enforce it here too so
     // old runtimes loading a hand-edited manifest cannot show two members.
+    const visible = visibleVariantMembers(spec, spec.default);
     for (const member of spec.members || []) {
       const partName = spec.member_bindings?.[member]?.part;
       const part = state.parts.find((p) => p.spec.name === partName);
-      if (part) part.visible = member === spec.default;
+      if (part) part.visible = visible.has(member);
     }
   }
 
@@ -1267,13 +1343,16 @@ export function drawSoftRegionOverlay() {
   ctx.clearRect(0, 0, state.canvasW, state.canvasH);
   if (!document.getElementById("softRegion").checked) return;
   const spec = (state.manifest.motion || {}).upper_torso_soft_morph;
-  const topwear = state.parts.find((p) => p.spec.tag === SOFT_MORPH_TAG);
+  const topwear = state.parts.find((p) => isSoftMorphTag(p.spec.tag));
   if (!spec || !spec.left || !spec.right || !topwear) return;
 
   const [x1, y1, x2, y2] = topwear.spec.xyxy;
-  const width = x2 - x1, height = y2 - y1;
+  const local = spec.coordinate_space !== "canvas_normalized";
+  const bx = local ? x1 : 0, by = local ? y1 : 0;
+  const width = local ? x2 - x1 : state.canvasW;
+  const height = local ? y2 - y1 : state.canvasH;
   const drawLobe = (lobe, color) => {
-    const cx = x1 + lobe.center[0] * width, cy = y1 + lobe.center[1] * height;
+    const cx = bx + lobe.center[0] * width, cy = by + lobe.center[1] * height;
     const rx = lobe.radius[0] * width, ry = lobe.radius[1] * height;
     ctx.beginPath();
     ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
@@ -1284,15 +1363,15 @@ export function drawSoftRegionOverlay() {
   drawLobe(spec.left, "rgba(110,168,254,0.9)");
   drawLobe(spec.right, "rgba(254,168,110,0.9)");
 
-  const neckY = y1 + height * spec.neckline_lock;
+  const neckY = by + height * spec.neckline_lock;
   ctx.strokeStyle = "rgba(255,255,255,0.5)";
   ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(x1, neckY); ctx.lineTo(x2, neckY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(bx, neckY); ctx.lineTo(bx + width, neckY); ctx.stroke();
 
-  const centerX = (x1 + x2) / 2, half = spec.center_lock * width;
+  const centerX = bx + width / 2, half = spec.center_lock * width;
   ctx.strokeStyle = "rgba(255,255,255,0.35)";
-  ctx.beginPath(); ctx.moveTo(centerX - half, y1); ctx.lineTo(centerX - half, y2); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(centerX + half, y1); ctx.lineTo(centerX + half, y2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(centerX - half, by); ctx.lineTo(centerX - half, by + height); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(centerX + half, by); ctx.lineTo(centerX + half, by + height); ctx.stroke();
 }
 
 /* ---------- animation ---------- */
@@ -1334,12 +1413,15 @@ export function opacityOf(part, motion) {
     const fade = state.variantFades[setId];
     if (fade && spec) {
       const amount = Math.max(0, Math.min(1, (motion.now - fade.start) / fade.duration));
-      if (amount >= 1) alpha *= member === fade.to ? 1 : 0;
-      else if (member === fade.from) alpha *= 1 - amount;
-      else if (member === fade.to) alpha *= amount;
+      const from = visibleVariantMembers(spec, fade.from);
+      const to = visibleVariantMembers(spec, fade.to);
+      if (amount >= 1) alpha *= to.has(member) ? 1 : 0;
+      else if (from.has(member) && to.has(member)) alpha *= 1;
+      else if (from.has(member)) alpha *= 1 - amount;
+      else if (to.has(member)) alpha *= amount;
       else alpha = 0;
     } else {
-      alpha *= spec && state.variantSelections[setId] === member ? 1 : 0;
+      alpha *= spec && visibleVariantMembers(spec, state.variantSelections[setId]).has(member) ? 1 : 0;
     }
   }
   if (motion.swap && part.expression) {
@@ -1438,7 +1520,10 @@ function geometryOperations(part) {
   return operations.filter((operation) => {
     if (!phaseEnabled(operation.phase || "primary")) return false;
     const side = operation.targets?.side;
-    return operation.kind !== "eye_fold" || !side || side === part.eyeSide;
+    // Composer Assembly variants can keep both eyes in one member image.
+    // Such an unsuffixed eye part has no side, so a bilateral eye_fold must
+    // still reach it; split l/r parts continue to honor their side filter.
+    return operation.kind !== "eye_fold" || !side || part.eyeSide == null || side === part.eyeSide;
   });
 }
 
@@ -1453,12 +1538,19 @@ export function deform(part, now, motion) {
   // How far the *drawn* eye closes. With an expression pack this is held at
   // the swap point instead of going to 1: past there the art owns the eye.
   const squash = motion.squash || motion.blink;
-  const blink = part.eyeSide === "l" ? squash.l
-              : part.eyeSide === "r" ? squash.r
-              : Math.max(squash.l, squash.r);
 
   for (let i = 0, v = 0; v < rest.length; i++, v += 2) {
     let x = rest[v], y = rest[v + 1];
+    // Unsuffixed eye sprites need per-vertex side selection.  A single
+    // bilateral blink value would otherwise use the full sprite bbox and
+    // collapse the eyes toward an unrelated face/body boundary.
+    const eyeMidpoint = anchors.eye_left && anchors.eye_right
+      ? (anchors.eye_left[0] + anchors.eye_right[0]) / 2 : null;
+    const vertexSide = part.eyeSide || (part.isEye && eyeMidpoint != null
+      ? (rest[v] < eyeMidpoint ? "l" : "r") : null);
+    const blink = vertexSide === "l" ? squash.l
+                : vertexSide === "r" ? squash.r
+                : Math.max(squash.l, squash.r);
     const w = effectiveWeight(part, i, motion.overrides);
     let pendingDx = 0, pendingDy = 0;
     const flushDelta = () => {
@@ -1471,7 +1563,11 @@ export function deform(part, now, motion) {
         case "eye_fold": {
           if (part.isEye && blink > 0) {
             const floor = part.isLid ? motion.lidThickness : 0;
-            const lid = part.openTop + motion.lidRatio * (part.openBottom - part.openTop);
+            const opening = vertexSide && part.eyeOpenings?.[vertexSide]
+              ? part.eyeOpenings[vertexSide] : null;
+            const openTop = opening ? opening[1] : part.openTop;
+            const openBottom = opening ? opening[3] : part.openBottom;
+            const lid = openTop + motion.lidRatio * (openBottom - openTop);
             y = lid + (y - lid) * (1 - blink * (1 - floor));
           }
           break;
@@ -1522,7 +1618,7 @@ export function deform(part, now, motion) {
             // P2 torso physics feeds the authored local field; it never adds
             // a second uniform topwear translation. This preserves lobe,
             // neckline, center, and occluder locks already encoded in weights.
-            const physicsAmount = part.spec.tag === SOFT_MORPH_TAG
+            const physicsAmount = isSoftMorphTag(part.spec.tag)
               ? Number(motion.physics?.torso?.value || 0) : 0;
             const amount = sm.strength * sm.morph + physicsAmount;
             if (amount !== 0) {
@@ -1614,7 +1710,8 @@ export function frame(now) {
 
   // Talk: a mouth that opens and closes on its own, only when the pack brought
   // a mouth to open. Irregular on purpose -- an even cycle reads as chewing.
-  if (state.art.mouth && document.getElementById("doTalk").checked) {
+  const mouthVariant = variantSetForFeature("mouth");
+  if ((state.art.mouth || mouthVariant) && document.getElementById("doTalk").checked) {
     if (now >= state.talkUntil) {
       state.talkTarget = state.talkTarget > 0.5 ? 0 : 0.55 + Math.random() * 0.45;
       state.talkUntil = now + (state.talkTarget > 0.5 ? 90 + Math.random() * 110
@@ -1632,6 +1729,22 @@ export function frame(now) {
     r: expressionSwap(blink.r, useArt && !!state.art.r),
     mouth: expressionSwap(state.mouthOpen, useArt && !!state.art.mouth),
   };
+
+  if (useArt) {
+    // A Composer closed-eye donor is a real authored state, not a generated
+    // eyelid. It takes ownership only after the same swap threshold used by
+    // the legacy expression path. Unsuffixed bilateral donors are switched
+    // only for a bilateral blink; a wink keeps the conservative geometry path.
+    const eyeVariant = variantSetForFeature("eye");
+    if (eyeVariant && blink.l >= SWAP_HI && blink.r >= SWAP_HI) {
+      applyVariantLabel("eye", "closed");
+    } else if (eyeVariant && blink.l === 0 && blink.r === 0) {
+      applyVariantLabel("eye", "open");
+    }
+    if (mouthVariant && document.getElementById("doTalk").checked) {
+      applyVariantLabel("mouth", state.mouthOpen >= SWAP_HI ? "open" : "closed");
+    }
+  }
 
   const breathSin = document.getElementById("doBreathe").checked
     ? Math.sin(t * 2 * Math.PI / state.manifest.motion.breathing.period_s) : 0;

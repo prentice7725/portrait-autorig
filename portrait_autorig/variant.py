@@ -19,6 +19,23 @@ CROSSFADE = "crossfade"
 SUPPORTED_TRANSITIONS = frozenset({DISCRETE, CROSSFADE})
 
 
+def visible_variant_members(spec: Mapping[str, Any], selected: str) -> set[str]:
+    """Return the members visible for a selected Composer state.
+
+    Composer may model one visual state as a group (for example open eyes are
+    the eyewhite, iris, and lash members together).  Older manifests have no
+    ``state_groups`` and retain the one-member behavior.
+    """
+    groups = spec.get("state_groups")
+    labels = spec.get("state_labels")
+    if isinstance(groups, Mapping) and isinstance(labels, Mapping):
+        group_id = labels.get(selected)
+        members = groups.get(group_id)
+        if isinstance(members, list):
+            return {str(member) for member in members}
+    return {str(selected)}
+
+
 def _part_name(instance_id: str) -> str:
     return "variant_" + (re.sub(r"[^A-Za-z0-9_.-]+", "_", str(instance_id)).strip("_") or "member")
 
@@ -76,6 +93,17 @@ def compile_variant_bindings(
             "members": [str(m) for m in members], "transition": transition,
             "member_bindings": bindings,
         }
+        if isinstance(raw.get("state_groups"), Mapping):
+            compiled[str(set_id)]["state_groups"] = {
+                str(group): [str(member) for member in group_members]
+                for group, group_members in raw["state_groups"].items()
+                if isinstance(group_members, list)
+            }
+        if isinstance(raw.get("state_labels"), Mapping):
+            compiled[str(set_id)]["state_labels"] = {
+                str(member): str(label)
+                for member, label in raw["state_labels"].items()
+            }
         deformers.append({
             "id": "variant_" + _part_name(str(set_id))[8:],
             "kind": DEFORMER_SPRITE_SWAP,
@@ -116,4 +144,4 @@ def compile_variant_bindings(
     return compiled, presets, deformers, report
 
 
-__all__ = ["DISCRETE", "CROSSFADE", "compile_variant_bindings"]
+__all__ = ["DISCRETE", "CROSSFADE", "compile_variant_bindings", "visible_variant_members"]

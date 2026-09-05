@@ -14,14 +14,16 @@ Windows에서 프로젝트를 clone/install한 뒤 다음 파일을 더블클릭
 portrait_autorig_gui.pyw
 ```
 
-런처는 제작 워크플로를 두 단계로 명시적으로 제공합니다.
-
-1. **RIG 만들기** — 기본 Portrait Bundle을 Rig Bundle로 컴파일합니다.
-2. **표정 도너 조합** — 완성된 Rig Bundle에 눈/입 표정 도너를 연결합니다.
+GUI는 실행 즉시 **RIG 만들기** 화면을 엽니다. Portrait Bundle 또는 Composer
+Assembly Bundle을 Rig Bundle로 컴파일하며, 표정과 VariantSet authoring은 Composer가 담당합니다.
+따라서 AutoRig의 기본 화면에서는 표정 도너를 별도로 선택하지 않습니다.
+빌드가 성공하면 생성된 Rig manifest를 로컬 preview viewer로 자동 연결하며,
+`뷰어 열기` 버튼으로 다시 열 수 있습니다. `결과 폴더 열기`는 파일 탐색기에서
+출력물을 확인할 때 사용합니다.
 
 Rig builder가 지원하는 기능:
 
-- 단일 Portrait Bundle 빌드
+- 단일 Portrait/Assembly Bundle 빌드
 - 폴더 내 `*.portrait` Bundle 일괄 빌드
 - 자동 출력 경로 (`A001.portrait` → 같은 위치의 `A001.rig`)
 - 선택적 재귀 일괄 검색
@@ -30,18 +32,10 @@ Rig builder가 지원하는 기능:
 - 진행률, Portrait별 preflight/rest-fidelity 상태, 빌드 로그
 - 생성된 출력 폴더 바로 열기
 
-Expression composer는 한 번에 여러 상태를 지원합니다. 기본 제공되는 편집 가능
-상태 preset은 `eye_closed`, `wink_left`, `wink_right`, `mouth_open`,
-`mouth_a/i/u/e/o`입니다.
-
-사용할 수 있는 도너 모드는 두 가지입니다.
-
-- **생성 이미지 도너 (빠름):** 전체 프레임 PNG/WebP/JPEG 도너를 선택합니다. 눈 또는
-  입의 semantic 영역만 복구하며, identity·머리카락·몸·그 밖의 수정하지 않은 픽셀은
-  메인 rig에서 계속 사용합니다.
-- **분해된 도너 Rig (정밀):** 각 상태에 대해 이미 컴파일된 도너 rig를 선택합니다.
-  워크플로는 요청된 모든 도너 상태를 먼저 병합한 뒤 expression block을 한 번만
-  기록하므로, 한 도너가 앞서 추가한 상태를 덮어쓰지 않습니다.
+Composer가 기록한 `variant_sets`와 `expression_presets`는 Assembly Bundle 입력에서
+그대로 읽어 Runtime `sprite_swap`/preset binding으로 컴파일합니다. 기존 expression
+donor 모듈과 CLI는 이전 Rig Bundle 호환성을 위해 남아 있지만, 새 Composer 기반
+워크플로에서는 기본 경로가 아닙니다.
 
 패키지를 설치하면 동일한 런처가 `portrait-autorig-gui` GUI script로 등록됩니다.
 GUI 코드는 재사용 가능한 워크플로 함수(`workflow.py`, `expression_workflow.py`)보다
@@ -73,6 +67,11 @@ python -m portrait_autorig.spine path\to\A001.rig path\to\spine-project
 Assembly 입력은 Composer가 기록한 `composition.draw_order`, `reference.png`, VariantSet,
 RigIntent를 그대로 사용합니다.
 
+단일 빌드의 입력 폴더명은 `.portrait` suffix를 요구하지 않습니다. 내부
+`manifest.json`의 `format`과 각 Bundle reader가 검사하는 canonical layer/assembly
+contract, canvas 정보와 실제 layer 파일을 읽어 유효성을 검사합니다. 일괄 빌드의
+자동 검색은 기존 호환성을 위해 `*.portrait` 명명 규칙을 사용합니다.
+
 Portrait Bundle 입력은 반드시 `canonical_stage=production_repaired`를 선언해야
 합니다. 일반 compiler는 입력을 다시 repair하지 않습니다. `--legacy` adapter는
 이전 run을 위해서만 고정된 호환성 repair를 수행합니다.
@@ -89,7 +88,10 @@ Portrait Bundle의 정적 유효성을 변경하거나 다시 평가하지 않�
 모두 confidence 검사를 통과한 경우에만 fallback을 적용하고, double draw를 막기 위해
 승인된 영역을 working `head`에서 제거하며, provenance를
 `derived_semantics.eyewhite`에 기록합니다. canonical Portrait Bundle 파일은 절대
-수정하지 않습니다.
+수정하지 않습니다. Composer Assembly가 좌우 눈을 suffix 없는 한 장의 variant로
+보내고 eye anchor를 생략한 경우에는 variant alpha의 두 connected component에서
+`anchors.eye_left/right`와 `eye_opening.l/r`를 보존하여 blink가 전체 crop bbox가
+아닌 각 눈 socket에 대해 수행되도록 합니다.
 
 compiler는 Bundle manifest의 layer로부터 canonical reference를 다시 만들고, cropped
 rig를 motion=0으로 렌더링한 뒤 `rest_fidelity` 아래에 비교 결과를 기록합니다
@@ -106,7 +108,11 @@ rig part를 포함한 `member_bindings`에 그대로 보존됩니다. Runtime은
 선택합니다. 기본 transition policy는 `discrete`이며, Rig Manifest에
 `transition: "crossfade"`가 명시된 경우에만 `crossfade`를 사용합니다. 현재 Composer
 authoring API는 exclusive VariantSet과 preset을 작성하고, crossfade 선택은 manifest
-계약을 통해 전달됩니다. 잘못된 member mapping은 compile을 실패시킵니다.
+계약을 통해 전달됩니다. `state_groups`가 있으면 선택한 상태의 여러 member가 함께
+보이고, 없으면 선택한 member 하나만 보입니다. 잘못된 member mapping은 compile을
+실패시킵니다. `eye_closed`/`mouth_open` 같은 Composer donor semantic은 새 표면이
+아니므로 원본 eye/mouth의 `head` 그룹과 depth plane을 공유해 Auto Idle에서도
+얼굴과 함께 움직입니다.
 
 Assembly 입력 계약은 Composer `portrait-assembly-v0.2` 스키마를
 upstream commit `682f25e`에 고정해 vendoring합니다
@@ -186,6 +192,12 @@ Physics는 manifest에서 명시적으로 opt-in합니다. 예시는 다음과 �
 `upper_torso_driver`의 결과는 기존 `local_soft_field`에 합쳐지므로
 two-lobe/center/neckline/shoulder lock과 author strength가 유지됩니다. physics
 block이 없거나 driver가 비활성화되면 기존 rest reference 경로를 그대로 사용합니다.
+
+Composer가 authoring한 `upper_torso_secondary`의 lobe 중심/반경은 target instance
+정규화 좌표입니다. Assembly compile은 이를 `coordinate_space:
+"canvas_normalized"`로 manifest에 표시하고, preview는 cropped topwear bbox로
+재정규화하지 않습니다. 따라서 Composer overlay와 Rig overlay가 같은 캔버스 위치를
+가리키며, AutoRig가 별도의 가슴 영역을 다시 추정하지 않습니다.
 
 주요 회귀 검증은 다음 명령으로 재현할 수 있습니다.
 
