@@ -367,6 +367,11 @@ RESPONSE_PROFILE_CONFIG: dict[str, dict[str, float]] = {
 # Same status as `RESPONSE_PROFILE_CONFIG` above: EXPERIMENTAL starting
 # values, not yet corpus-tuned (see docs/HEURISTIC_REGISTRY.md).
 BASIS_SHAPE_DEFAULTS: dict[str, float] = {
+    # P2.5.1: q also drives a lobe-local mass carrier.  Unlike the shape
+    # fields this is a near-unit field at the lobe centre and fades toward
+    # the upper attachment/outer rim, so a soft region can visibly follow
+    # inertia without translating the whole garment.
+    "carrier_gain": 1.0,
     "upper_anchor_start": -0.75,
     "upper_anchor_end": -0.15,
     "lower_start": 0.00,

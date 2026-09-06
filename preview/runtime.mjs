@@ -21,7 +21,7 @@
 
 import { createStrandSpringDriver, createUpperTorsoSecondaryDriver } from "./physics.mjs";
 
-export const PREVIEW_RUNTIME_VERSION = "P2.3";
+export const PREVIEW_RUNTIME_VERSION = "P2.5.1";
 
 // Parallax strength as a fraction of the canvas, so the same manifest reads
 // the same at any render resolution. Near layers travel further than far ones,
@@ -56,6 +56,7 @@ const isSoftMorphTag = (tag) => SOFT_MORPH_TAGS.has(tag);
 // a per-character value -- production compiles always populate every field
 // explicitly (`soft_morph.basis_physics_distribution`).
 const BASIS_V3_DEFAULTS = {
+  carrierGain: 1.0,
   volumeGain: 0.55, sagGain: 0.85, followGainS: 0.035,
   shearGainXS: 0.018, shearGainYS: 0.012, compressionGain: 0.20,
   upperAnchorStart: -0.75, upperAnchorEnd: -0.15,
@@ -68,6 +69,7 @@ export function physicalDistribution(spec) {
   if (version >= 3) {
     return {
       version: 3,
+      carrierGain: Number(raw.carrier_gain ?? BASIS_V3_DEFAULTS.carrierGain),
       volumeGain: Number(raw.volume_gain ?? BASIS_V3_DEFAULTS.volumeGain),
       sagGain: Number(raw.sag_gain ?? BASIS_V3_DEFAULTS.sagGain),
       followGainS: Number(raw.follow_gain_s ?? BASIS_V3_DEFAULTS.followGainS),
@@ -918,6 +920,12 @@ const BASIS_EPS = 1e-6;
 
 export function makeChestBasisArrays(n) {
   return {
+    // Carrier is the mass-translation field.  It is deliberately separate
+    // from Volume/Sag so a lobe centre can move without inflating or pinching
+    // the surrounding shape.  The field is vertical because q is the
+    // authored physical displacement in px; horizontal asymmetry remains in
+    // the existing per-lobe q blend in deform().
+    carrierX: new Float32Array(n), carrierY: new Float32Array(n),
     volumeX: new Float32Array(n), volumeY: new Float32Array(n),
     sagX: new Float32Array(n), sagY: new Float32Array(n),
     followX: new Float32Array(n), followY: new Float32Array(n),
@@ -947,6 +955,14 @@ export function writeChestBasisAt(fields, i, x, y, lobe, distribution) {
   const tx = -v / Math.max(r, BASIS_EPS);
   const ty = u / Math.max(r, BASIS_EPS);
 
+  // P2.5.1 Mass Carrier: the lobe centre (u=0,v=0) has carrier ~= 1,
+  // attachment/outer vertices fade to zero, and the existing lock-aware
+  // lobe weight still owns the final seam/neckline safety.  Keeping this as
+  // a basis field (rather than a uniform sprite translation) means only the
+  // authored soft region follows q.
+  fields.carrierX[i] = 0;
+  fields.carrierY[i] = core * upperRelease;
+
   fields.volumeX[i] = u * core * upperRelease;
   fields.volumeY[i] = v * core * upperRelease * BASIS_VERTICAL_VOLUME_RATIO;
   fields.sagX[i] = u * lower * core * BASIS_SAG_HORIZONTAL_RATIO;
@@ -972,6 +988,8 @@ export function writeChestBasisAt(fields, i, x, y, lobe, distribution) {
  *  note. The clamp only pays for a `sqrt` on the rare path where it engages,
  *  keeping the common case at plain multiply-adds (directive #28). */
 export function applyChestBasis(fields, i, q, springV, bodyVx, bodyVy, distribution) {
+  const carrierX = q * fields.carrierX[i] * distribution.carrierGain;
+  const carrierY = q * fields.carrierY[i] * distribution.carrierGain;
   const volumeX = q * fields.volumeX[i] * distribution.volumeGain;
   const volumeY = q * fields.volumeY[i] * distribution.volumeGain;
   const sagX = q * fields.sagX[i] * distribution.sagGain;
@@ -1003,8 +1021,8 @@ export function applyChestBasis(fields, i, q, springV, bodyVx, bodyVy, distribut
   const compressionY = q * fields.compressionY[i] * distribution.compressionGain;
 
   return [
-    volumeX + sagX + followX + shearX + compressionX,
-    volumeY + sagY + followY + shearY + compressionY,
+    carrierX + volumeX + sagX + followX + shearX + compressionX,
+    carrierY + volumeY + sagY + followY + shearY + compressionY,
   ];
 }
 
@@ -1028,6 +1046,7 @@ function applyChestShapeQAOverride(distribution) {
     shearGainXS: distribution.shearGainXS * Number(qa.shearX ?? 1),
     shearGainYS: distribution.shearGainYS * Number(qa.shearY ?? 1),
     compressionGain: distribution.compressionGain * Number(qa.compression ?? 1),
+    carrierGain: distribution.carrierGain * Number(qa.carrier ?? 1),
   };
 }
 
@@ -1077,8 +1096,9 @@ export function buildSoftMorphWeights(part, mesh, spec, occluders) {
   });
   const left = lobeGeom(spec.left), right = lobeGeom(spec.right);
 
-  // P2.5 (directive #20, #53-59): the anchor/lower/tangent shape parameters
-  // that turn a raw lobe-local (u, v) into the five basis fields below.
+  // P2.5/P2.5.1 (directive #20, #53-59): the anchor/lower/tangent shape
+  // parameters that turn a raw lobe-local (u, v) into the six basis fields
+  // below, including the mass Carrier.
   // Reuses `physicalDistribution`'s own v3 defaulting so precompute and
   // runtime never disagree about a missing field's fallback.
   const distribution = physicalDistribution({ physicsDistribution: spec.physics_distribution });
@@ -1658,7 +1678,7 @@ export function renderPanel() {
       && torsoPhysics.model === "inertial_relative_v2";
     physicsWarning.hidden = !!active;
     physicsWarning.textContent = active ? ""
-      : "⚠ P2.3 PHYSICS NOT ACTIVE — This Rig Bundle was built without "
+      : "⚠ P2.5.1 PHYSICS NOT ACTIVE — This Rig Bundle was built without "
         + "physics.upper_torso_driver. Rebuild the Rig Bundle.";
   }
 
@@ -1855,6 +1875,7 @@ function updateChestBasisMetrics(part, probes) {
 // amplitude).
 const CHEST_BASIS_ARROW_PX = 14;
 const CHEST_BASIS_FIELD_KEYS = {
+  carrier: ["carrierX", "carrierY"],
   volume: ["volumeX", "volumeY"], sag: ["sagX", "sagY"], follow: ["followX", "followY"],
   shear: ["shearXX", "shearYY"], compression: ["compressionX", "compressionY"],
 };
@@ -1876,7 +1897,7 @@ function drawArrow(ctx, x, y, dx, dy, color) {
 /** P2.5 directive #29-30: sampled-vertex basis arrows plus lobe center/axis/
  *  ellipse overlay, drawn on the same `regionOverlay` canvas `drawSoftRegion
  *  Overlay` uses. Origin is the rest vertex, direction is the selected basis
- *  component (or the sum of all five for "Combined"), independent of the
+ *  component (or the sum of all six for "Combined"), independent of the
  *  live q/v/gain -- this shows the *shape*, not the calibrated amplitude. */
 function drawChestBasisOverlay(part) {
   const canvas = document.getElementById("regionOverlay");
@@ -2822,7 +2843,7 @@ function updateShapeQaBadge() {
   badge.hidden = !(gainActive || state.motionQA?.poseActive || (state.motionQA?.side ?? "both") !== "both");
 }
 const CHEST_SHAPE_GAIN_SLIDERS = [
-  ["gainVolume", "volume"], ["gainSag", "sag"], ["gainFollow", "follow"],
+  ["gainCarrier", "carrier"], ["gainVolume", "volume"], ["gainSag", "sag"], ["gainFollow", "follow"],
   ["gainShearX", "shearX"], ["gainShearY", "shearY"], ["gainCompression", "compression"],
 ];
 for (const [id, key] of CHEST_SHAPE_GAIN_SLIDERS) {
@@ -2831,7 +2852,7 @@ for (const [id, key] of CHEST_SHAPE_GAIN_SLIDERS) {
   slider.addEventListener("input", () => {
     const value = parseFloat(slider.value);
     document.getElementById(`${id}v`).textContent = `x${value.toFixed(2)}`;
-    state.motionQA.shapeGain = { volume: 1, sag: 1, follow: 1, shearX: 1, shearY: 1, compression: 1,
+    state.motionQA.shapeGain = { carrier: 1, volume: 1, sag: 1, follow: 1, shearX: 1, shearY: 1, compression: 1,
       ...state.motionQA.shapeGain, [key]: value };
     updateShapeQaBadge();
   });

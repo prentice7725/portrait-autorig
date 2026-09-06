@@ -20,7 +20,7 @@ const spec = {
   left: { center: [0.30, 0.45], radius: [0.20, 0.24] },
   right: { center: [0.70, 0.45], radius: [0.20, 0.24] },
   physics_distribution: {
-    version: 3, volume_gain: 0.55, sag_gain: 0.85, follow_gain_s: 0.035,
+    version: 3, carrier_gain: 1.0, volume_gain: 0.55, sag_gain: 0.85, follow_gain_s: 0.035,
     shear_gain_x_s: 0.018, shear_gain_y_s: 0.012, compression_gain: 0.20,
     upper_anchor_start: -0.75, upper_anchor_end: -0.15,
     lower_start: 0.0, lower_power: 1.7, tangent_ratio: 0.15,
@@ -46,7 +46,7 @@ if (!weights.basis) throw new Error("v3 distribution did not produce a basis fie
 
 const { left, right } = weights.basis;
 const n = rest.length / 2;
-const fields = ["volumeX", "volumeY", "sagX", "sagY", "followX", "followY",
+const fields = ["carrierX", "carrierY", "volumeX", "volumeY", "sagX", "sagY", "followX", "followY",
   "shearXX", "shearXY", "shearYX", "shearYY", "compressionX", "compressionY"];
 
 // 1. Finite everywhere.
@@ -85,6 +85,14 @@ const topI = nearestIndex(cx, cy - 0.9 * ry);
 const midI = nearestIndex(cx, cy);
 if (!(Math.abs(left.volumeY[topI]) < Math.abs(left.volumeY[midI]) + 1e-6))
   console.log("note: volume basis at the extreme top is not strictly weaker (acceptable near upper_anchor_end)");
+
+// P2.5.1 Mass Carrier: the lobe centre must carry q, while the upper
+// attachment is released and the outside remains zero.  This catches the
+// old shape-only basis where every field was zero at (u=0,v=0).
+if (!(left.carrierY[midI] > 0.9))
+  throw new Error(`carrier is not near unit at the lobe centre (${left.carrierY[midI]})`);
+if (!(left.carrierY[topI] < left.carrierY[midI]))
+  throw new Error("carrier did not fade toward the upper attachment");
 
 // 4. L/R mirror signs: a vertex at (cx_l - du, y) on the left lobe and its
 // mirror (cx_r + du, y) on the right lobe should have opposite-signed
