@@ -14,13 +14,112 @@ export const TURN_Y_SCALE = 0.7;
 
 function physicalDistribution(spec) {
   const raw = spec?.physicsDistribution || {};
-  if (Number(raw.version ?? 1) < 2 || raw.vertical_floor == null)
-    return { horizontalGain: 0.45, verticalGain: 1.0, verticalFloor: 0.35 };
+  const version = Number(raw.version ?? 1);
+  if (version >= 3) {
+    return {
+      version: 3,
+      volumeGain: Number(raw.volume_gain ?? 0.55),
+      sagGain: Number(raw.sag_gain ?? 0.85),
+      followGainS: Number(raw.follow_gain_s ?? 0.035),
+      shearGainXS: Number(raw.shear_gain_x_s ?? 0.018),
+      shearGainYS: Number(raw.shear_gain_y_s ?? 0.012),
+      compressionGain: Number(raw.compression_gain ?? 0.20),
+      upperAnchorStart: Number(raw.upper_anchor_start ?? -0.75),
+      upperAnchorEnd: Number(raw.upper_anchor_end ?? -0.15),
+      lowerStart: Number(raw.lower_start ?? 0.0),
+      lowerPower: Number(raw.lower_power ?? 1.7),
+      tangentRatio: Number(raw.tangent_ratio ?? 0.15),
+      maxFollowPx: Number(raw.max_follow_px ?? 3.0),
+      maxShearPx: Number(raw.max_shear_px ?? 2.0),
+    };
+  }
+  if (version < 2 || raw.vertical_floor == null)
+    return { version: 1, horizontalGain: 0.45, verticalGain: 1.0, verticalFloor: 0.35 };
   return {
+    version: 2,
     horizontalGain: Number(raw.horizontal_gain ?? 0.45),
     verticalGain: Number(raw.vertical_gain ?? 1.0),
     verticalFloor: Math.max(0, Math.min(1, Number(raw.vertical_floor ?? 0.35))),
   };
+}
+
+function smoothstep(edge0, edge1, x) {
+  if (edge1 === edge0) return x < edge0 ? 0 : 1;
+  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * P2.5 (directive #61): an independently-written re-derivation of the
+ * runtime.mjs basis fields (#53-59), computed on the fly from raw lobe
+ * geometry (`part.softMorph.geometry`) rather than sharing runtime.mjs's
+ * precomputed Float32Arrays -- the whole point of a second implementation is
+ * that it can disagree with the optimized one if either has a bug.
+ */
+function chestBasisFieldsAt(lobe, x, y, distribution) {
+  const u = (x - lobe.cx) / lobe.rx;
+  const v = (y - lobe.cy) / lobe.ry;
+  const r2 = u * u + v * v;
+  const r = Math.sqrt(r2);
+  const coreBase = Math.max(0, Math.min(1, 1 - r2));
+  const core = coreBase * coreBase;
+  const upperRelease = smoothstep(distribution.upperAnchorStart, distribution.upperAnchorEnd, v);
+  const lowerBase = smoothstep(distribution.lowerStart, 1.0, v);
+  const lower = Math.pow(lowerBase, distribution.lowerPower);
+  const middle = smoothstep(-0.55, -0.10, v) * (1 - smoothstep(0.35, 0.85, v));
+  const eps = 1e-6;
+  const tx = -v / Math.max(r, eps);
+  const ty = u / Math.max(r, eps);
+  return {
+    volumeX: u * core * upperRelease,
+    volumeY: v * core * upperRelease * 0.30,
+    sagX: u * lower * core * 0.10,
+    sagY: lower * core,
+    followX: tx * lower * core * distribution.tangentRatio,
+    followY: lower * core,
+    shearXX: -lower * core,
+    shearXY: ty * lower * core * 0.15,
+    shearYX: 0,
+    shearYY: -lower * core,
+    compressionX: -u * middle * core,
+    compressionY: -Math.sign(v) * middle * core * 0.15,
+  };
+}
+
+/** Composite one lobe's basis fields into a pixel delta (directive #15, #26),
+ *  with the same Follow/Shear magnitude clamp as runtime.mjs's
+ *  `applyChestBasis` (independently written, see `chestBasisFieldsAt`). */
+function applyChestBasisFields(fields, q, springV, bodyVx, bodyVy, distribution) {
+  const volumeX = q * fields.volumeX * distribution.volumeGain;
+  const volumeY = q * fields.volumeY * distribution.volumeGain;
+  const sagX = q * fields.sagX * distribution.sagGain;
+  const sagY = q * fields.sagY * distribution.sagGain;
+
+  let followX = springV * fields.followX * distribution.followGainS;
+  let followY = springV * fields.followY * distribution.followGainS;
+  const followMag = Math.hypot(followX, followY);
+  if (followMag > distribution.maxFollowPx && followMag > 0) {
+    const scale = distribution.maxFollowPx / followMag;
+    followX *= scale; followY *= scale;
+  }
+
+  let shearX = bodyVx * fields.shearXX * distribution.shearGainXS
+    + bodyVy * fields.shearYX * distribution.shearGainYS;
+  let shearY = bodyVx * fields.shearXY * distribution.shearGainXS
+    + bodyVy * fields.shearYY * distribution.shearGainYS;
+  const shearMag = Math.hypot(shearX, shearY);
+  if (shearMag > distribution.maxShearPx && shearMag > 0) {
+    const scale = distribution.maxShearPx / shearMag;
+    shearX *= scale; shearY *= scale;
+  }
+
+  const compressionX = q * fields.compressionX * distribution.compressionGain;
+  const compressionY = q * fields.compressionY * distribution.compressionGain;
+
+  return [
+    volumeX + sagX + followX + shearX + compressionX,
+    volumeY + sagY + followY + shearY + compressionY,
+  ];
 }
 
 function weightAt(part, index, y) {
@@ -121,16 +220,35 @@ export function deformReference(part, motion, operations) {
               x += horizontal * (rightAmount * wr - leftAmount * wl);
               if (physicalPx) {
                 const distribution = physicalDistribution(sm);
-                const horizontalGain = distribution.horizontalGain;
-                const verticalGain = distribution.verticalGain;
-                const verticalFloor = distribution.verticalFloor;
-                const qVolume = total > 0 ? (leftPhysics * wl + rightPhysics * wr) / total : 0;
-                const qVelocity = total > 0 ? (leftVelocity * wl + rightVelocity * wr) / total : 0;
-                x += horizontalGain * (rightPhysics * wr - leftPhysics * wl);
-                const verticalShape = verticalFloor
-                  + (1 - verticalFloor) * Number(part.softMorph.lowerBias?.[i] ?? 0);
-                y += (qVolume * verticalGain + qVelocity * Number(torso.settleTimeScaleS ?? 0.03))
-                  * maxWeight * verticalShape;
+                if (distribution.version >= 3 && part.softMorph.geometry) {
+                  // P2.5 (directive #5, #15-16): unnormalized weighted blend
+                  // of each lobe's independently-recomputed basis composite.
+                  const bodyVx = Number(motion.bodyVelocityX ?? 0);
+                  const bodyVy = Number(motion.bodyVelocityY ?? 0);
+                  const dl = wl > 0
+                    ? applyChestBasisFields(
+                        chestBasisFieldsAt(part.softMorph.geometry.left, rest[v], rest[v + 1], distribution),
+                        leftPhysics, leftVelocity, bodyVx, bodyVy, distribution)
+                    : [0, 0];
+                  const dr = wr > 0
+                    ? applyChestBasisFields(
+                        chestBasisFieldsAt(part.softMorph.geometry.right, rest[v], rest[v + 1], distribution),
+                        rightPhysics, rightVelocity, bodyVx, bodyVy, distribution)
+                    : [0, 0];
+                  x += dl[0] * wl + dr[0] * wr;
+                  y += dl[1] * wl + dr[1] * wr;
+                } else {
+                  const horizontalGain = distribution.horizontalGain;
+                  const verticalGain = distribution.verticalGain;
+                  const verticalFloor = distribution.verticalFloor;
+                  const qVolume = total > 0 ? (leftPhysics * wl + rightPhysics * wr) / total : 0;
+                  const qVelocity = total > 0 ? (leftVelocity * wl + rightVelocity * wr) / total : 0;
+                  x += horizontalGain * (rightPhysics * wr - leftPhysics * wl);
+                  const verticalShape = verticalFloor
+                    + (1 - verticalFloor) * Number(part.softMorph.lowerBias?.[i] ?? 0);
+                  y += (qVolume * verticalGain + qVelocity * Number(torso.settleTimeScaleS ?? 0.03))
+                    * maxWeight * verticalShape;
+                }
               } else {
                 y += vertical * (volume + velocity * settleGain) * maxWeight
                   * Number(part.softMorph.lowerBias?.[i] ?? 0);

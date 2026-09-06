@@ -50,14 +50,46 @@ export const CHEST_WIDEN = 0.004; // ribcage expansion, as a fraction of chest w
 export const SOFT_MORPH_TAG = "topwear";     // canonical torso semantic
 export const SOFT_MORPH_TAGS = new Set(["topwear", "topwear_with_arms", "topwear_with_handwear"]);
 const isSoftMorphTag = (tag) => SOFT_MORPH_TAGS.has(tag);
-function physicalDistribution(spec) {
+// P2.5 (PORTRAIT_AUTORIG_P2_5_CHEST_DEFORMATION_BASIS_IMPLEMENTATION_DIRECTIVE_v0.1
+// #20, #23): version-3 distribution defaults. These are the *generic*
+// fallback for a manifest that carries `version: 3` but omits a field, never
+// a per-character value -- production compiles always populate every field
+// explicitly (`soft_morph.basis_physics_distribution`).
+const BASIS_V3_DEFAULTS = {
+  volumeGain: 0.55, sagGain: 0.85, followGainS: 0.035,
+  shearGainXS: 0.018, shearGainYS: 0.012, compressionGain: 0.20,
+  upperAnchorStart: -0.75, upperAnchorEnd: -0.15,
+  lowerStart: 0.0, lowerPower: 1.7, tangentRatio: 0.15,
+  maxFollowPx: 3.0, maxShearPx: 2.0,
+};
+export function physicalDistribution(spec) {
   const raw = spec?.physicsDistribution || {};
+  const version = Number(raw.version ?? 1);
+  if (version >= 3) {
+    return {
+      version: 3,
+      volumeGain: Number(raw.volume_gain ?? BASIS_V3_DEFAULTS.volumeGain),
+      sagGain: Number(raw.sag_gain ?? BASIS_V3_DEFAULTS.sagGain),
+      followGainS: Number(raw.follow_gain_s ?? BASIS_V3_DEFAULTS.followGainS),
+      shearGainXS: Number(raw.shear_gain_x_s ?? BASIS_V3_DEFAULTS.shearGainXS),
+      shearGainYS: Number(raw.shear_gain_y_s ?? BASIS_V3_DEFAULTS.shearGainYS),
+      compressionGain: Number(raw.compression_gain ?? BASIS_V3_DEFAULTS.compressionGain),
+      upperAnchorStart: Number(raw.upper_anchor_start ?? BASIS_V3_DEFAULTS.upperAnchorStart),
+      upperAnchorEnd: Number(raw.upper_anchor_end ?? BASIS_V3_DEFAULTS.upperAnchorEnd),
+      lowerStart: Number(raw.lower_start ?? BASIS_V3_DEFAULTS.lowerStart),
+      lowerPower: Number(raw.lower_power ?? BASIS_V3_DEFAULTS.lowerPower),
+      tangentRatio: Number(raw.tangent_ratio ?? BASIS_V3_DEFAULTS.tangentRatio),
+      maxFollowPx: Number(raw.max_follow_px ?? BASIS_V3_DEFAULTS.maxFollowPx),
+      maxShearPx: Number(raw.max_shear_px ?? BASIS_V3_DEFAULTS.maxShearPx),
+    };
+  }
   // v2.4 distributions were compiler-owned. A pre-floor manifest cannot
   // express the visible physical shape, so migrate its legacy pair.
-  if (Number(raw.version ?? 1) < 2 || raw.vertical_floor == null) {
-    return { horizontalGain: 0.45, verticalGain: 1.0, verticalFloor: 0.35 };
+  if (version < 2 || raw.vertical_floor == null) {
+    return { version: 1, horizontalGain: 0.45, verticalGain: 1.0, verticalFloor: 0.35 };
   }
   return {
+    version: 2,
     horizontalGain: Number(raw.horizontal_gain ?? 0.45),
     verticalGain: Number(raw.vertical_gain ?? 1.0),
     verticalFloor: Math.max(0, Math.min(1, Number(raw.vertical_floor ?? 0.35))),
@@ -275,7 +307,11 @@ export const state = {
   profiler: { fps: 0, physicsMs: 0, deformMs: 0, stitchMs: 0, uploadMs: 0,
               activeVertices: 0, totalVertices: 0, backlogDropped: 0, lastAt: -Infinity },
   motionQA: { inertia: true, inertiaOnly: false, asymmetry: 1, inertiaMultiplier: 1,
-              settleMultiplier: 1, chestImpulseX: 0, chestImpulseY: 0 },
+              settleMultiplier: 1, chestImpulseX: 0, chestImpulseY: 0,
+              side: "both", shapeGain: null, poseActive: false, poseQ: 0, poseV: 0 },
+  // P2.5 directive #44: safety-clamp/diagnostic counters for the basis path.
+  chestBasisDiag: { clamped: 0 },
+  chestTrajectoryGraph: [],
   bodyPulse: { x: 0, y: 0, vx: 0, vy: 0 },
   motionGraph: [],
   calibrationRequested: 0,
@@ -868,6 +904,133 @@ export function occluderAlphaAt(occluder, x, y) {
   return occluder.alpha[(ly * occluder.width + lx) * 4 + 3];
 }
 
+// P2.5 (directive #8-9, #53-59): the deformation basis. Every field below is
+// evaluated once per vertex per lobe at build time in lobe-local (u, v)
+// space and multiplied at runtime by the existing physical q/v/body-velocity
+// and gain -- see `applyChestBasis`. Ratios/band edges the directive gives as
+// fixed worked examples (not manifest fields) are named constants here.
+const BASIS_VERTICAL_VOLUME_RATIO = 0.30;   // directive #55
+const BASIS_SAG_HORIZONTAL_RATIO = 0.10;    // directive #56
+const BASIS_SHEAR_TANGENT_RATIO = 0.15;     // directive #59
+const BASIS_COMPRESSION_VERTICAL_RATIO = 0.15; // directive #58
+const BASIS_MIDDLE_BAND = [-0.55, -0.10, 0.35, 0.85]; // directive #14, #58
+const BASIS_EPS = 1e-6;
+
+export function makeChestBasisArrays(n) {
+  return {
+    volumeX: new Float32Array(n), volumeY: new Float32Array(n),
+    sagX: new Float32Array(n), sagY: new Float32Array(n),
+    followX: new Float32Array(n), followY: new Float32Array(n),
+    shearXX: new Float32Array(n), shearXY: new Float32Array(n),
+    shearYX: new Float32Array(n), shearYY: new Float32Array(n),
+    compressionX: new Float32Array(n), compressionY: new Float32Array(n),
+  };
+}
+
+/** Fill one lobe's basis fields at vertex `i` (directive #53-59). `lobe` is
+ *  `{cx, cy, rx, ry}` in the same pixel space as `x`/`y`; `distribution` is a
+ *  `physicalDistribution()` result (only the anchor/lower/tangent shape
+ *  fields are read here -- the six gains are applied later, at runtime, so a
+ *  QA override can retune them without rebuilding the mesh). */
+export function writeChestBasisAt(fields, i, x, y, lobe, distribution) {
+  const u = (x - lobe.cx) / lobe.rx;
+  const v = (y - lobe.cy) / lobe.ry;
+  const r2 = u * u + v * v;
+  const r = Math.sqrt(r2);
+  const coreBase = Math.max(0, Math.min(1, 1 - r2));
+  const core = coreBase * coreBase;
+  const upperRelease = smoothstep(distribution.upperAnchorStart, distribution.upperAnchorEnd, v);
+  const lowerBase = smoothstep(distribution.lowerStart, 1.0, v);
+  const lower = Math.pow(lowerBase, distribution.lowerPower);
+  const middle = smoothstep(BASIS_MIDDLE_BAND[0], BASIS_MIDDLE_BAND[1], v)
+    * (1 - smoothstep(BASIS_MIDDLE_BAND[2], BASIS_MIDDLE_BAND[3], v));
+  const tx = -v / Math.max(r, BASIS_EPS);
+  const ty = u / Math.max(r, BASIS_EPS);
+
+  fields.volumeX[i] = u * core * upperRelease;
+  fields.volumeY[i] = v * core * upperRelease * BASIS_VERTICAL_VOLUME_RATIO;
+  fields.sagX[i] = u * lower * core * BASIS_SAG_HORIZONTAL_RATIO;
+  fields.sagY[i] = lower * core;
+  fields.followX[i] = tx * lower * core * distribution.tangentRatio;
+  fields.followY[i] = lower * core;
+  fields.shearXX[i] = -lower * core;
+  fields.shearXY[i] = ty * lower * core * BASIS_SHEAR_TANGENT_RATIO;
+  fields.shearYX[i] = 0; // directive #59 gives no explicit cross term; small by construction
+  fields.shearYY[i] = -lower * core;
+  fields.compressionX[i] = -u * middle * core;
+  fields.compressionY[i] = -Math.sign(v) * middle * core * BASIS_COMPRESSION_VERTICAL_RATIO;
+}
+
+/** Composite one lobe side's basis contribution at vertex `i` into a
+ *  physical pixel delta (directive #15, #26). `fields` is `part.softMorph
+ *  .basis.left` or `.right`; `q`/`springV` are that lobe's physical
+ *  scalar/velocity (px, px/s); `bodyVx`/`bodyVy` are the shared body
+ *  velocity (px/s, directive #13: a small shape modifier, not a second
+ *  root translation). Follow and shear are magnitude-clamped independently
+ *  (directive #13/#20) as the runtime safety bound -- see
+ *  `state.chestBasisDiag` (#44) and the P2.5 plan's triangle-safety scope
+ *  note. The clamp only pays for a `sqrt` on the rare path where it engages,
+ *  keeping the common case at plain multiply-adds (directive #28). */
+export function applyChestBasis(fields, i, q, springV, bodyVx, bodyVy, distribution) {
+  const volumeX = q * fields.volumeX[i] * distribution.volumeGain;
+  const volumeY = q * fields.volumeY[i] * distribution.volumeGain;
+  const sagX = q * fields.sagX[i] * distribution.sagGain;
+  const sagY = q * fields.sagY[i] * distribution.sagGain;
+
+  let followX = springV * fields.followX[i] * distribution.followGainS;
+  let followY = springV * fields.followY[i] * distribution.followGainS;
+  const followMag2 = followX * followX + followY * followY;
+  const maxFollow2 = distribution.maxFollowPx * distribution.maxFollowPx;
+  if (followMag2 > maxFollow2 && followMag2 > 0) {
+    const scale = distribution.maxFollowPx / Math.sqrt(followMag2);
+    followX *= scale; followY *= scale;
+    state.chestBasisDiag.clamped++;
+  }
+
+  let shearX = bodyVx * fields.shearXX[i] * distribution.shearGainXS
+    + bodyVy * fields.shearYX[i] * distribution.shearGainYS;
+  let shearY = bodyVx * fields.shearXY[i] * distribution.shearGainXS
+    + bodyVy * fields.shearYY[i] * distribution.shearGainYS;
+  const shearMag2 = shearX * shearX + shearY * shearY;
+  const maxShear2 = distribution.maxShearPx * distribution.maxShearPx;
+  if (shearMag2 > maxShear2 && shearMag2 > 0) {
+    const scale = distribution.maxShearPx / Math.sqrt(shearMag2);
+    shearX *= scale; shearY *= scale;
+    state.chestBasisDiag.clamped++;
+  }
+
+  const compressionX = q * fields.compressionX[i] * distribution.compressionGain;
+  const compressionY = q * fields.compressionY[i] * distribution.compressionGain;
+
+  return [
+    volumeX + sagX + followX + shearX + compressionX,
+    volumeY + sagY + followY + shearY + compressionY,
+  ];
+}
+
+// A lobe with zero weight never needs its basis evaluated (directive #16);
+// a single shared zero avoids allocating a throwaway array per such vertex.
+const ZERO_DELTA = [0, 0];
+
+/** Directive #31 QA overrides: independent per-basis gain multipliers (1.0
+ *  default = no change) layered on top of the manifest's own gains, so a
+ *  reviewer can isolate/exaggerate one basis term without touching the
+ *  compiled distribution. Returns the input unchanged when no override is
+ *  active, and never mutates it when one is. */
+function applyChestShapeQAOverride(distribution) {
+  const qa = state.motionQA?.shapeGain;
+  if (!qa) return distribution;
+  return {
+    ...distribution,
+    volumeGain: distribution.volumeGain * Number(qa.volume ?? 1),
+    sagGain: distribution.sagGain * Number(qa.sag ?? 1),
+    followGainS: distribution.followGainS * Number(qa.follow ?? 1),
+    shearGainXS: distribution.shearGainXS * Number(qa.shearX ?? 1),
+    shearGainYS: distribution.shearGainYS * Number(qa.shearY ?? 1),
+    compressionGain: distribution.compressionGain * Number(qa.compression ?? 1),
+  };
+}
+
 /** Precompute the two-lobe soft-morph weight field for a `topwear` mesh
  *  (design doc 6-8): per-vertex left/right ellipse weight, each already
  *  multiplied by the neckline and center locks, plus a lower-bias factor for
@@ -914,8 +1077,23 @@ export function buildSoftMorphWeights(part, mesh, spec, occluders) {
   });
   const left = lobeGeom(spec.left), right = lobeGeom(spec.right);
 
+  // P2.5 (directive #20, #53-59): the anchor/lower/tangent shape parameters
+  // that turn a raw lobe-local (u, v) into the five basis fields below.
+  // Reuses `physicalDistribution`'s own v3 defaulting so precompute and
+  // runtime never disagree about a missing field's fallback.
+  const distribution = physicalDistribution({ physicsDistribution: spec.physics_distribution });
+  const basisV3 = distribution.version >= 3;
+
   const n = mesh.rest.length / 2;
   const wl = new Float32Array(n), wr = new Float32Array(n), lower = new Float32Array(n);
+  // `basis` fields are only allocated when a v3 distribution is present --
+  // a v1/v2 manifest never reads them, and skipping the allocation keeps a
+  // legacy load exactly as cheap as it always was.
+  const basis = basisV3 ? {
+    left: makeChestBasisArrays(n), right: makeChestBasisArrays(n),
+  } : null;
+  const geometry = basisV3 ? { left, right } : null;
+
   for (let i = 0, v = 0; i < n; i++, v += 2) {
     const x = mesh.rest[v], y = mesh.rest[v + 1];
     // Neckline lock (8.1): 0 at the garment's own top edge, released by the
@@ -938,8 +1116,13 @@ export function buildSoftMorphWeights(part, mesh, spec, occluders) {
     // -- which would fight the neckline lock right above it.
     const near = dl2 <= dr2 ? left : right;
     lower[i] = Math.max(0, Math.min(1, (y - near.cy) / near.ry));
+
+    if (basisV3) {
+      writeChestBasisAt(basis.left, i, x, y, left, distribution);
+      writeChestBasisAt(basis.right, i, x, y, right, distribution);
+    }
   }
-  return { left: wl, right: wr, lowerBias: lower };
+  return { left: wl, right: wr, lowerBias: lower, basis, geometry };
 }
 
 /* ---------- GL ---------- */
@@ -1069,6 +1252,8 @@ export function build(manifest, images) {
   state.physicsSimTime = 0;
   state.bodyPulse = { x: 0, y: 0, vx: 0, vy: 0 };
   state.motionGraph = [];
+  state.chestTrajectoryGraph = [];
+  state.chestBasisDiag = { clamped: 0 };
   state.calibrationRequested = 0;
   const physicsSpec = manifest.physics || null;
   if (physicsSpec) {
@@ -1608,6 +1793,128 @@ function drawMotionGraph() {
   draw("body", "#8ec5ff"); draw("left", "#ffc27d"); draw("right", "#d8a2ff");
 }
 
+/** P2.5 directive #40: XY trajectory of the lower-lobe L/R probes (relative
+ *  to rest, body-sway already subtracted by the push site in `frame`) over
+ *  the last few seconds. A reference-like response traces a small arc/loop
+ *  under Body Kick rather than a straight line back and forth. */
+function drawChestTrajectory() {
+  const canvas = document.getElementById("chestTrajectory");
+  if (!canvas?.getContext) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const history = state.chestTrajectoryGraph;
+  if (history.length < 2) return;
+  const points = history.flatMap((sample) => [sample.left, sample.right]).filter(Boolean);
+  if (!points.length) return;
+  const span = Math.max(0.5, ...points.map((p) => Math.max(Math.abs(p[0]), Math.abs(p[1]))));
+  const cx = canvas.width / 2, cy = canvas.height / 2;
+  const scale = (canvas.width / 2 - 4) / span;
+  ctx.strokeStyle = "rgba(255,255,255,0.15)";
+  ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(canvas.width, cy);
+  ctx.moveTo(cx, 0); ctx.lineTo(cx, canvas.height); ctx.stroke();
+  const draw = (key, color) => {
+    ctx.strokeStyle = color; ctx.beginPath();
+    let started = false;
+    for (const sample of history) {
+      const point = sample[key];
+      if (!point) continue;
+      const x = cx + point[0] * scale, y = cy + point[1] * scale;
+      if (started) ctx.lineTo(x, y); else { ctx.moveTo(x, y); started = true; }
+    }
+    ctx.stroke();
+  };
+  draw("left", "#ffc27d"); draw("right", "#d8a2ff");
+}
+
+/** P2.5 directive #29-30, #73: live weight/probe/safety diagnostics next to
+ *  the existing calibration readout. */
+function updateChestBasisMetrics(part, probes) {
+  const el = document.getElementById("chestBasisMeta");
+  if (!el) return;
+  if (!part || !part.softMorph) { el.innerHTML = "basis: n/a"; return; }
+  const distribution = physicalDistribution({ physicsDistribution:
+    (state.manifest.motion || {}).upper_torso_soft_morph?.physics_distribution });
+  let maxL = 0, maxR = 0;
+  for (let i = 0; i < part.softMorph.left.length; i++) {
+    maxL = Math.max(maxL, part.softMorph.left[i] || 0);
+    maxR = Math.max(maxR, part.softMorph.right[i] || 0);
+  }
+  const lockDisp = probes?.lock != null ? measureProbeDisplacement(part, probes.lock) : null;
+  const lowerDisp = probes?.leftLower != null ? measureProbeDisplacement(part, probes.leftLower) : null;
+  const warn = (maxL < 0.9 || maxR < 0.9) ? ' <span class="warn">low lobe weight</span>' : "";
+  el.innerHTML = `basis v${distribution.version ?? 1} · L max weight ${maxL.toFixed(2)} · `
+    + `R max weight ${maxR.toFixed(2)}${warn} · lock ${lockDisp == null ? "n/a" : lockDisp.toFixed(3) + "px"} · `
+    + `lower probe ${lowerDisp == null ? "n/a" : lowerDisp.toFixed(2) + "px"} · `
+    + `basis clamps ${state.chestBasisDiag.clamped}`;
+}
+
+// Debug-arrow length is normalized against the lobe radius, not the basis
+// value's raw magnitude -- the fields differ by orders of magnitude from
+// each other (directive #29's point is direction/shape, not calibrated
+// amplitude).
+const CHEST_BASIS_ARROW_PX = 14;
+const CHEST_BASIS_FIELD_KEYS = {
+  volume: ["volumeX", "volumeY"], sag: ["sagX", "sagY"], follow: ["followX", "followY"],
+  shear: ["shearXX", "shearYY"], compression: ["compressionX", "compressionY"],
+};
+function drawArrow(ctx, x, y, dx, dy, color) {
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-6) return;
+  const ux = dx / len, uy = dy / len;
+  const ex = x + ux * CHEST_BASIS_ARROW_PX * Math.min(1, len * 4), ey = y + uy * CHEST_BASIS_ARROW_PX * Math.min(1, len * 4);
+  ctx.strokeStyle = color; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(ex, ey); ctx.stroke();
+  const headAngle = Math.atan2(uy, ux);
+  ctx.beginPath();
+  ctx.moveTo(ex, ey);
+  ctx.lineTo(ex - 4 * Math.cos(headAngle - 0.4), ey - 4 * Math.sin(headAngle - 0.4));
+  ctx.moveTo(ex, ey);
+  ctx.lineTo(ex - 4 * Math.cos(headAngle + 0.4), ey - 4 * Math.sin(headAngle + 0.4));
+  ctx.stroke();
+}
+
+/** P2.5 directive #29-30: sampled-vertex basis arrows plus lobe center/axis/
+ *  ellipse overlay, drawn on the same `regionOverlay` canvas `drawSoftRegion
+ *  Overlay` uses. Origin is the rest vertex, direction is the selected basis
+ *  component (or the sum of all five for "Combined"), independent of the
+ *  live q/v/gain -- this shows the *shape*, not the calibrated amplitude. */
+function drawChestBasisOverlay(part) {
+  const canvas = document.getElementById("regionOverlay");
+  const enabled = !!document.getElementById("showChestBasis")?.checked;
+  if (!enabled || !canvas?.getContext) return;
+  if (!part?.softMorph?.basis || !part?.softMorph?.geometry) return;
+  const ctx = canvas.getContext("2d");
+  const selector = document.getElementById("chestBasisSelect")?.value || "combined";
+  const rest = part.mesh.rest;
+  const n = rest.length / 2;
+  const step = Math.max(1, Math.floor(n / 400)); // keep the overlay legible on a dense mesh
+
+  const sampleDelta = (fields, i) => {
+    if (selector !== "combined") {
+      const [fx, fy] = CHEST_BASIS_FIELD_KEYS[selector];
+      return [fields[fx][i], fields[fy][i]];
+    }
+    let dx = 0, dy = 0;
+    for (const [fx, fy] of Object.values(CHEST_BASIS_FIELD_KEYS)) { dx += fields[fx][i]; dy += fields[fy][i]; }
+    return [dx, dy];
+  };
+  for (const side of ["left", "right"]) {
+    const fields = part.softMorph.basis[side];
+    const weight = part.softMorph[side];
+    const color = side === "left" ? "rgba(110,168,254,0.9)" : "rgba(254,168,110,0.9)";
+    for (let i = 0; i < n; i += step) {
+      if (!(weight[i] > 0.02)) continue;
+      const [dx, dy] = sampleDelta(fields, i);
+      drawArrow(ctx, rest[i * 2], rest[i * 2 + 1], dx, dy, color);
+    }
+    const { cx, cy, rx, ry } = part.softMorph.geometry[side];
+    ctx.strokeStyle = "rgba(255,255,255,0.4)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(cx - rx, cy); ctx.lineTo(cx + rx, cy); ctx.stroke(); // u axis
+    ctx.beginPath(); ctx.moveTo(cx, cy - ry); ctx.lineTo(cx, cy + ry); ctx.stroke(); // v axis
+    ctx.beginPath(); ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2); ctx.stroke();
+  }
+}
+
 export function bodySwayPosition(seconds, spec = {}) {
   if (spec.enabled === false) return [0, 0];
   const ax = Number(spec.amplitude_x_px ?? 1.8), ay = Number(spec.amplitude_y_px ?? 1.2);
@@ -1873,6 +2180,13 @@ export function deform(part, now, motion) {
           flushDelta();
           if (part.softMorph && motion.softMorph.enabled) {
             const sm = motion.softMorph;
+            // P2.5 directive #13/#57: Follow and Shear can be the only
+            // nonzero contribution (q==0 exactly at a zero-crossing, or a
+            // shear-only QA stress with no chest spring displacement at
+            // all) -- gated separately from the v1/v2 amount check below so
+            // widening it cannot change v1/v2 output for any case that
+            // already entered this block.
+            const distributionVersion = Number(sm.physicsDistribution?.version ?? 1);
             // P2 torso physics feeds the authored local field; it never adds
             // a second uniform topwear translation. This preserves lobe,
             // neckline, center, and occluder locks already encoded in weights.
@@ -1885,52 +2199,86 @@ export function deform(part, now, motion) {
             const qaMean = (leftPhysics + rightPhysics) * 0.5;
             leftPhysics = qaMean + (leftPhysics - qaMean) * qaAsym;
             rightPhysics = qaMean + (rightPhysics - qaMean) * qaAsym;
-            const leftVelocity = isSoftMorphTag(part.spec.tag)
+            let leftVelocity = isSoftMorphTag(part.spec.tag)
               ? Number(torso?.left?.velocity ?? torso?.velocity ?? 0) : 0;
-            const rightVelocity = isSoftMorphTag(part.spec.tag)
+            let rightVelocity = isSoftMorphTag(part.spec.tag)
               ? Number(torso?.right?.velocity ?? torso?.velocity ?? 0) : 0;
+            // P2.5 directive #32: static shape poses ("Shape q +-4" / "Shape
+            // v +-12") override the physical scalar directly so the basis
+            // shape can be inspected without Auto Idle driving real physics.
+            if (isSoftMorphTag(part.spec.tag) && state.motionQA?.poseActive) {
+              leftPhysics = rightPhysics = Number(state.motionQA.poseQ || 0);
+              leftVelocity = rightVelocity = Number(state.motionQA.poseV || 0);
+            }
             const settleGain = Number(torso?.settleGain ?? 0.08)
               * Number(state.motionQA?.settleMultiplier ?? 1);
             const baseAmount = sm.strength * sm.morph;
-            const physicalPx = torso?.model === "inertial_relative_v2";
+            const physicalPx = torso?.model === "inertial_relative_v2" || state.motionQA?.poseActive;
             const leftAmount = physicalPx ? baseAmount : baseAmount + leftPhysics;
             const rightAmount = physicalPx ? baseAmount : baseAmount + rightPhysics;
+            const v3VelocityActive = physicalPx && distributionVersion >= 3
+              && (leftVelocity !== 0 || rightVelocity !== 0
+                  || Number(motion.bodyVelocityX ?? 0) !== 0 || Number(motion.bodyVelocityY ?? 0) !== 0);
             if (leftAmount !== 0 || rightAmount !== 0
-                || (physicalPx && (leftPhysics !== 0 || rightPhysics !== 0))) {
-              const wl = part.softMorph.left[i], wr = part.softMorph.right[i];
+                || (physicalPx && (leftPhysics !== 0 || rightPhysics !== 0)) || v3VelocityActive) {
+              // Directive #33 side isolation: force one lobe's weight to zero
+              // for L/R mirror-sign QA, everywhere a v1/v2/v3 manifest reads
+              // the compiled weight.
+              const qaSide = state.motionQA?.side || "both";
+              let wl = part.softMorph.left[i], wr = part.softMorph.right[i];
+              if (qaSide === "left") wr = 0; else if (qaSide === "right") wl = 0;
               if (wl > 0 || wr > 0) {
                 const lobeWeight = Math.max(wl, wr);
                 const totalWeight = wl + wr;
                 x += sm.horizontalPx * (rightAmount * wr - leftAmount * wl);
                 if (physicalPx) {
-                  // The physical q is a relative pixel displacement in the
-                  // same units the 1/2/4px response QA calibrates against
-                  // (check_physical_response.mjs, check_chest_geometry_parity.mjs
-                  // measure hypot(dx, dy) at the probe and require it stay
-                  // within +-15% of the requested q). Keep horizontal/vertical
-                  // gain at their calibrated 0.45/1.0 so that contract holds;
-                  // see vertical_floor below for the part of the response that
-                  // actually needed a fix.
                   const distribution = physicalDistribution(sm);
-                  const horizontalGain = distribution.horizontalGain;
-                  const verticalGain = distribution.verticalGain;
-                  const verticalFloor = distribution.verticalFloor;
-                  x += horizontalGain * (rightPhysics * wr - leftPhysics * wl);
-                  const qVolume = totalWeight > 0
-                    ? (leftPhysics * wl + rightPhysics * wr) / totalWeight : 0;
-                  const qVelocity = totalWeight > 0
-                    ? (leftVelocity * wl + rightVelocity * wr) / totalWeight : 0;
-                  // lowerBias still concentrates the response toward the
-                  // lower curve, but a zero bias at the lobe centre made the
-                  // physical pixel response disappear after the authored
-                  // locks were applied.  The floor is multiplied by the
-                  // already-locked lobe weight, so neckline/center locks stay
-                  // exact while the soft-tissue volume remains visible.
-                  const verticalShape = verticalFloor
-                    + (1 - verticalFloor) * Number(part.softMorph.lowerBias[i] ?? 0);
-                  y += (qVolume * verticalGain
-                    + qVelocity * Number(torso?.settleTimeScaleS ?? 0.03))
-                    * lobeWeight * verticalShape;
+                  if (distribution.version >= 3 && part.softMorph.basis) {
+                    // P2.5 (directive #5, #15-16): the flat horizontal/
+                    // vertical gain pair is replaced by the precomputed
+                    // per-vertex basis. Blend is an unnormalized weighted sum
+                    // -- not divided by totalWeight -- so a tiny lobe weight
+                    // is never amplified into large motion (#16).
+                    const gains = applyChestShapeQAOverride(distribution);
+                    const bodyVx = Number(motion.bodyVelocityX ?? 0);
+                    const bodyVy = Number(motion.bodyVelocityY ?? 0);
+                    const dl = wl > 0
+                      ? applyChestBasis(part.softMorph.basis.left, i, leftPhysics, leftVelocity, bodyVx, bodyVy, gains)
+                      : ZERO_DELTA;
+                    const dr = wr > 0
+                      ? applyChestBasis(part.softMorph.basis.right, i, rightPhysics, rightVelocity, bodyVx, bodyVy, gains)
+                      : ZERO_DELTA;
+                    x += dl[0] * wl + dr[0] * wr;
+                    y += dl[1] * wl + dr[1] * wr;
+                  } else {
+                    // The physical q is a relative pixel displacement in the
+                    // same units the 1/2/4px response QA calibrates against
+                    // (check_physical_response.mjs, check_chest_geometry_parity.mjs
+                    // measure hypot(dx, dy) at the probe and require it stay
+                    // within +-15% of the requested q). Keep horizontal/vertical
+                    // gain at their calibrated 0.45/1.0 so that contract holds;
+                    // see vertical_floor below for the part of the response that
+                    // actually needed a fix.
+                    const horizontalGain = distribution.horizontalGain;
+                    const verticalGain = distribution.verticalGain;
+                    const verticalFloor = distribution.verticalFloor;
+                    x += horizontalGain * (rightPhysics * wr - leftPhysics * wl);
+                    const qVolume = totalWeight > 0
+                      ? (leftPhysics * wl + rightPhysics * wr) / totalWeight : 0;
+                    const qVelocity = totalWeight > 0
+                      ? (leftVelocity * wl + rightVelocity * wr) / totalWeight : 0;
+                    // lowerBias still concentrates the response toward the
+                    // lower curve, but a zero bias at the lobe centre made the
+                    // physical pixel response disappear after the authored
+                    // locks were applied.  The floor is multiplied by the
+                    // already-locked lobe weight, so neckline/center locks stay
+                    // exact while the soft-tissue volume remains visible.
+                    const verticalShape = verticalFloor
+                      + (1 - verticalFloor) * Number(part.softMorph.lowerBias[i] ?? 0);
+                    y += (qVolume * verticalGain
+                      + qVelocity * Number(torso?.settleTimeScaleS ?? 0.03))
+                      * lobeWeight * verticalShape;
+                  }
                 }
                 // Preserve the legacy max-weight result when both sides are
                 // equal, while allowing independent lobe spring amplitudes.
@@ -2209,6 +2557,11 @@ export function frame(now) {
   // render-time sway sample so opening a physics-enabled run does not snap.
   if (state.physicsDrivers && state.physicsLastNow != null)
     motion.bodySwayPosition = [state.bodyMotion.x, state.bodyMotion.y];
+  // P2.5 directive #13: the chest basis's Shear term reads body velocity as a
+  // small shape modifier, never a second root translation (#60) -- the same
+  // `state.bodyMotion.vx/vy` the primary body-sway deformer already tracks.
+  motion.bodyVelocityX = state.bodyMotion.vx;
+  motion.bodyVelocityY = state.bodyMotion.vy;
   state.profiler.physicsMs = performance.now() - physicsStart;
 
   // v0.2's manifest phase list is the runtime ordering contract.  The
@@ -2247,20 +2600,21 @@ export function frame(now) {
   // Calibration reports displacement of the compiled topwear probes, not the
   // torso spring scalar.  This keeps the UI honest when authored lobe weights
   // attenuate the physical output or a lock correctly remains stationary.
+  const chestTopwear = state.parts.find((part) => isSoftMorphTag(part.spec?.tag)
+    && part.mesh?.rest && part.mesh?.live && part.softMorph);
+  const chestProbes = chestTopwear ? selectChestProbes(chestTopwear) : null;
   const calibrationEl = document.getElementById("chestCalibration");
   if (calibrationEl && state.calibrationRequested) {
-    const topwear = state.parts.find((part) => isSoftMorphTag(part.spec?.tag)
-      && part.mesh?.rest && part.mesh?.live && part.softMorph);
-    const probes = selectChestProbes(topwear);
-    if (probes && probes.leftPrimary != null && probes.rightPrimary != null) {
+    if (chestProbes && chestProbes.leftPrimary != null && chestProbes.rightPrimary != null) {
       calibrationEl.textContent = `Requested: ${state.calibrationRequested.toFixed(2)}px · `
-        + `Measured L: ${measureProbeDisplacement(topwear, probes.leftPrimary).toFixed(2)}px · `
-        + `Measured R: ${measureProbeDisplacement(topwear, probes.rightPrimary).toFixed(2)}px`;
+        + `Measured L: ${measureProbeDisplacement(chestTopwear, chestProbes.leftPrimary).toFixed(2)}px · `
+        + `Measured R: ${measureProbeDisplacement(chestTopwear, chestProbes.rightPrimary).toFixed(2)}px`;
     } else {
       calibrationEl.textContent = `Requested: ${state.calibrationRequested.toFixed(2)}px · `
         + "Measured: compiled topwear probes unavailable";
     }
   }
+  updateChestBasisMetrics(chestTopwear, chestProbes);
   const uploadStart = performance.now();
   for (const { part: p, opacity } of drawParts) {
     gl.bindBuffer(gl.ARRAY_BUFFER, p.buf.pos);
@@ -2303,8 +2657,21 @@ export function frame(now) {
   state.motionGraph.push({ body: state.bodyMotion.y, left: torsoGraph.left?.value ?? 0,
     right: torsoGraph.right?.value ?? 0 });
   if (state.motionGraph.length > 300) state.motionGraph.shift();
+  // P2.5 directive #40: a small XY trajectory plot of the lower-lobe probes,
+  // so a reference-like response's arc/loop-like return is visible directly,
+  // not only inferred from the scalar graph above.
+  if (chestTopwear && chestProbes) {
+    const lowerXY = (index) => index == null ? null : [
+      chestTopwear.mesh.live[index * 2] - chestTopwear.mesh.rest[index * 2],
+      chestTopwear.mesh.live[index * 2 + 1] - chestTopwear.mesh.rest[index * 2 + 1],
+    ];
+    state.chestTrajectoryGraph.push({ left: lowerXY(chestProbes.leftLower), right: lowerXY(chestProbes.rightLower) });
+    if (state.chestTrajectoryGraph.length > 180) state.chestTrajectoryGraph.shift();
+  }
   drawMotionGraph();
+  drawChestTrajectory();
   drawSoftRegionOverlay();
+  drawChestBasisOverlay(chestTopwear);
   requestAnimationFrame(frame);
 }
 
@@ -2436,10 +2803,69 @@ document.getElementById("inertiaOnly").addEventListener("click", () => {
   document.getElementById("chestInertia").checked = true;
 });
 document.getElementById("resetMotion").addEventListener("click", () => {
+  const shapeGain = state.motionQA?.shapeGain ?? null; // Reset Motion leaves Shape QA alone (directive #34)
+  const side = state.motionQA?.side ?? "both";
   state.motionQA = { inertia: true, inertiaOnly: false, asymmetry: 1, inertiaMultiplier: 1,
-    settleMultiplier: 1, chestImpulseX: 0, chestImpulseY: 0 };
+    settleMultiplier: 1, chestImpulseX: 0, chestImpulseY: 0, side, shapeGain, poseActive: false, poseQ: 0, poseV: 0 };
   const toggle = document.getElementById("bodySway"); if (toggle) toggle.checked = true;
   resetPhysics();
+});
+
+// P2.5 directive #31-33: Chest Shape QA controls -- gain multipliers, static
+// poses, and side isolation. These retune/inspect the basis; they never
+// rebuild the mesh or touch the manifest's own physics_distribution.
+function updateShapeQaBadge() {
+  const badge = document.getElementById("shapeQaBadge");
+  if (!badge) return;
+  const gains = state.motionQA?.shapeGain;
+  const gainActive = gains && Object.values(gains).some((v) => Math.abs(Number(v) - 1) > 1e-6);
+  badge.hidden = !(gainActive || state.motionQA?.poseActive || (state.motionQA?.side ?? "both") !== "both");
+}
+const CHEST_SHAPE_GAIN_SLIDERS = [
+  ["gainVolume", "volume"], ["gainSag", "sag"], ["gainFollow", "follow"],
+  ["gainShearX", "shearX"], ["gainShearY", "shearY"], ["gainCompression", "compression"],
+];
+for (const [id, key] of CHEST_SHAPE_GAIN_SLIDERS) {
+  const slider = document.getElementById(id);
+  if (!slider) continue;
+  slider.addEventListener("input", () => {
+    const value = parseFloat(slider.value);
+    document.getElementById(`${id}v`).textContent = `x${value.toFixed(2)}`;
+    state.motionQA.shapeGain = { volume: 1, sag: 1, follow: 1, shearX: 1, shearY: 1, compression: 1,
+      ...state.motionQA.shapeGain, [key]: value };
+    updateShapeQaBadge();
+  });
+}
+document.getElementById("resetShapeQA").addEventListener("click", () => {
+  state.motionQA.shapeGain = null;
+  state.motionQA.poseActive = false; state.motionQA.poseQ = 0; state.motionQA.poseV = 0;
+  state.motionQA.side = "both";
+  for (const [id] of CHEST_SHAPE_GAIN_SLIDERS) {
+    const slider = document.getElementById(id);
+    if (slider) { slider.value = 1; document.getElementById(`${id}v`).textContent = "x1.00"; }
+  }
+  updateShapeQaBadge();
+});
+document.getElementById("poseQPlus4").addEventListener("click", () => {
+  state.motionQA.poseActive = true; state.motionQA.poseQ = 4; updateShapeQaBadge();
+});
+document.getElementById("poseQMinus4").addEventListener("click", () => {
+  state.motionQA.poseActive = true; state.motionQA.poseQ = -4; updateShapeQaBadge();
+});
+document.getElementById("poseVPlus12").addEventListener("click", () => {
+  state.motionQA.poseActive = true; state.motionQA.poseV = 12; updateShapeQaBadge();
+});
+document.getElementById("poseVMinus12").addEventListener("click", () => {
+  state.motionQA.poseActive = true; state.motionQA.poseV = -12; updateShapeQaBadge();
+});
+document.getElementById("sideBoth").addEventListener("click", () => { state.motionQA.side = "both"; updateShapeQaBadge(); });
+document.getElementById("sideLeft").addEventListener("click", () => { state.motionQA.side = "left"; updateShapeQaBadge(); });
+document.getElementById("sideRight").addEventListener("click", () => { state.motionQA.side = "right"; updateShapeQaBadge(); });
+document.getElementById("showChestBasis").addEventListener("change", () => {
+  if (!document.getElementById("showChestBasis").checked) {
+    const ctx = document.getElementById("regionOverlay")?.getContext?.("2d");
+    if (ctx) ctx.clearRect(0, 0, state.canvasW, state.canvasH);
+  }
 });
 
 document.getElementById("blinkNow").addEventListener("click",
