@@ -1,10 +1,7 @@
-// P2.5 directive #66 (see also #11, #37-38): "simulate: body moves, body
-// reverses, body stops, chest continues" and require the basis-selected
-// upper/center/lower probes (directive #35's new probe set, chosen here by
-// lobe-local v rather than the old lock-weight selection) to show the
-// amplitude hierarchy of #37 (upper weakest, lower strongest) and the
-// lag/follow-through behavior of #11 (velocity becomes a *delayed*
-// lower-contour response, not a uniform addition).
+// P2.5.1: the basis-selected upper/center/lower probes now include the Mass
+// Carrier.  The centre is intentionally a visible relative translation
+// (rather than a zero crossing of the old shape-only fields), while the
+// lower contour still carries the stronger shape/follow response.
 //
 // The q(t)/v(t) trajectory is a closed-form decaying oscillation rather than
 // the real P2.4 spring driver: P2.4's own dynamics are covered by
@@ -29,6 +26,7 @@ globalThis.createImageBitmap = async () => ({});
 
 const Runtime = await import(new URL("runtime.mjs", import.meta.url));
 const { deform, state } = Runtime;
+const { createUpperTorsoSecondaryDriver } = await import(new URL("physics.mjs", import.meta.url));
 const { makeCompiledTopwearFixture, makeChestMotion, attachChestBasis, BASIS_V3_DISTRIBUTION } = await import(
   new URL("qa_compiled_topwear.mjs", import.meta.url));
 
@@ -98,11 +96,16 @@ const noFollow = runProbes(false);
 
 const peak = (values) => Math.max(...values);
 const upperPeak = peak(withFollow.upper), centerPeak = peak(withFollow.center), lowerPeak = peak(withFollow.lower);
-console.log(`upper peak ${upperPeak.toFixed(3)}px, center peak ${centerPeak.toFixed(3)}px, lower peak ${lowerPeak.toFixed(3)}px`);
+console.log(`upper peak ${upperPeak.toFixed(3)}px, center carrier peak ${centerPeak.toFixed(3)}px, lower peak ${lowerPeak.toFixed(3)}px`);
 
-// Directive #37: amplitude hierarchy -- upper weakest, lower strongest.
-if (!(upperPeak < centerPeak)) throw new Error(`upper peak (${upperPeak}) is not weaker than center peak (${centerPeak})`);
-if (!(centerPeak < lowerPeak)) throw new Error(`center peak (${centerPeak}) is not weaker than lower peak (${lowerPeak})`);
+// P2.5.1 Carrier gate: the lobe centre must actually move.  The old
+// shape-only contract expected a zero centre and therefore cannot be used as
+// the acceptance criterion anymore.
+if (!(centerPeak >= 0.75)) throw new Error(`mass carrier is too small at centre (${centerPeak})`);
+// The upper attachment remains weaker than the centre and the lower contour
+// remains nonzero (its shape response is checked independently below).
+if (!(upperPeak < centerPeak)) throw new Error(`upper peak (${upperPeak}) is not weaker than carrier centre (${centerPeak})`);
+if (!(lowerPeak > 0.05)) throw new Error(`lower contour lost its shape response (${lowerPeak})`);
 
 // Directive #11/#38: the Follow term, isolated by zeroing velocity in the
 // control run, must extend the lower mass's follow-through -- the tick where
@@ -125,4 +128,54 @@ if (!(tailWith > tailWithout))
 if (!(withFollow.lower.at(-1) < 0.2))
   throw new Error(`lower probe did not settle: ${withFollow.lower.at(-1).toFixed(3)}px at final tick`);
 
+// The closed-form shape probe above is intentionally retained as a cheap
+// basis-isolation check, but it is not the acceptance gate for inertial
+// motion.  P2.5.1 also runs the real Body Kick Y -> bodyPulse -> fixed
+// derivatives -> torso spring -> basis -> final vertex path below.
+state.manifest = { anchors: {}, physics: { config: { update_hz: 60 },
+  upper_torso_driver: { model: "inertial_relative_v2" } }, motion: { body_sway: { enabled: false } } };
+state.frameOperations = [
+  { id: "body", kind: "body_sway", phase: "primary" },
+  { id: "chest", kind: "local_soft_field", phase: "secondary" },
+];
+state.motionQA = { inertia: true, inertiaOnly: false, asymmetry: 1,
+  inertiaMultiplier: 1, settleMultiplier: 1, chestImpulseX: 0, chestImpulseY: 0 };
+state.physicsDrivers = { torso: createUpperTorsoSecondaryDriver({ model: "inertial_relative_v2",
+  breathGain: 0, poseBiasGain: 0, inertiaCouplingY: 3, dragCouplingY: 0,
+  profile: "springy" }) };
+state.bodySwayEnabled = false;
+Runtime.resetPhysics();
+state.bodyPulse.vy = 48;
+const kickPart = attachChestBasis(Runtime, makeCompiledTopwearFixture(), BASIS_V3_DISTRIBUTION);
+const kickProbes = Runtime.selectChestProbes(kickPart);
+const kickCenter = [], kickLower = [], kickBodyV = [];
+for (let tick = 1; tick <= 240; tick++) {
+  Runtime.advancePhysics(tick * 1000 / 60, { breath: 0, angleY: 0, strandTarget: 0 });
+  const motion = makeChestMotion(state.physicsOutputs.torso,
+    { physicsDistribution: BASIS_V3_DISTRIBUTION });
+  motion.bodySwayPosition = [state.bodyMotion.x, state.bodyMotion.y];
+  Runtime.deform(kickPart, tick * 1000 / 60, motion);
+  const relative = (index) => {
+    const o = index * 2;
+    return Math.hypot(kickPart.mesh.live[o] - kickPart.mesh.rest[o] - state.bodyMotion.x,
+      kickPart.mesh.live[o + 1] - kickPart.mesh.rest[o + 1] - state.bodyMotion.y);
+  };
+  kickCenter.push(relative(kickProbes.leftPrimary));
+  kickLower.push(relative(kickProbes.leftLower));
+  kickBodyV.push(Math.abs(state.bodyMotion.vy));
+}
+const stopped = kickBodyV.findIndex((value, index) => index > 20
+  && kickBodyV.slice(index, index + 8).every((v) => v < 2));
+if (stopped < 0) throw new Error("real Body Kick never reached a stopped-body interval");
+const realStopCenter = kickCenter[stopped];
+const realFollow = Math.max(...kickCenter.slice(stopped, stopped + 20));
+if (realStopCenter < 0.15 || realFollow < 0.15)
+  throw new Error(`real Body Kick lost carrier follow-through (${realStopCenter.toFixed(3)}px)`);
+if (kickCenter.at(-1) > 0.05)
+  throw new Error(`real Body Kick carrier did not settle (${kickCenter.at(-1).toFixed(3)}px)`);
+if (Math.max(...kickLower.slice(stopped, stopped + 20)) < 0.05)
+  throw new Error("real Body Kick lower probe did not follow");
+
+console.log(`real Body Kick carrier passed (body stop ${stopped}, `
+  + `centre@stop ${realStopCenter.toFixed(3)}px, lower follow ${Math.max(...kickLower.slice(stopped, stopped + 20)).toFixed(3)}px)`);
 console.log("chest basis motion shape checks passed");

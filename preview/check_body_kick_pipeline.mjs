@@ -11,7 +11,7 @@ globalThis.createImageBitmap = async () => ({});
 
 const Runtime = await import(new URL("runtime.mjs", import.meta.url));
 const { createUpperTorsoSecondaryDriver } = await import(new URL("physics.mjs", import.meta.url));
-const { makeCompiledTopwearFixture, makeChestMotion } = await import(
+const { makeCompiledTopwearFixture, makeChestMotion, attachChestBasis, BASIS_V3_DISTRIBUTION } = await import(
   new URL("qa_compiled_topwear.mjs", import.meta.url));
 Runtime.state.manifest = { anchors: {}, physics: { config: { update_hz: 60 },
   upper_torso_driver: { model: "inertial_relative_v2" } }, motion: { body_sway: { enabled: false } } };
@@ -27,22 +27,27 @@ Runtime.state.physicsDrivers = { torso: createUpperTorsoSecondaryDriver({ model:
 Runtime.state.bodySwayEnabled = false;
 Runtime.resetPhysics();
 Runtime.state.bodyPulse.vy = 48;
-const part = makeCompiledTopwearFixture();
+const part = attachChestBasis(Runtime, makeCompiledTopwearFixture(), BASIS_V3_DISTRIBUTION);
 const probes = Runtime.selectChestProbes(part);
-if (!probes || probes.leftPrimary == null || probes.lock == null)
+if (!probes || probes.leftPrimary == null || probes.leftLower == null || probes.lock == null)
   throw new Error("compiled topwear probes were not selected");
-const bodyPositions = [], bodyVelocities = [], chestValues = [], lockValues = [];
+const bodyPositions = [], bodyVelocities = [], chestValues = [], lowerValues = [], lockValues = [];
 for (let tick = 1; tick <= 240; tick++) {
   Runtime.advancePhysics(tick * 1000 / 60, { breath: 0, angleY: 0, strandTarget: 0 });
   bodyPositions.push(Runtime.state.bodyMotion.y);
   bodyVelocities.push(Runtime.state.bodyMotion.vy);
-  const motion = makeChestMotion(Runtime.state.physicsOutputs.torso);
+  const motion = makeChestMotion(Runtime.state.physicsOutputs.torso,
+    { physicsDistribution: BASIS_V3_DISTRIBUTION });
   motion.bodySwayPosition = [Runtime.state.bodyMotion.x, Runtime.state.bodyMotion.y];
   Runtime.deform(part, tick * 1000 / 60, motion);
   const chestOffset = probes.leftPrimary * 2;
   const chestDx = part.mesh.live[chestOffset] - part.mesh.rest[chestOffset] - Runtime.state.bodyMotion.x;
   const chestDy = part.mesh.live[chestOffset + 1] - part.mesh.rest[chestOffset + 1] - Runtime.state.bodyMotion.y;
   chestValues.push(Math.hypot(chestDx, chestDy));
+  const lowerOffset = probes.leftLower * 2;
+  const lowerDx = part.mesh.live[lowerOffset] - part.mesh.rest[lowerOffset] - Runtime.state.bodyMotion.x;
+  const lowerDy = part.mesh.live[lowerOffset + 1] - part.mesh.rest[lowerOffset + 1] - Runtime.state.bodyMotion.y;
+  lowerValues.push(Math.hypot(lowerDx, lowerDy));
   const lockOffset = probes.lock * 2;
   const lockDx = part.mesh.live[lockOffset] - part.mesh.rest[lockOffset] - Runtime.state.bodyMotion.x;
   const lockDy = part.mesh.live[lockOffset + 1] - part.mesh.rest[lockOffset + 1] - Runtime.state.bodyMotion.y;
@@ -64,7 +69,11 @@ if (!(chestValues[bodyStop] >= 0.15))
 const followThroughPeak = Math.max(...chestValues.slice(bodyStop, bodyStop + 20));
 if (followThroughPeak < 0.15)
   throw new Error("chest did not retain follow-through after body motion stopped");
+const lowerFollowThroughPeak = Math.max(...lowerValues.slice(bodyStop, bodyStop + 20));
+if (lowerFollowThroughPeak < 0.05)
+  throw new Error("lower chest probe did not retain a real post-stop response");
 if (chestValues.at(-1) > 0.05)
   throw new Error("body kick chest response did not settle");
 if (Math.max(...lockValues) > 0.05) throw new Error("chest lock moved during body kick");
-console.log(`body kick pipeline passed (body start ${bodyStart}, body stop ${bodyStop}, chest peak ${chestPeak.index})`);
+console.log(`body kick pipeline passed (body start ${bodyStart}, body stop ${bodyStop}, `
+  + `chest peak ${chestPeak.index}, lower follow ${lowerFollowThroughPeak.toFixed(3)}px)`);

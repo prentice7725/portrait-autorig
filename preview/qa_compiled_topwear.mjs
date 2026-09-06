@@ -49,7 +49,7 @@ export function makeCompiledTopwearFixture() {
 // default distribution for every v3 QA fixture/test unless a caller
 // overrides specific gains.
 export const BASIS_V3_DISTRIBUTION = {
-  version: 3, volume_gain: 0.55, sag_gain: 0.85, follow_gain_s: 0.035,
+  version: 3, carrier_gain: 1.0, volume_gain: 0.55, sag_gain: 0.85, follow_gain_s: 0.035,
   shear_gain_x_s: 0.018, shear_gain_y_s: 0.012, compression_gain: 0.20,
   upper_anchor_start: -0.75, upper_anchor_end: -0.15,
   lower_start: 0.0, lower_power: 1.7, tangent_ratio: 0.15,

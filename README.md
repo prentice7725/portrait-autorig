@@ -240,8 +240,8 @@ GUI workflow와 direct Assembly compiler가 자동으로 `physics.upper_torso_dr
 checkbox나 seethrough import는 필요하지 않습니다. Composer region이 없거나
 명시적으로 disabled이면 physics opt-in도 생성하지 않습니다.
 
-Preview는 `AutoRig Preview P2.3`와 physics model을 Run 패널에 표시하며, physics
-block이 없는 구형 Rig Bundle은 `P2.3 PHYSICS NOT ACTIVE` 경고를 냅니다. GUI가
+Preview는 `AutoRig Preview P2.5.1`와 physics model을 Run 패널에 표시하며, physics
+block이 없는 구형 Rig Bundle은 `P2.5.1 PHYSICS NOT ACTIVE` 경고를 냅니다. GUI가
 여는 preview server는 no-cache headers를 사용해 현재 checkout의
 `preview/index.html`/`runtime.mjs`/`physics.mjs` 조합을 실행합니다.
 
@@ -310,6 +310,16 @@ lobe 위치만 canvas-normalized 기준을 쓰고 lock 영역까지 canvas 기�
 아무리 키워도 화면에서 거의 안 움직이는 것처럼 보이는 근본 원인이었습니다
 (`node preview/check_lock_zone_basis.mjs`로 회귀 확인).
 
+P2.5.1에서는 v3 chest basis에 `carrier_gain`/Carrier field를 함께 기록합니다.
+Carrier는 lobe 중심에서 거의 1이 되고 상단 attachment와 외곽에서 부드럽게
+감쇠하는 **lobe-local mass translation**입니다. 따라서 q가 가슴 질량 중심을
+실제로 따라 움직이게 하면서도 topwear 전체나 root를 균일하게 이동시키지
+않습니다. Volume/Sag/Follow/Shear/Compression은 모양 변화로 그대로 분리되고,
+`Body Kick Y → bodyPulse → fixed derivative → torso spring → Carrier → final
+vertex` 경로는 `preview/check_body_kick_pipeline.mjs`와
+`preview/check_chest_basis_motion_shape.mjs`에서 실제 mesh probe로 검증합니다.
+Shape QA에는 Carrier gain과 Carrier basis overlay도 포함되어 있습니다.
+
 주요 회귀 검증은 다음 명령으로 재현할 수 있습니다.
 
 ```powershell
@@ -324,6 +334,10 @@ node preview/check_body_kick_pipeline.mjs
 node preview/check_motion_framerate_parity.mjs
 node preview/check_chest_geometry_parity.mjs
 node preview/check_lock_zone_basis.mjs
+node preview/check_chest_basis_fields.mjs
+node preview/check_chest_basis_motion_shape.mjs
+node preview/check_chest_basis_reference_parity.mjs
+node preview/check_body_kick_pipeline.mjs
 ```
 
 테스트 의존성에는 원본 Composer schema를 직접 검증하기 위한 `jsonschema`가 포함되어

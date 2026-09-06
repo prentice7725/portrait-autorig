@@ -18,6 +18,7 @@ function physicalDistribution(spec) {
   if (version >= 3) {
     return {
       version: 3,
+      carrierGain: Number(raw.carrier_gain ?? 1.0),
       volumeGain: Number(raw.volume_gain ?? 0.55),
       sagGain: Number(raw.sag_gain ?? 0.85),
       followGainS: Number(raw.follow_gain_s ?? 0.035),
@@ -71,6 +72,8 @@ function chestBasisFieldsAt(lobe, x, y, distribution) {
   const tx = -v / Math.max(r, eps);
   const ty = u / Math.max(r, eps);
   return {
+    carrierX: 0,
+    carrierY: core * upperRelease,
     volumeX: u * core * upperRelease,
     volumeY: v * core * upperRelease * 0.30,
     sagX: u * lower * core * 0.10,
@@ -90,6 +93,8 @@ function chestBasisFieldsAt(lobe, x, y, distribution) {
  *  with the same Follow/Shear magnitude clamp as runtime.mjs's
  *  `applyChestBasis` (independently written, see `chestBasisFieldsAt`). */
 function applyChestBasisFields(fields, q, springV, bodyVx, bodyVy, distribution) {
+  const carrierX = q * fields.carrierX * distribution.carrierGain;
+  const carrierY = q * fields.carrierY * distribution.carrierGain;
   const volumeX = q * fields.volumeX * distribution.volumeGain;
   const volumeY = q * fields.volumeY * distribution.volumeGain;
   const sagX = q * fields.sagX * distribution.sagGain;
@@ -117,8 +122,8 @@ function applyChestBasisFields(fields, q, springV, bodyVx, bodyVy, distribution)
   const compressionY = q * fields.compressionY * distribution.compressionGain;
 
   return [
-    volumeX + sagX + followX + shearX + compressionX,
-    volumeY + sagY + followY + shearY + compressionY,
+    carrierX + volumeX + sagX + followX + shearX + compressionX,
+    carrierY + volumeY + sagY + followY + shearY + compressionY,
   ];
 }
 
