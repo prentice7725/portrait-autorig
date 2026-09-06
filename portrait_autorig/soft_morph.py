@@ -522,6 +522,12 @@ def authored_upper_torso_soft_morph_spec(region: dict[str, Any],
         "response_profile": response_profile,
         "response_config": dict(RESPONSE_PROFILE_CONFIG[response_profile]),
     }
+    # Preserve Composer's authored instance identity through the semantic
+    # soft-morph bridge.  The compiler may also add the resolved
+    # `source_instance_id` on the flattened part, but keeping this value
+    # makes the P3 deformer binding explicit when tags are duplicated.
+    if region.get("target"):
+        spec["target_instance"] = region["target"]
     reasons = list(verdict.get("reasons") or [])
     if not author_enabled:
         reasons = ["author_disabled"] + reasons

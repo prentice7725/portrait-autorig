@@ -22,6 +22,7 @@ __all__ = [
     "PARAM_EYEBALL_X", "PARAM_EYEBALL_Y",
     "PARAM_MOUTH_OPEN", "PARAM_MOUTH_FORM", "PARAM_BREATH",
     "PARAM_UPPER_TORSO_SECONDARY", "PARAM_HAIR_FRONT", "PARAM_HAIR_SIDE", "PARAM_HAIR_BACK",
+    "PARAM_BUST_X", "PARAM_BUST_Y",
     "STANDARD_PARAMETERS", "parameter_descriptor", "standard_parameter_registry",
 ]
 
@@ -43,6 +44,8 @@ PARAM_BREATH = "ParamBreath"
 # (manifest.upper_torso_secondary_entries). hair_front/side/back are named
 # here for the vocabulary; nothing produces them yet (P1/P2 strand work).
 PARAM_UPPER_TORSO_SECONDARY = "ParamUpperTorsoSecondary"
+PARAM_BUST_X = "ParamBustX"
+PARAM_BUST_Y = "ParamBustY"
 PARAM_HAIR_FRONT = "ParamHairFront"
 PARAM_HAIR_SIDE = "ParamHairSide"
 PARAM_HAIR_BACK = "ParamHairBack"

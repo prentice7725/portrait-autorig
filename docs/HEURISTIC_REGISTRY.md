@@ -54,6 +54,10 @@ must not silently become defaults.
 | lower power | EXPERIMENTAL | `lower_power` default 1.7 shapes how sharply the lower mask ramps in from `lower_start` | `check_chest_basis_motion_shape.mjs` |
 | tangent ratio | EXPERIMENTAL | `tangent_ratio` default 0.15 controls how curved (vs. straight) the Follow term's arc reads | `check_chest_basis_fields.mjs` |
 | chest basis safety clamp | ACTIVE | Follow/Shear contributions are magnitude-clamped per lobe per vertex to `max_follow_px`/`max_shear_px` before summing -- a deterministic bound in place of a general per-triangle inversion solver (the JS runtime carries no triangle/index buffer per part); `check_chest_basis_triangle_safety.mjs` regresses the compiled-fixture topology specifically, not arbitrary topology | `check_chest_basis_triangle_safety.mjs`, `state.chestBasisDiag` |
+| P3 continuous chest cage | ACTIVE | Authored Assembly torso regions generate one 6×4 control-point cage; lobe hints fit its bounds but do not define independent deformation islands | `portrait_autorig/chest_deformer.py`, `check_chest_p3_keyforms.mjs` |
+| P3 bilinear binding | ACTIVE | Each target vertex stores a cage cell, local uv, and influence; runtime blends four cage points with no solver | `check_chest_p3_keyforms.mjs` |
+| P3 automatic keyforms | EXPERIMENTAL | Compile-time `BustX/BustY` +/- keyforms provide shape; physics only supplies normalized parameters. Profile ranges start at 6px and require A002 corpus tuning | `check_chest_p3_keyforms.mjs`, `check_chest_p3_real_kick.mjs` |
+| P3 migration selection | ACTIVE | P3 manifest block wins over P2.5 on its target; absent P3 keeps the P2.x runtime path and does not migrate old manifests at load | `check_chest_p3_keyforms.mjs`, legacy P2 regressions |
 
 ## Status vocabulary
 

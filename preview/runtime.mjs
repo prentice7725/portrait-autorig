@@ -210,6 +210,7 @@ export const PHASE_DEFORMER_HANDLERS = {
     }
   },
   local_soft_field(deformer, context) { registerDeformerOperation(deformer, context); },
+  chest_parametric_deformer(deformer, context) { registerDeformerOperation(deformer, context); },
   strand_spring(deformer, context) { registerDeformerOperation(deformer, context); },
   upper_torso_physics(deformer, context) { registerDeformerOperation(deformer, context); },
   sprite_swap(deformer, context) {
@@ -310,7 +311,8 @@ export const state = {
               activeVertices: 0, totalVertices: 0, backlogDropped: 0, lastAt: -Infinity },
   motionQA: { inertia: true, inertiaOnly: false, asymmetry: 1, inertiaMultiplier: 1,
               settleMultiplier: 1, chestImpulseX: 0, chestImpulseY: 0,
-              side: "both", shapeGain: null, poseActive: false, poseQ: 0, poseV: 0 },
+              side: "both", shapeGain: null, poseActive: false, poseQ: 0, poseV: 0,
+              p3Pose: null },
   // P2.5 directive #44: safety-clamp/diagnostic counters for the basis path.
   chestBasisDiag: { clamped: 0 },
   chestTrajectoryGraph: [],
@@ -326,6 +328,7 @@ export const state = {
   eyeOpening: { l: null, r: null },
   phaseTrace: [],
   phaseDispatch: {},
+  p3Parameters: { x: 0, y: 0 },
   frameOperations: null,
   t0: performance.now(),
 };
@@ -1254,6 +1257,9 @@ export function motionFromDeformers(manifest) {
   const gaze = (byKind.gaze || [])[0];
   if (gaze) motion.gaze = gaze.config || {};
 
+  const p3 = (byKind.chest_parametric_deformer || [])[0];
+  if (p3) motion.upper_torso_parametric_deformer = p3.config || {};
+
   return motion;
 }
 
@@ -1274,6 +1280,7 @@ export function build(manifest, images) {
   state.motionGraph = [];
   state.chestTrajectoryGraph = [];
   state.chestBasisDiag = { clamped: 0 };
+  state.p3Parameters = { x: 0, y: 0 };
   state.calibrationRequested = 0;
   const physicsSpec = manifest.physics || null;
   if (physicsSpec) {
@@ -1379,6 +1386,7 @@ export function build(manifest, images) {
 
   const softSpec = (manifest.motion || {}).upper_torso_soft_morph;
   const hasSoftRegion = !!(softSpec && softSpec.left && softSpec.right);
+  const p3Spec = (manifest.motion || {}).upper_torso_parametric_deformer;
   const chestOccluders = hasSoftRegion ? gatherChestOccluders(manifest, images) : [];
 
   state.parts = manifest.parts.concat(expressionSpecs)
@@ -1441,6 +1449,15 @@ export function build(manifest, images) {
       // Phase 1 scope (design doc 5): only `topwear` deforms.
       softMorph: (hasSoftRegion && isSoftMorphTag(part.tag))
         ? buildSoftMorphWeights(part, mesh, softSpec, chestOccluders) : null,
+      chestParametric: (p3Spec?.enabled !== false && p3Spec
+                        && isSoftMorphTag(part.tag)
+                        && (p3Spec.target_instance == null
+                            || p3Spec.target_instance === part.name
+                            || p3Spec.target_instance === part.source_instance_id
+                            || p3Spec.target_part === part.name)
+                        && (p3Spec.target_tag == null || p3Spec.target_tag === part.tag))
+        ? p3Spec : null,
+      p3Occluders: (p3Spec && isSoftMorphTag(part.tag)) ? chestOccluders : [],
     };
   });
 
@@ -1680,6 +1697,14 @@ export function renderPanel() {
     physicsWarning.textContent = active ? ""
       : "⚠ P2.5.1 PHYSICS NOT ACTIVE — This Rig Bundle was built without "
         + "physics.upper_torso_driver. Rebuild the Rig Bundle.";
+  }
+  const p3Meta = document.getElementById("p3Meta");
+  const p3 = m.motion?.upper_torso_parametric_deformer;
+  if (p3Meta) {
+    p3Meta.textContent = p3?.enabled !== false && p3
+      ? `P3 deformer: cage ${p3.cage?.cols || "?"}×${p3.cage?.rows || "?"} · `
+        + `profile ${p3.profile || "?"} · binding ${p3.binding?.mode || "?"}`
+      : "P3 deformer: unavailable (using P2 compatibility path)";
   }
 
   const pack = state.parts.filter((p) => p.expression);
@@ -2084,6 +2109,134 @@ function strandSpringDelta(part, vertexIndex, motion) {
   return delta;
 }
 
+/** P3-A overlays: the actual continuous cage and final binding influence,
+ *  rather than the old lobe-only diagnostic. */
+function drawChestParametricOverlay(part) {
+  const canvas = document.getElementById("regionOverlay");
+  const showCage = !!document.getElementById("showP3Cage")?.checked;
+  const showHeatmap = !!document.getElementById("showP3Heatmap")?.checked;
+  const showInfluenced = !!document.getElementById("showP3Influenced")?.checked;
+  const showLocks = !!document.getElementById("showP3Locks")?.checked;
+  const showOccluders = !!document.getElementById("showP3Occluders")?.checked;
+  if ((!showCage && !showHeatmap && !showInfluenced && !showLocks && !showOccluders)
+      || !canvas?.getContext || !part?.chestParametric) return;
+  const ctx = canvas.getContext("2d");
+  const spec = part.chestParametric;
+  const cage = spec.cage || {}, points = cage.rest_points || [];
+  const cols = Number(cage.cols || 6), rows = Number(cage.rows || 4);
+  if (showCage) {
+    ctx.strokeStyle = "rgba(99, 220, 255, 0.9)"; ctx.lineWidth = 1.5;
+    const at = (r, c) => points[r * cols + c];
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+      const p = at(r, c); if (!p) continue;
+      if (c + 1 < cols) { const q = at(r, c + 1); ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]); ctx.stroke(); }
+      if (r + 1 < rows) { const q = at(r + 1, c); ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]); ctx.stroke(); }
+      ctx.fillStyle = "rgba(99, 220, 255, 0.95)"; ctx.beginPath(); ctx.arc(p[0], p[1], 3, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  if (showHeatmap) {
+    const rest = part.mesh.rest, values = spec.binding?.vertex_influence || [];
+    const step = Math.max(1, Math.floor(rest.length / 2 / 500));
+    for (let i = 0; i < rest.length / 2; i += step) {
+      const value = Math.max(0, Math.min(1, Number(values[i] || 0)));
+      const color = `rgba(${Math.round(255 * (1 - value))},${Math.round(120 + 100 * value)},${Math.round(255 * value)},0.75)`;
+      ctx.fillStyle = color; ctx.beginPath(); ctx.arc(rest[i * 2], rest[i * 2 + 1], 2, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  if (showInfluenced) {
+    const rest = part.mesh.rest, values = spec.binding?.vertex_influence || [];
+    ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
+    for (let i = 0; i < rest.length / 2; i++) {
+      if (Number(values[i] || 0) <= 0) continue;
+      ctx.beginPath(); ctx.arc(rest[i * 2], rest[i * 2 + 1], 1.5, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  if (showLocks) {
+    const locked = spec.binding?.locked_vertices || [];
+    const rest = part.mesh.rest;
+    ctx.fillStyle = "rgba(255, 90, 90, 0.95)";
+    for (let i = 0; i < rest.length / 2; i++) {
+      if (!locked[i]) continue;
+      ctx.beginPath(); ctx.arc(rest[i * 2], rest[i * 2 + 1], 3, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.strokeStyle = "rgba(255, 218, 94, 0.9)"; ctx.lineWidth = 2;
+    for (let c = 0; c < cols - 1; c++) {
+      const a = points[c], b = points[c + 1];
+      if (!a || !b) continue;
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    }
+  }
+  if (showOccluders) {
+    ctx.strokeStyle = "rgba(255, 130, 40, 0.9)"; ctx.lineWidth = 2;
+    for (const occluder of part.p3Occluders || []) {
+      const [x1, y1, x2, y2] = occluder.xyxy || [];
+      if (![x1, y1, x2, y2].every(Number.isFinite)) continue;
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    }
+  }
+}
+
+function chestParametricValues(motion, spec) {
+  const names = spec.parameters || { x: "ParamBustX", y: "ParamBustY" };
+  const direct = state.motionQA?.p3Pose;
+  if (direct) return {
+    x: Math.max(-1, Math.min(1, Number(direct.x || 0))),
+    y: Math.max(-1, Math.min(1, Number(direct.y || 0))),
+  };
+  const explicitX = Number(state.parameters[names.x] || 0);
+  const explicitY = Number(state.parameters[names.y] || 0);
+  if (Math.abs(explicitX) > 1e-9 || Math.abs(explicitY) > 1e-9)
+    return { x: Math.max(-1, Math.min(1, explicitX)), y: Math.max(-1, Math.min(1, explicitY)) };
+  const torso = motion.physics?.torso;
+  const left = Number(torso?.left?.value ?? torso?.value ?? 0);
+  const right = Number(torso?.right?.value ?? torso?.value ?? 0);
+  const driver = state.manifest.physics?.upper_torso_driver || {};
+  // P3 deliberately excludes the breathing equilibrium.  Breathing remains
+  // on ParamBreath/global field; only the relative physical state becomes a
+  // normalized Bust parameter.
+  const equilibrium = Number(motion.breath || 0) * Number(driver.breath_displacement_px ?? 0.8)
+    + Number(motion.turnY || 0) * Number(driver.pose_bias_px ?? 0.15);
+  const rangeX = Math.max(1e-6, Number(spec.ranges_px?.x ?? 6));
+  const rangeY = Math.max(1e-6, Number(spec.ranges_px?.y ?? 6));
+  return { x: 0, y: Math.max(-1, Math.min(1, ((left + right) * 0.5 - equilibrium) / rangeY)) };
+}
+
+function chestParametricDelta(part, vertexIndex, motion, operation) {
+  const spec = part.chestParametric || operation.config;
+  if (!spec?.enabled || spec.version !== 1) return [0, 0];
+  const binding = spec.binding || {};
+  const cells = binding.vertex_cells?.[vertexIndex];
+  const uv = binding.vertex_uv?.[vertexIndex];
+  const influence = Number(binding.vertex_influence?.[vertexIndex] ?? 0);
+  if (!cells || !uv || influence <= 0) return [0, 0];
+  const cols = Number(spec.cage?.cols || 6), rows = Number(spec.cage?.rows || 4);
+  const cx = Math.max(0, Math.min(cols - 2, Number(cells[0]) || 0));
+  const cy = Math.max(0, Math.min(rows - 2, Number(cells[1]) || 0));
+  const u = Math.max(0, Math.min(1, Number(uv[0]) || 0));
+  const v = Math.max(0, Math.min(1, Number(uv[1]) || 0));
+  const params = chestParametricValues(motion, spec);
+  const keyforms = spec.keyforms || {};
+  const zero = [0, 0];
+  const blend = (name) => keyforms[name] || [];
+  const addPose = (out, name, amount) => {
+    const pose = blend(name);
+    const index = (row, col) => row * cols + col;
+    const p00 = pose[index(cy, cx)] || zero, p10 = pose[index(cy, cx + 1)] || zero;
+    const p01 = pose[index(cy + 1, cx)] || zero, p11 = pose[index(cy + 1, cx + 1)] || zero;
+    const a = (1 - u) * (1 - v), b = u * (1 - v), c = (1 - u) * v, d = u * v;
+    out[0] += amount * (a * Number(p00[0] || 0) + b * Number(p10[0] || 0)
+      + c * Number(p01[0] || 0) + d * Number(p11[0] || 0));
+    out[1] += amount * (a * Number(p00[1] || 0) + b * Number(p10[1] || 0)
+      + c * Number(p01[1] || 0) + d * Number(p11[1] || 0));
+  };
+  const out = [0, 0];
+  if (params.x < 0) addPose(out, "bust_x_neg", -params.x);
+  else addPose(out, "bust_x_pos", params.x);
+  if (params.y < 0) addPose(out, "bust_y_neg", -params.y);
+  else addPose(out, "bust_y_pos", params.y);
+  return [out[0] * influence, out[1] * influence];
+}
+
 function geometryOperations(part) {
   // Legacy manifests have no operation list.  Their canonical order is kept
   // as a compatibility adapter; declarative v0.2 manifests use the exact list
@@ -2197,8 +2350,26 @@ export function deform(part, now, motion) {
           }
           break;
         }
+        case "chest_parametric_deformer": {
+          flushDelta();
+          const targetMatches = (operation.config?.target_instance == null
+              || operation.config.target_instance === part.spec.name
+              || operation.config.target_instance === part.spec.source_instance_id
+              || operation.config.target_part === part.spec.name)
+            && (operation.config?.target_tag == null
+              || operation.config.target_tag === part.spec.tag);
+          if (targetMatches && isSoftMorphTag(part.spec.tag)) {
+            const delta = chestParametricDelta(part, i, motion, operation);
+            x += delta[0]; y += delta[1];
+          }
+          break;
+        }
         case "local_soft_field": {
           flushDelta();
+          // P3 owns the target when present.  Keep the legacy declaration in
+          // the manifest for compatibility, but never double-deform a P3
+          // surface with the P2.5 procedural basis.
+          if (part.chestParametric) break;
           if (part.softMorph && motion.softMorph.enabled) {
             const sm = motion.softMorph;
             // P2.5 directive #13/#57: Follow and Shear can be the only
@@ -2452,7 +2623,8 @@ function motionGeometryKey(motion) {
     softMorph: motion.softMorph, physics: {
       torso: [torso.value ?? 0, torso.left?.value ?? null, torso.right?.value ?? null],
       strand,
-    }, bodySwayPosition: motion.bodySwayPosition, overrides: motion.overrides,
+    }, bodySwayPosition: motion.bodySwayPosition, p3Pose: state.motionQA?.p3Pose,
+    p3Parameters: state.p3Parameters, overrides: motion.overrides,
   });
 }
 
@@ -2578,6 +2750,15 @@ export function frame(now) {
   // render-time sway sample so opening a physics-enabled run does not snap.
   if (state.physicsDrivers && state.physicsLastNow != null)
     motion.bodySwayPosition = [state.bodyMotion.x, state.bodyMotion.y];
+  const p3Spec = state.manifest.motion?.upper_torso_parametric_deformer;
+  if (p3Spec?.enabled !== false && p3Spec) {
+    state.p3Parameters = chestParametricValues(motion, p3Spec);
+    const p3Meta = document.getElementById("p3Meta");
+    if (p3Meta && !state.motionQA?.p3Pose) {
+      p3Meta.textContent = `P3 deformer: ParamBustX ${state.p3Parameters.x.toFixed(3)} · `
+        + `ParamBustY ${state.p3Parameters.y.toFixed(3)} · qY px ${Number(motion.physics?.torso?.value ?? 0).toFixed(3)}`;
+    }
+  }
   // P2.5 directive #13: the chest basis's Shear term reads body velocity as a
   // small shape modifier, never a second root translation (#60) -- the same
   // `state.bodyMotion.vx/vy` the primary body-sway deformer already tracks.
@@ -2693,6 +2874,7 @@ export function frame(now) {
   drawChestTrajectory();
   drawSoftRegionOverlay();
   drawChestBasisOverlay(chestTopwear);
+  drawChestParametricOverlay(chestTopwear);
   requestAnimationFrame(frame);
 }
 
@@ -2827,7 +3009,8 @@ document.getElementById("resetMotion").addEventListener("click", () => {
   const shapeGain = state.motionQA?.shapeGain ?? null; // Reset Motion leaves Shape QA alone (directive #34)
   const side = state.motionQA?.side ?? "both";
   state.motionQA = { inertia: true, inertiaOnly: false, asymmetry: 1, inertiaMultiplier: 1,
-    settleMultiplier: 1, chestImpulseX: 0, chestImpulseY: 0, side, shapeGain, poseActive: false, poseQ: 0, poseV: 0 };
+    settleMultiplier: 1, chestImpulseX: 0, chestImpulseY: 0, side, shapeGain, poseActive: false, poseQ: 0, poseV: 0,
+    p3Pose: null };
   const toggle = document.getElementById("bodySway"); if (toggle) toggle.checked = true;
   resetPhysics();
 });
@@ -2859,6 +3042,7 @@ for (const [id, key] of CHEST_SHAPE_GAIN_SLIDERS) {
 }
 document.getElementById("resetShapeQA").addEventListener("click", () => {
   state.motionQA.shapeGain = null;
+  state.motionQA.p3Pose = null;
   state.motionQA.poseActive = false; state.motionQA.poseQ = 0; state.motionQA.poseV = 0;
   state.motionQA.side = "both";
   for (const [id] of CHEST_SHAPE_GAIN_SLIDERS) {
@@ -2882,6 +3066,22 @@ document.getElementById("poseVMinus12").addEventListener("click", () => {
 document.getElementById("sideBoth").addEventListener("click", () => { state.motionQA.side = "both"; updateShapeQaBadge(); });
 document.getElementById("sideLeft").addEventListener("click", () => { state.motionQA.side = "left"; updateShapeQaBadge(); });
 document.getElementById("sideRight").addEventListener("click", () => { state.motionQA.side = "right"; updateShapeQaBadge(); });
+const setP3Pose = (x, y) => { state.motionQA.p3Pose = { x, y }; };
+document.getElementById("bustYMinus").addEventListener("click", () => setP3Pose(0, -1));
+document.getElementById("bustNeutral").addEventListener("click", () => setP3Pose(0, 0));
+document.getElementById("bustYPlus").addEventListener("click", () => setP3Pose(0, 1));
+document.getElementById("bustXMinus").addEventListener("click", () => setP3Pose(-1, 0));
+document.getElementById("bustXPlus").addEventListener("click", () => setP3Pose(1, 0));
+for (const id of ["showP3Cage", "showP3Heatmap", "showP3Influenced", "showP3Locks", "showP3Occluders"]) {
+  document.getElementById(id).addEventListener("change", () => {
+    const cage = document.getElementById("showP3Cage")?.checked;
+    const heat = document.getElementById("showP3Heatmap")?.checked;
+    if (!cage && !heat && !document.getElementById("showChestBasis")?.checked) {
+      const ctx = document.getElementById("regionOverlay")?.getContext?.("2d");
+      if (ctx) ctx.clearRect(0, 0, state.canvasW, state.canvasH);
+    }
+  });
+}
 document.getElementById("showChestBasis").addEventListener("change", () => {
   if (!document.getElementById("showChestBasis").checked) {
     const ctx = document.getElementById("regionOverlay")?.getContext?.("2d");

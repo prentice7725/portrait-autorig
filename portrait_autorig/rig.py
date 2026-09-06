@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image
 
 from . import soft_morph
+from .chest_deformer import build_chest_parametric_deformer, validate_chest_parametric_deformer
 from .capability import capability_report
 from .image import composite_layers, crop_to_alpha, rest_fidelity
 from .manifest import (
@@ -37,7 +38,7 @@ __all__ = [
     "depth_table",
     "split_remainder", "split_eyes", "derive_missing_eyewhite",
     "rig_preflight", "detect_anchors", "detect_variant_eye_metadata",
-    "render_rig_rest", "build_rig",
+    "render_rig_rest", "build_rig", "build_chest_parametric_deformer",
     "write_rig_project",
 ]
 
@@ -1532,6 +1533,26 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
                 topwear_part["mesh"]["refinement"] = {"region": region, "cell": 18}
                 topwear_part["mesh"]["topology_hash"] = mesh_topology_hash(
                     topwear_part["mesh"], tuple(int(v) for v in topwear_part["xyxy"]))
+
+    # P3-A: Composer-authored torso regions get one continuous cage and
+    # compile-time keyforms.  The legacy Portrait Bundle auto-derived path is
+    # intentionally left on P2.x so rebuilding an old bundle does not silently
+    # change its shape contract.
+    p3_spec = manifest["motion"].get("upper_torso_parametric_deformer")
+    if p3_spec is None and soft_spec.get("enabled") and soft_spec.get("source") == "assembly_rig_intent":
+        topwear_part = next((part for part in parts if part.get("tag") in soft_morph.SOFT_MORPH_TAGS), None)
+        if topwear_part is not None:
+            p3_spec = build_chest_parametric_deformer(
+                topwear_part, soft_spec, frame_size=(canvas_h, canvas_w),
+                occluder_alpha=chest_occluder_alpha(working),
+                alpha_threshold=alpha_threshold,
+                profile=str(soft_spec.get("response_profile", "soft")),
+            )
+            manifest["motion"]["upper_torso_parametric_deformer"] = p3_spec
+    if p3_spec is not None:
+        errors = validate_chest_parametric_deformer(p3_spec)
+        if errors:
+            raise ValueError("invalid chest parametric deformer: " + "; ".join(errors))
     if derived_report and derived_report.get("succeeded"):
         manifest["derived_semantics"] = {
             "eyewhite": json.loads(json.dumps(derived_report))
@@ -1551,7 +1572,12 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     # *compiled* rig can actually do, separate from whether the compile
     # itself succeeded (QA) -- derived from the final parts and preflight,
     # never re-run against the input.
-    manifest["capabilities"] = capability_report(parts, preflight, variant_report["status"])
+    manifest["capabilities"] = capability_report(
+        parts, preflight, variant_report["status"],
+        "ready" if isinstance(manifest["motion"].get("upper_torso_parametric_deformer"), dict)
+        and manifest["motion"]["upper_torso_parametric_deformer"].get("enabled", True)
+        else None,
+    )
     # Every v0.1 field constructed above (parts/anchors/motion/rest_fidelity/
     # rig_preflight/derived_semantics/...) is preserved verbatim; this only
     # adds parameters[]/deformers[]/drivers[] and bumps `version` to "0.2".

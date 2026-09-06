@@ -15,7 +15,7 @@ from typing import Any
 from .parameters import (
     PARAM_ANGLE_X, PARAM_ANGLE_Y, PARAM_ANGLE_Z,
     PARAM_BREATH, PARAM_EYE_L_OPEN, PARAM_EYE_R_OPEN, PARAM_EYEBALL_X, PARAM_EYEBALL_Y,
-    PARAM_UPPER_TORSO_SECONDARY,
+    PARAM_UPPER_TORSO_SECONDARY, PARAM_BUST_X, PARAM_BUST_Y,
     parameter_descriptor, standard_parameter_registry,
 )
 
@@ -23,7 +23,7 @@ __all__ = [
     "RIG_MANIFEST_VERSION_01", "RIG_MANIFEST_VERSION_02", "RIG_MANIFEST_VERSION",
     "DEFORMER_PARALLAX_TURN", "DEFORMER_SHELL_TURN", "DEFORMER_WEIGHTED_ROTATION",
     "DEFORMER_CONTINUOUS_FIELD", "DEFORMER_EYE_FOLD", "DEFORMER_GAZE",
-    "DEFORMER_SPRITE_SWAP", "DEFORMER_VISIBILITY_CURVE", "DEFORMER_LOCAL_SOFT_FIELD", "DEFORMER_KINDS",
+    "DEFORMER_SPRITE_SWAP", "DEFORMER_VISIBILITY_CURVE", "DEFORMER_LOCAL_SOFT_FIELD", "DEFORMER_CHEST_PARAMETRIC", "DEFORMER_KINDS",
     "DEFORMER_STRAND_SPRING", "DEFORMER_UPPER_TORSO_PHYSICS", "physics_deformer_entries",
     "DRIVER_UPPER_TORSO_SECONDARY",
     "PHASE_BASE", "PHASE_PRIMARY", "PHASE_CORRECTIVE", "PHASE_SECONDARY",
@@ -57,12 +57,13 @@ DEFORMER_VISIBILITY_CURVE = "visibility_curve"
 DEFORMER_LOCAL_SOFT_FIELD = "local_soft_field"
 DEFORMER_STRAND_SPRING = "strand_spring"
 DEFORMER_UPPER_TORSO_PHYSICS = "upper_torso_physics"
+DEFORMER_CHEST_PARAMETRIC = "chest_parametric_deformer"
 DEFORMER_KINDS = frozenset({
     DEFORMER_PARALLAX_TURN, DEFORMER_SHELL_TURN, DEFORMER_WEIGHTED_ROTATION,
     DEFORMER_CONTINUOUS_FIELD, DEFORMER_BODY_SWAY, DEFORMER_EYE_FOLD, DEFORMER_GAZE, DEFORMER_SPRITE_SWAP,
     DEFORMER_VISIBILITY_CURVE,
     DEFORMER_LOCAL_SOFT_FIELD,
-    DEFORMER_STRAND_SPRING, DEFORMER_UPPER_TORSO_PHYSICS,
+    DEFORMER_STRAND_SPRING, DEFORMER_UPPER_TORSO_PHYSICS, DEFORMER_CHEST_PARAMETRIC,
 })
 
 # UpperTorsoSecondaryDriver (directive v0.2 #18-19): a driver *kind* name,
@@ -196,6 +197,22 @@ def deformers_from_motion(motion: dict[str, Any]) -> list[dict[str, Any]]:
             item["kind"] = DEFORMER_VISIBILITY_CURVE
             deformers.append(item)
 
+    p3 = motion.get("upper_torso_parametric_deformer")
+    if isinstance(p3, dict) and p3.get("enabled", True):
+        deformers.append({
+            "id": "upper_torso_parametric_deformer",
+            "kind": DEFORMER_CHEST_PARAMETRIC,
+            "parameters": [PARAM_BUST_X, PARAM_BUST_Y],
+            "targets": {
+                "tag": p3.get("target_tag", "topwear"),
+                **({"instance": p3["target_instance"]}
+                   if p3.get("target_instance") else {}),
+                **({"part": p3["target_part"]}
+                   if p3.get("target_part") else {}),
+            },
+            "config": dict(p3), "phase": PHASE_SECONDARY,
+        })
+
     return deformers
 
 
@@ -289,9 +306,21 @@ def upgrade_manifest_v01_to_v02(manifest: dict[str, Any]) -> dict[str, Any]:
     out["parameters"] = standard_parameter_registry()
     out["deformers"] = deformers_from_motion(motion)
     soft_field, soft_driver = upper_torso_secondary_entries(motion.get("upper_torso_soft_morph"))
+    p3 = motion.get("upper_torso_parametric_deformer")
+    p3_enabled = isinstance(p3, dict) and p3.get("enabled", True)
     out["drivers"] = [soft_driver] if soft_driver else []
-    if soft_field:
+    if soft_field and not p3_enabled:
         out["deformers"].append(soft_field)
         out["parameters"].append(parameter_descriptor(PARAM_UPPER_TORSO_SECONDARY, -1.0, 1.0, 0.0))
+    if p3_enabled:
+        # The same deterministic torso driver now feeds the canonical P3
+        # parameter.  Do not leave a local_soft_field operation beside it:
+        # P3 must be the sole shape backend for this target.
+        if out["drivers"]:
+            out["drivers"][0] = dict(out["drivers"][0], output=PARAM_BUST_Y)
+        out["parameters"].extend([
+            parameter_descriptor(PARAM_BUST_X, -1.0, 1.0, 0.0),
+            parameter_descriptor(PARAM_BUST_Y, -1.0, 1.0, 0.0),
+        ])
     out["evaluation"] = evaluation_block()
     return out
