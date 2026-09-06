@@ -137,6 +137,52 @@
      The extended slider range is for hard-morph QA; production manifests keep
      their authored amplitude.</p>
 
+  <h2>Chest Shape QA (P2.5)</h2>
+  <div class="meta" id="chestBasisMeta">basis: n/a
+    <span id="shapeQaBadge" class="warn" hidden>QA OVERRIDE</span></div>
+  <div class="row">
+    <button id="poseQPlus4">Shape q +4</button>
+    <button id="poseQMinus4">Shape q -4</button>
+    <button id="poseVPlus12">Shape v +12</button>
+    <button id="poseVMinus12">Shape v -12</button>
+  </div>
+  <div class="row">
+    <button id="sideBoth">Both</button>
+    <button id="sideLeft">Left only</button>
+    <button id="sideRight">Right only</button>
+  </div>
+  <label>Volume <span class="val" id="gainVolumev">x1.00</span>
+    <input type="range" id="gainVolume" min="0" max="2" step="0.05" value="1"></label>
+  <label>Sag <span class="val" id="gainSagv">x1.00</span>
+    <input type="range" id="gainSag" min="0" max="2" step="0.05" value="1"></label>
+  <label>Follow <span class="val" id="gainFollowv">x1.00</span>
+    <input type="range" id="gainFollow" min="0" max="2" step="0.05" value="1"></label>
+  <label>Shear X <span class="val" id="gainShearXv">x1.00</span>
+    <input type="range" id="gainShearX" min="0" max="2" step="0.05" value="1"></label>
+  <label>Shear Y <span class="val" id="gainShearYv">x1.00</span>
+    <input type="range" id="gainShearY" min="0" max="2" step="0.05" value="1"></label>
+  <label>Compression <span class="val" id="gainCompressionv">x1.00</span>
+    <input type="range" id="gainCompression" min="0" max="2" step="0.05" value="1"></label>
+  <div class="row"><button id="resetShapeQA">Reset Shape QA</button></div>
+  <label class="row"><input type="checkbox" id="showChestBasis"> Show Chest Basis</label>
+  <label>Basis
+    <select id="chestBasisSelect">
+      <option value="combined">Combined</option>
+      <option value="volume">Volume</option>
+      <option value="sag">Sag</option>
+      <option value="follow">Follow</option>
+      <option value="shear">Shear</option>
+      <option value="compression">Compression</option>
+    </select></label>
+  <canvas id="chestTrajectory" width="200" height="200" aria-label="Lower L/R probe XY trajectory"></canvas>
+  <p class="hint">Directive P2.5: the physical q/v scalar is unchanged (P2.4);
+     these controls only inspect/retune the per-vertex basis that turns it
+     into shape. Gain sliders multiply the manifest's own gains and never
+     rebuild the mesh. Static poses work without Auto Idle. The trajectory
+     plot is the lower-lobe probe's live (x, y) offset over the last few
+     seconds -- a reference-like response arcs rather than tracking a
+     straight line.</p>
+
   <label class="row"><input type="checkbox" id="doBlink" checked> Blink</label>
   <label class="row"><input type="checkbox" id="doBreathe" checked> Breathing</label>
   <label>Breath <span class="val" id="breathAmpv">3.0px</span>

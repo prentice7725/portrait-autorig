@@ -5,9 +5,10 @@ import numpy as np
 from portrait_autorig.image import crop_to_alpha
 from portrait_autorig.rig import build_rig, chest_occluder_alpha, rig_preflight
 from portrait_autorig.soft_morph import (
-    DEFAULT_HORIZONTAL_PX, DEFAULT_VERTICAL_PX, MIN_COVERAGE_RATIO,
-    RESPONSE_PROFILE_CONFIG, SOFT_MORPH_TAG,
-    authored_upper_torso_soft_morph_spec, derive_upper_torso_soft_region,
+    BASIS_SHAPE_DEFAULTS, DEFAULT_HORIZONTAL_PX, DEFAULT_VERTICAL_PX,
+    MIN_COVERAGE_RATIO, RESPONSE_PROFILE_CONFIG, SHAPE_PROFILE_CONFIG,
+    SOFT_MORPH_TAG, authored_upper_torso_soft_morph_spec,
+    basis_physics_distribution, derive_upper_torso_soft_region,
     find_authored_region, region_from_rig_intent, soft_morph_preflight,
     upper_torso_soft_morph_spec,
 )
@@ -477,6 +478,52 @@ class AuthoredUpperTorsoSoftMorphSpecTests(unittest.TestCase):
             frame_size=(CANVAS, CANVAS))
         self.assertEqual(spec["response_profile"], "soft")
         self.assertEqual(spec["response_config"], RESPONSE_PROFILE_CONFIG["soft"])
+
+
+class BasisPhysicsDistributionTests(unittest.TestCase):
+    """P2.5 (directive #20-23): the compiler emits `physics_distribution`
+    version 3 -- a deformation-basis contract -- rather than the old flat
+    horizontal/vertical gain pair."""
+
+    def test_authored_spec_emits_version_3(self):
+        for profile in ("soft", "firm_bounce", "springy"):
+            spec = authored_upper_torso_soft_morph_spec(
+                authored_region(response_profile=profile), portrait_layers(),
+                frame_size=(CANVAS, CANVAS))
+            dist = spec["physics_distribution"]
+            self.assertEqual(dist["version"], 3)
+            for key in ("volume_gain", "sag_gain", "follow_gain_s",
+                        "shear_gain_x_s", "shear_gain_y_s", "compression_gain"):
+                self.assertIn(key, dist)
+            for key, value in BASIS_SHAPE_DEFAULTS.items():
+                self.assertEqual(dist[key], value)
+
+    def test_gains_are_profile_dependent(self):
+        soft = basis_physics_distribution("soft")
+        springy = basis_physics_distribution("springy")
+        # Directive #22: springy is "sag high" / "follow high" relative to
+        # soft's "sag medium" / "follow low-medium".
+        self.assertGreater(springy["sag_gain"], soft["sag_gain"])
+        self.assertGreater(springy["follow_gain_s"], soft["follow_gain_s"])
+
+    def test_unknown_profile_falls_back_to_soft_gains(self):
+        self.assertEqual(basis_physics_distribution("not_a_real_profile"),
+                          basis_physics_distribution("soft"))
+
+    def test_shape_profile_config_matches_directive_springy_figures(self):
+        # Directive #23's "springy starting point" is given as exact numbers;
+        # keep the compiler pinned to them so a future drive-by tune has to
+        # touch this test deliberately.
+        self.assertEqual(SHAPE_PROFILE_CONFIG["springy"], {
+            "volume_gain": 0.60, "sag_gain": 0.95, "follow_gain_s": 0.035,
+            "shear_gain_x_s": 0.018, "shear_gain_y_s": 0.012, "compression_gain": 0.20,
+        })
+
+    def test_non_authored_path_has_no_physics_distribution(self):
+        # The legacy alpha-guess path (no RigIntent) predates the v2/v3
+        # distinction entirely and stays untouched by P2.5.
+        spec = upper_torso_soft_morph_spec(portrait_layers(), frame_size=(CANVAS, CANVAS))
+        self.assertNotIn("physics_distribution", spec)
 
     def test_firm_bounce_max_displacement_is_smaller_than_soft(self):
         # Absorption plan #17 / directive #17: firm_bounce != larger motion.
