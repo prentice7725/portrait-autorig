@@ -37,6 +37,7 @@ __all__ = [
     "upper_torso_soft_morph_spec",
     "RESPONSE_PROFILES", "RESPONSE_PROFILE_CONFIG", "TARGET_ALIASES",
     "find_authored_region", "region_from_rig_intent", "authored_upper_torso_soft_morph_spec",
+    "BASIS_SHAPE_DEFAULTS", "SHAPE_PROFILE_CONFIG", "basis_physics_distribution",
 ]
 
 # The garment layer this deforms. Phase 1's scope is `topwear` alone -- see
@@ -355,6 +356,57 @@ RESPONSE_PROFILE_CONFIG: dict[str, dict[str, float]] = {
     "springy": {"stiffness": 0.64, "damping": 0.24, "overshoot": 0.55, "max_displacement": 0.90},
 }
 
+# --- P2.5 deformation basis (physics_distribution v3) ----------------------
+#
+# PORTRAIT_AUTORIG_P2_5_CHEST_DEFORMATION_BASIS_IMPLEMENTATION_DIRECTIVE_v0.1
+# #5-27: P2.4 answers *how far/how fast* the soft mass responds (the physical
+# q/v scalar, unchanged by this module); these answer *what spatial shape*
+# that response creates. `BASIS_SHAPE_DEFAULTS` are the anchor/lower/tangent/
+# clamp parameters directive #20 keeps constant across response profiles;
+# `SHAPE_PROFILE_CONFIG` are the six gains that vary per profile (#22-23).
+# Same status as `RESPONSE_PROFILE_CONFIG` above: EXPERIMENTAL starting
+# values, not yet corpus-tuned (see docs/HEURISTIC_REGISTRY.md).
+BASIS_SHAPE_DEFAULTS: dict[str, float] = {
+    "upper_anchor_start": -0.75,
+    "upper_anchor_end": -0.15,
+    "lower_start": 0.00,
+    "lower_power": 1.7,
+    "tangent_ratio": 0.15,
+    "max_follow_px": 3.0,
+    "max_shear_px": 2.0,
+}
+
+# Directive #23's exact "generic"/"springy starting point" figures are used
+# verbatim for `soft`/`springy`; `firm_bounce` has no directive-given numbers
+# and is a reasoned interpolation matching its qualitative description
+# (#22: volume medium, sag medium, follow medium, compression high, shear
+# low-medium) -- flagged EXPERIMENTAL in the registry same as the rest.
+SHAPE_PROFILE_CONFIG: dict[str, dict[str, float]] = {
+    "soft": {
+        "volume_gain": 0.55, "sag_gain": 0.75, "follow_gain_s": 0.025,
+        "shear_gain_x_s": 0.012, "shear_gain_y_s": 0.008, "compression_gain": 0.18,
+    },
+    "firm_bounce": {
+        "volume_gain": 0.50, "sag_gain": 0.75, "follow_gain_s": 0.030,
+        "shear_gain_x_s": 0.014, "shear_gain_y_s": 0.010, "compression_gain": 0.24,
+    },
+    "springy": {
+        "volume_gain": 0.60, "sag_gain": 0.95, "follow_gain_s": 0.035,
+        "shear_gain_x_s": 0.018, "shear_gain_y_s": 0.012, "compression_gain": 0.20,
+    },
+}
+
+
+def basis_physics_distribution(response_profile: str) -> dict[str, Any]:
+    """The full `physics_distribution` v3 dict for one qualitative response
+    profile (directive #20, #22-23): version marker + profile-dependent
+    gains + the shared anchor/lower/tangent/clamp parameters. Falls back to
+    `soft` for an unknown profile, mirroring `RESPONSE_PROFILE_CONFIG`'s own
+    fallback in `authored_upper_torso_soft_morph_spec`.
+    """
+    gains = SHAPE_PROFILE_CONFIG.get(response_profile, SHAPE_PROFILE_CONFIG["soft"])
+    return {"version": 3, **gains, **BASIS_SHAPE_DEFAULTS}
+
 
 def find_authored_region(rig_intent: dict[str, Any] | None) -> dict[str, Any] | None:
     """The first RigIntent region (enabled or not -- callers decide what to
@@ -449,13 +501,14 @@ def authored_upper_torso_soft_morph_spec(region: dict[str, Any],
         "strength": round(float(strength), 3),
         "horizontal_px": DEFAULT_HORIZONTAL_PX,
         "vertical_px": DEFAULT_VERTICAL_PX,
-        # v2 physical q is attenuated by the authored lobe weights.  Keep the
-        # shape gain explicit so a runtime can tune visibility without
-        # changing the Composer-owned region or its locks.
-        "physics_distribution": {
-            "version": 2, "horizontal_gain": 0.45, "vertical_gain": 1.0,
-            "vertical_floor": 0.35,
-        },
+        # Physical q/v is attenuated by the authored lobe weights.  v3 (P2.5)
+        # replaces the flat horizontal/vertical gain pair with a per-vertex
+        # deformation basis (volume/sag/follow/shear/compression); keeping it
+        # explicit here means the runtime never has to guess distribution
+        # defaults for a production compile, only for a hand-built manifest
+        # missing the field entirely (see `physicalDistribution()` fallback in
+        # preview/runtime.mjs and preview/reference-runtime.mjs).
+        "physics_distribution": basis_physics_distribution(response_profile),
         "center_lock": (region_geometry or {}).get("center_lock", CENTER_LOCK_WIDTH),
         "neckline_lock": (region_geometry or {}).get("neckline_lock", NECKLINE_LOCK_WIDTH),
         "confidence": verdict["confidence"],
