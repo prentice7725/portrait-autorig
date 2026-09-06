@@ -54,7 +54,8 @@ def _gaze_capability(tags: set[str]) -> str:
 
 
 def capability_report(parts: list[dict[str, Any]], preflight: dict[str, Any],
-                      variant_status: str | None = None) -> dict[str, str]:
+                      variant_status: str | None = None,
+                      parametric_status: str | None = None) -> dict[str, str]:
     """The manifest's `"capabilities"` block. Values are `READY`/`DEGRADED`/
     `DISABLED`/`UNSUPPORTED` (directive #34); `rig.build_rig` calls this
     once `parts[]` and `preflight` are both final."""
@@ -92,6 +93,7 @@ def capability_report(parts: list[dict[str, Any]], preflight: dict[str, Any],
     report["upper_torso_secondary"] = {
         "READY": READY, "DEGRADED": DEGRADED, "DISABLED": DISABLED,
     }.get(soft_status, DISABLED)
+    report["upper_torso_parametric"] = parametric_status or DISABLED
 
     # Variant binding is compiler capability plus this character's authored
     # sets.  The caller supplies the binding result so this report never

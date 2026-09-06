@@ -127,6 +127,33 @@ function applyChestBasisFields(fields, q, springV, bodyVx, bodyVy, distribution)
   ];
 }
 
+function chestParametricDelta(part, index, motion, spec) {
+  const binding = spec?.binding || {};
+  const cells = binding.vertex_cells?.[index], uv = binding.vertex_uv?.[index];
+  const influence = Number(binding.vertex_influence?.[index] ?? 0);
+  if (!cells || !uv || influence <= 0) return [0, 0];
+  const cols = Number(spec.cage?.cols || 6), rows = Number(spec.cage?.rows || 4);
+  const cx = Math.max(0, Math.min(cols - 2, Number(cells[0]) || 0));
+  const cy = Math.max(0, Math.min(rows - 2, Number(cells[1]) || 0));
+  const u = Math.max(0, Math.min(1, Number(uv[0]) || 0));
+  const v = Math.max(0, Math.min(1, Number(uv[1]) || 0));
+  const params = motion.parameters || {};
+  const x = Math.max(-1, Math.min(1, Number(params[spec.parameters?.x || "ParamBustX"] || 0)));
+  const y = Math.max(-1, Math.min(1, Number(params[spec.parameters?.y || "ParamBustY"] || 0)));
+  const out = [0, 0], zero = [0, 0], keyforms = spec.keyforms || {};
+  const add = (name, amount) => {
+    const pose = keyforms[name] || [];
+    const at = (row, col) => pose[row * cols + col] || zero;
+    const p00 = at(cy, cx), p10 = at(cy, cx + 1), p01 = at(cy + 1, cx), p11 = at(cy + 1, cx + 1);
+    const a = (1 - u) * (1 - v), b = u * (1 - v), c = (1 - u) * v, d = u * v;
+    out[0] += amount * (a * Number(p00[0] || 0) + b * Number(p10[0] || 0) + c * Number(p01[0] || 0) + d * Number(p11[0] || 0));
+    out[1] += amount * (a * Number(p00[1] || 0) + b * Number(p10[1] || 0) + c * Number(p01[1] || 0) + d * Number(p11[1] || 0));
+  };
+  if (x < 0) add("bust_x_neg", -x); else add("bust_x_pos", x);
+  if (y < 0) add("bust_y_neg", -y); else add("bust_y_pos", y);
+  return [out[0] * influence, out[1] * influence];
+}
+
 function weightAt(part, index, y) {
   const weight = part.weight || { mode: "constant", value: 1 };
   if (weight.mode !== "gradient_y") return Number(weight.value ?? 1);
@@ -149,6 +176,15 @@ export function deformReference(part, motion, operations) {
   const span = Math.max(Number(motion.canvasWidth || 0), Number(motion.canvasHeight || 0));
   const parallax = span * (TURN_BASE + TURN_SPAN * (1 - Number(part.depth ?? part.spec?.depth ?? 0.5)));
   const list = operations || [];
+  const hasP3 = (candidate) => list.some((operation) => {
+    if (operation.kind !== "chest_parametric_deformer") return false;
+    const config = operation.config || {};
+    return (config.target_instance == null
+      || config.target_instance === candidate.name
+      || config.target_instance === candidate.source_instance_id
+      || config.target_part === candidate.name)
+      && (config.target_tag == null || config.target_tag === (candidate.tag || candidate.spec?.tag));
+  });
   const squash = motion.squash || motion.blink || { l: 0, r: 0 };
   const side = part.eyeSide;
   const blink = side === "l" ? squash.l : side === "r" ? squash.r : Math.max(squash.l || 0, squash.r || 0);
@@ -199,9 +235,24 @@ export function deformReference(part, motion, operations) {
             }
           }
           break;
+        case "chest_parametric_deformer": {
+          flush();
+          const config = operation.config || {};
+          const targetMatches = (config.target_instance == null
+            || config.target_instance === part.name
+            || config.target_instance === part.source_instance_id
+            || config.target_part === part.name)
+            && (config.target_tag == null || config.target_tag === (part.tag || part.spec?.tag));
+          if (targetMatches && (part.tag === "topwear" || part.spec?.tag === "topwear"
+              || part.tag === "topwear_with_arms" || part.tag === "topwear_with_handwear")) {
+            const delta = chestParametricDelta(part, i, motion, config);
+            x += delta[0]; y += delta[1];
+          }
+          break;
+        }
         case "local_soft_field": {
           const sm = motion.softMorph;
-          if (part.softMorph && sm?.enabled) {
+          if (!hasP3(part) && part.softMorph && sm?.enabled) {
             const torso = motion.physics?.torso || {};
             const mean = (Number(torso.left?.value ?? torso.value ?? 0)
               + Number(torso.right?.value ?? torso.value ?? 0)) * 0.5;

@@ -320,6 +320,17 @@ vertex` 경로는 `preview/check_body_kick_pipeline.mjs`와
 `preview/check_chest_basis_motion_shape.mjs`에서 실제 mesh probe로 검증합니다.
 Shape QA에는 Carrier gain과 Carrier basis overlay도 포함되어 있습니다.
 
+P3 authored Assembly compile은 `motion.upper_torso_parametric_deformer`를
+추가로 생성합니다. 이 블록은 6×4의 하나의 연속 cage, bilinear vertex binding,
+`Neutral`과 `BustX/BustY` 네 개의 자동 keyform을 담습니다. `ParamBustY`는 기존 torso
+physics의 상대 px 상태를 `ranges_px.y`로 정규화하고, `ParamBreath`는 P3
+keyform에 섞지 않습니다. Preview의 `BustY ±1`/`BustX ±1` 버튼은 physics를
+우회해 deformer만 검사하며, P3 블록이 있으면 P2.5 procedural field는 같은
+topwear에 적용하지 않습니다. `Show Cage`, `Show Influenced Mesh`,
+`Show Influence Heatmap`, `Show Attachment/Locks`, `Show Occluders`로 실제
+binding과 고정 영역을 확인할 수 있습니다. P2.x manifest는 P3 블록이 없으므로
+기존 경로를 그대로 사용합니다.
+
 주요 회귀 검증은 다음 명령으로 재현할 수 있습니다.
 
 ```powershell
@@ -338,6 +349,8 @@ node preview/check_chest_basis_fields.mjs
 node preview/check_chest_basis_motion_shape.mjs
 node preview/check_chest_basis_reference_parity.mjs
 node preview/check_body_kick_pipeline.mjs
+node preview/check_chest_p3_keyforms.mjs
+node preview/check_chest_p3_real_kick.mjs
 ```
 
 테스트 의존성에는 원본 Composer schema를 직접 검증하기 위한 `jsonschema`가 포함되어

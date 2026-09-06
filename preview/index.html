@@ -186,6 +186,27 @@
      seconds -- a reference-like response arcs rather than tracking a
      straight line.</p>
 
+  <h2>Chest Parametric Warp (P3)</h2>
+  <div class="meta" id="p3Meta">P3 deformer: n/a</div>
+  <div class="row">
+    <button id="bustYMinus">BustY -1</button>
+    <button id="bustNeutral">Bust 0</button>
+    <button id="bustYPlus">BustY +1</button>
+  </div>
+  <div class="row">
+    <button id="bustXMinus">BustX -1</button>
+    <button id="bustXPlus">BustX +1</button>
+  </div>
+  <label class="row"><input type="checkbox" id="showP3Cage"> Show Cage</label>
+  <label class="row"><input type="checkbox" id="showP3Heatmap"> Show Influence Heatmap</label>
+  <label class="row"><input type="checkbox" id="showP3Influenced"> Show Influenced Mesh</label>
+  <label class="row"><input type="checkbox" id="showP3Locks"> Show Attachment/Locks</label>
+  <label class="row"><input type="checkbox" id="showP3Occluders"> Show Occluders</label>
+  <p class="hint">P3 separates physics from shape: these pose buttons bypass
+     physics and inspect the generated continuous cage keyforms directly.
+     Bust 0 must be exact rest; Body Kick tests the same keyforms through the
+     runtime parameter bridge.</p>
+
   <label class="row"><input type="checkbox" id="doBlink" checked> Blink</label>
   <label class="row"><input type="checkbox" id="doBreathe" checked> Breathing</label>
   <label>Breath <span class="val" id="breathAmpv">3.0px</span>

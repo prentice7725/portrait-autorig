@@ -270,6 +270,21 @@ class UpperTorsoSecondaryEntriesTests(unittest.TestCase):
         param_ids = {p["id"] for p in upgraded["parameters"]}
         self.assertNotIn("ParamUpperTorsoSecondary", param_ids)
 
+    def test_p3_selection_replaces_p25_geometry_for_same_target(self):
+        v01 = _v01_manifest()
+        v01["motion"]["upper_torso_soft_morph"] = _authored_soft_morph_spec()
+        v01["motion"]["upper_torso_parametric_deformer"] = {
+            "version": 1, "enabled": True, "target_instance": "topwear",
+            "target_tag": "topwear", "cage": {"cols": 6, "rows": 4},
+        }
+        upgraded = manifest.upgrade_manifest_v01_to_v02(v01)
+        kinds = {d["kind"] for d in upgraded["deformers"]}
+        self.assertIn("chest_parametric_deformer", kinds)
+        self.assertNotIn("local_soft_field", kinds)
+        self.assertEqual(upgraded["drivers"][0]["output"], "ParamBustY")
+        param_ids = {p["id"] for p in upgraded["parameters"]}
+        self.assertTrue({"ParamBustX", "ParamBustY"}.issubset(param_ids))
+
 
 if __name__ == "__main__":
     unittest.main()
