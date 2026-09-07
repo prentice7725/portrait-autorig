@@ -12,6 +12,8 @@ globalThis.fetch = async () => { throw new Error("no fetch"); };
 globalThis.createImageBitmap = async () => ({});
 
 const Runtime = await import(new URL("runtime.mjs", import.meta.url));
+const { makeCompiledTopwearFixture } = await import(new URL("qa_compiled_topwear.mjs", import.meta.url));
+const { makeP3Fixture } = await import(new URL("qa_chest_p3.mjs", import.meta.url));
 
 const points = (offset) => Array.from({ length: 24 }, (_, index) => [
   index + offset, index * 2 + offset,
@@ -75,4 +77,43 @@ if (saved.deformers.upper_torso.source_instance_id !== "topwear_instance")
   throw new Error("stable R2 source binding was not preserved");
 if (saved.deformers.upper_torso.cage_override.bounds[0] !== 2)
   throw new Error("R2 Save did not capture the current resolved cage");
-console.log("R2 chest authoring passed (base immutable, cage/keyform resolved, physics untouched)");
+if (Object.hasOwn(saved.deformers.upper_torso.keyform_overrides, "neutral"))
+  throw new Error("R2 Save persisted an editable neutral keyform");
+
+const autoPart = makeCompiledTopwearFixture();
+const autoSpec = makeP3Fixture(autoPart);
+autoPart.chestParametric = autoSpec;
+const shiftedPoints = autoSpec.cage.rest_points.map(([x, y], index) =>
+  index === 14 ? [x + 12, y] : [x, y]);
+const correctedManifest = Runtime.applyChestAuthoring({
+  motion: { upper_torso_parametric_deformer: autoSpec }, deformers: [],
+}, { deformers: { upper_torso: {
+  target_tag: "topwear", cage_override: { rest_points: shiftedPoints },
+} } });
+const correctedPart = makeCompiledTopwearFixture();
+correctedPart.chestParametric = correctedManifest.motion.upper_torso_parametric_deformer;
+Runtime.state.canvasW = 256; Runtime.state.canvasH = 256;
+Runtime.state.manifest = { anchors: {}, parameters: [], motion: {}, evaluation: { phases: ["secondary"] } };
+Runtime.state.frameOperations = [{ kind: "chest_parametric_deformer", phase: "secondary", config: correctedPart.chestParametric }];
+Runtime.state.motionQA = { p3Pose: { x: 0, y: 1 }, side: "both" };
+const motion = { now: 0, turnX: 0, turnY: 0, tiltRad: 0, shell: 0, yaw: 0, pitch: 0,
+  blink: { l: 0, r: 0 }, squash: { l: 0, r: 0 }, mouthOpen: 0, gazeX: 0, gazeY: 0,
+  breath: 0, breathAmp: 0, chestX: 0, bodySwayPosition: [0, 0],
+  overrides: { ghost: false, neck: "normal", collar: null }, physics: {} };
+const autoRest = new Float32Array(autoPart.mesh.rest);
+Runtime.deform(autoPart, 0, motion);
+Runtime.deform(correctedPart, 0, motion);
+let cageDifference = 0;
+for (let index = 0; index < autoRest.length; index++)
+  cageDifference = Math.max(cageDifference, Math.abs(correctedPart.mesh.live[index] - autoPart.mesh.live[index]));
+if (!(cageDifference > 1e-5)) throw new Error("R2 cage point did not affect runtime geometry");
+
+Runtime.state.motionQA.p3Pose = { x: 0, y: 0 };
+Runtime.deform(correctedPart, 0, motion);
+for (let index = 0; index < autoRest.length; index++)
+if (Math.abs(correctedPart.mesh.live[index] - autoRest[index]) > 1e-6)
+    throw new Error("R2 neutral pose is not exact rest");
+const cleared = Runtime.clearChestAuthoring(saved);
+if (Object.hasOwn(cleared.deformers, "upper_torso"))
+  throw new Error("R2 reset left a chest override behind");
+console.log(`R2 chest authoring passed (cage delta ${cageDifference.toFixed(3)}px, neutral exact rest)`);

@@ -7,6 +7,7 @@ from .compiler import (
     compile_bundle, compile_legacy_run,
 )
 from .project import (
+    CHEST_EDITABLE_KEYFORM_NAMES,
     RigProject, create_rig_project, create_rig_project_from_assembly,
     reset_chest_to_auto, set_chest_cage_bounds, set_chest_cage_points,
     set_chest_keyform,
@@ -22,6 +23,7 @@ __all__ = [
     "compile_asset", "compile_bundle", "compile_legacy_run",
     "compile_assembly_asset", "compile_assembly_bundle",
     "RigProject", "create_rig_project", "create_rig_project_from_assembly",
+    "CHEST_EDITABLE_KEYFORM_NAMES",
     "load_rig_project", "load_rig_source", "open_rig",
     "save_rig_project", "source_revision", "resolve_binding", "resolve_rig",
     "set_deformer_override", "reset_current_pose",
