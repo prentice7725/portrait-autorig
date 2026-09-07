@@ -21,7 +21,7 @@
 
 import { createStrandSpringDriver, createUpperTorsoSecondaryDriver } from "./physics.mjs";
 
-export const PREVIEW_RUNTIME_VERSION = "P2.5.1";
+export const PREVIEW_RUNTIME_VERSION = "P3.0";
 
 // Parallax strength as a fraction of the canvas, so the same manifest reads
 // the same at any render resolution. Near layers travel further than far ones,
@@ -329,6 +329,7 @@ export const state = {
   phaseTrace: [],
   phaseDispatch: {},
   p3Parameters: { x: 0, y: 0 },
+  p3SeparateBreath: false,
   frameOperations: null,
   t0: performance.now(),
 };
@@ -1275,6 +1276,7 @@ export function build(manifest, images) {
   state.physicsAccumulator = 0;
   state.physicsLastNow = null;
   state.bodySwayEnabled = false;
+  state.p3SeparateBreath = false;
   state.physicsSimTime = 0;
   state.bodyPulse = { x: 0, y: 0, vx: 0, vy: 0 };
   state.motionGraph = [];
@@ -1283,6 +1285,10 @@ export function build(manifest, images) {
   state.p3Parameters = { x: 0, y: 0 };
   state.calibrationRequested = 0;
   const physicsSpec = manifest.physics || null;
+  const p3SpecForPhysics = manifest.motion?.upper_torso_parametric_deformer;
+  const p3ParametricActive = p3SpecForPhysics?.enabled !== false
+    && Boolean(p3SpecForPhysics) && p3SpecForPhysics.breath_isolated !== false;
+  state.p3SeparateBreath = p3ParametricActive;
   if (physicsSpec) {
     const config = physicsSpec.config || {};
     state.physicsDrivers = {};
@@ -1327,6 +1333,7 @@ export function build(manifest, images) {
         maxDisplacementPx: torsoSpec.max_displacement_px ?? 16,
         maxVelocityPxS: torsoSpec.max_velocity_px_s ?? 24,
         settleTimeScaleS: torsoSpec.settle_time_scale_s ?? 0.03,
+        separateBreath: p3ParametricActive,
         inputMode: torsoSpec.input_mode || "translation",
         config,
       });
@@ -1695,7 +1702,7 @@ export function renderPanel() {
       && torsoPhysics.model === "inertial_relative_v2";
     physicsWarning.hidden = !!active;
     physicsWarning.textContent = active ? ""
-      : "⚠ P2.5.1 PHYSICS NOT ACTIVE — This Rig Bundle was built without "
+      : "⚠ PHYSICS NOT ACTIVE — This Rig Bundle was built without "
         + "physics.upper_torso_driver. Rebuild the Rig Bundle.";
   }
   const p3Meta = document.getElementById("p3Meta");
@@ -2194,7 +2201,8 @@ function chestParametricValues(motion, spec) {
   // P3 deliberately excludes the breathing equilibrium.  Breathing remains
   // on ParamBreath/global field; only the relative physical state becomes a
   // normalized Bust parameter.
-  const equilibrium = Number(motion.breath || 0) * Number(driver.breath_displacement_px ?? 0.8)
+  const equilibrium = (state.p3SeparateBreath ? 0 : Number(motion.breath || 0))
+    * Number(driver.breath_displacement_px ?? 0.8)
     + Number(motion.turnY || 0) * Number(driver.pose_bias_px ?? 0.15);
   const rangeX = Math.max(1e-6, Number(spec.ranges_px?.x ?? 6));
   const rangeY = Math.max(1e-6, Number(spec.ranges_px?.y ?? 6));

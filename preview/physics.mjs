@@ -123,6 +123,7 @@ export function createUpperTorsoSecondaryDriver({ profile = "soft", model = "leg
                                                   naturalFrequencyHz = null, dampingRatio = null,
                                                   maxDisplacementPx = 4, maxVelocityPxS = 24,
                                                   settleTimeScaleS = 0.03,
+                                                  separateBreath = false,
                                                   inputMode = "translation", config = {} } = {}) {
   const materials = { soft: [12, 5], firm_bounce: [24, 3.5], springy: [16, 1.8] };
   if (!materials[profile]) throw new Error(`unknown torso response profile: ${profile}`);
@@ -187,7 +188,7 @@ export function createUpperTorsoSecondaryDriver({ profile = "soft", model = "leg
   };
   let previousInput = 0, previousVelocity = 0;
   const target = (breath, angleY, bodyVelocity = 0, bodyAcceleration = 0) =>
-    Number(breath) * translationGain + Number(angleY) * angleGain
+    Number(separateBreath ? 0 : breath) * translationGain + Number(angleY) * angleGain
     + Number(bodyVelocity) * velocityGain + Number(bodyAcceleration) * accelerationGain;
   const clamp = (value, limit) => Math.max(-limit, Math.min(limit, value));
   const inertialTarget = (breath, angleY, velocityX, velocityY, accelerationX, accelerationY,
@@ -199,7 +200,8 @@ export function createUpperTorsoSecondaryDriver({ profile = "soft", model = "leg
     impulseX = clamp(Number(impulseX), maxImpulse);
     impulseY = clamp(Number(impulseY), maxImpulse);
     if (model === "inertial_relative_v2") {
-      const equilibrium = Number(breath) * breathDisplacementPx + Number(angleY) * poseBiasPx;
+      const equilibrium = Number(separateBreath ? 0 : breath) * breathDisplacementPx
+        + Number(angleY) * poseBiasPx;
       const lag = -(Number(velocityX) * lagSecondsX + Number(velocityY) * lagSecondsY);
       const lagLimit = Math.hypot(accelerationX, accelerationY) > 4
         || Math.hypot(impulseX, impulseY) > 0.5 ? kickLagMaxPx : idleLagMaxPx;
@@ -263,10 +265,12 @@ export function createUpperTorsoSecondaryDriver({ profile = "soft", model = "leg
       return snapshot();
     },
     warmupPhysics: (seconds, breath = 0, angleY = 0) => {
+      const warmupBreath = separateBreath ? 0 : breath;
       const source = model === "inertial_relative_v2"
-        ? Number(breath) * breathDisplacementPx + Number(angleY) * poseBiasPx
+        ? Number(warmupBreath) * breathDisplacementPx + Number(angleY) * poseBiasPx
         : model === "inertial_relative_v1"
-          ? Number(breath) * breathGain + Number(angleY) * poseBiasGain : target(breath, angleY);
+          ? Number(warmupBreath) * breathGain + Number(angleY) * poseBiasGain
+          : target(warmupBreath, angleY);
       const asym = Math.max(-1, Math.min(1, angleY * turnAsymmetry));
       const count = Math.ceil((seconds ?? config.warmup_seconds ?? DEFAULT_PHYSICS_CONFIG.warmup_seconds)
                               * Number(config.update_hz || 60));
@@ -288,12 +292,13 @@ export function createUpperTorsoSecondaryDriver({ profile = "soft", model = "leg
       if (model === "inertial_relative_v1" || model === "inertial_relative_v2") {
         // Inertial input is already expressed in px/s and px/s². It must not
         // pass through the legacy source reinterpretation/history channel.
-        leftTarget = inertialTarget(breath, angleY, bodyVelocityX, bodyVelocity,
+        const driverBreath = separateBreath ? 0 : breath;
+        leftTarget = inertialTarget(driverBreath, angleY, bodyVelocityX, bodyVelocity,
           bodyAccelerationX, bodyAcceleration, impulseX, impulseY, springs.left) * (1 - asym);
-        rightTarget = inertialTarget(breath, angleY, bodyVelocityX, bodyVelocity,
+        rightTarget = inertialTarget(driverBreath, angleY, bodyVelocityX, bodyVelocity,
           bodyAccelerationX, bodyAcceleration, impulseX, impulseY, springs.right) * (1 + asym);
       } else {
-        const source = target(breath, angleY, bodyVelocity, bodyAcceleration);
+        const source = target(separateBreath ? 0 : breath, angleY, bodyVelocity, bodyAcceleration);
         const dt = 1 / Number(config.update_hz || 60);
         const velocity = (source - previousInput) / dt;
         const acceleration = (velocity - previousVelocity) / dt;

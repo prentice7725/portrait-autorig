@@ -58,6 +58,7 @@ must not silently become defaults.
 | P3 bilinear binding | ACTIVE | Each target vertex stores a cage cell, local uv, and influence; runtime blends four cage points with no solver | `check_chest_p3_keyforms.mjs` |
 | P3 automatic keyforms | EXPERIMENTAL | Compile-time `BustX/BustY` +/- keyforms provide shape; physics only supplies normalized parameters. Profile ranges start at 6px and require A002 corpus tuning | `check_chest_p3_keyforms.mjs`, `check_chest_p3_real_kick.mjs` |
 | P3 migration selection | ACTIVE | P3 manifest block wins over P2.5 on its target; absent P3 keeps the P2.x runtime path and does not migrate old manifests at load | `check_chest_p3_keyforms.mjs`, legacy P2 regressions |
+| P3 breath isolation | ACTIVE | When P3 is present, torso breathing is consumed by ParamBreath/global volume only; the ParamBustY spring receives body/pose-relative input | `check_chest_p3_breath_isolation.mjs` |
 
 ## Status vocabulary
 
