@@ -363,3 +363,29 @@ node preview/check_chest_p3_breath_isolation.mjs
 원본 feasibility study와 측정된 motion limit은
 [`docs/PORTRAIT_AUTO_RIG_FEASIBILITY_v0.1.md`](docs/PORTRAIT_AUTO_RIG_FEASIBILITY_v0.1.md)에
 보존되어 있습니다.
+
+# R1 Rig Project persistence
+
+Assembly/Portrait compilation now emits an editable Rig Project alongside the
+existing runtime-compatible `portrait_rig_manifest.json` and `rig/images/`.
+The generated AutoRig base is kept under `generated/`; authoring corrections
+are stored independently under `authoring/` and resolved back into the
+compatibility manifest on save.
+
+```python
+from portrait_autorig.project import load_rig_project
+
+project = load_rig_project("A002.rig")
+print(project.source_revision_status)  # MATCH / MISMATCH / MISSING
+project.set_deformer_override(
+    "upper_torso",
+    {"source_instance_id": "topwear_with_handwear__instance",
+     "keyform_overrides": {"neutral": [[0.0, 0.0]]}},
+)
+project.save()
+```
+
+Authoring bindings prefer `source_instance_id`, then target instance/part/tag;
+array position is never used as authoring identity. `reset_current_pose`,
+`reset_current_deformer_to_auto`, and `reset_entire_rig_to_auto` retain their
+distinct R1 semantics.

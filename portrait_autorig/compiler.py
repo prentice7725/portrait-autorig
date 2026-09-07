@@ -16,6 +16,7 @@ from .assembly import (
 )
 from .bundle import PortraitAsset, load_legacy_run, load_portrait_bundle
 from .physics import physics_spec_from_rig_intent
+from .project import create_rig_project
 from .rig import build_rig, rig_preflight, write_rig_project
 
 
@@ -52,7 +53,12 @@ def compile_asset(asset: PortraitAsset, output_dir: str | os.PathLike[str], *,
     Image.fromarray(asset.original, mode="RGBA").save(output / "portrait_original.png")
     manifest["source"]["portrait_bundle"] = asset.source_id
     manifest["source"]["legacy_repair_applied"] = asset.legacy_repair_applied
-    return write_rig_project(str(output), "portrait", manifest, images)
+    manifest_path = write_rig_project(str(output), "portrait", manifest, images)
+    create_rig_project(
+        output, manifest, images, source=asset.root, source_kind="portrait",
+        source_id=asset.source_id,
+    )
+    return manifest_path
 
 
 def compile_bundle(bundle_dir: str, output_dir: str, *, gradient_tags=(), contour_tags=(), island_policy="separate",
@@ -153,7 +159,12 @@ def compile_assembly_asset(asset: AssemblyAsset, output_dir: str | os.PathLike[s
     Image.fromarray(asset.reference, mode="RGBA").save(output / "reference.png")
     manifest["source"]["assembly_bundle"] = asset.source_id
     manifest["source"]["reference"] = "reference.png"
-    return write_rig_project(str(output), "portrait", manifest, images)
+    manifest_path = write_rig_project(str(output), "portrait", manifest, images)
+    create_rig_project(
+        output, manifest, images, source=asset.root, source_kind="assembly",
+        source_id=asset.source_id, instance_ids=list(asset.instance_draw_order),
+    )
+    return manifest_path
 
 
 def compile_assembly_bundle(bundle_dir: str, output_dir: str, *,
