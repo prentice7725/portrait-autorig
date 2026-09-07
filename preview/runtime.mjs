@@ -287,6 +287,10 @@ void main() {
 
 export const state = {
   manifest: null,
+  autoManifest: null,
+  authoring: null,
+  projectDirectoryHandle: null,
+  projectRootPath: "",
   parts: [],
   gl: null, prog: null, loc: null,
   canvasW: 0, canvasH: 0,
@@ -331,8 +335,110 @@ export const state = {
   p3Parameters: { x: 0, y: 0 },
   p3SeparateBreath: false,
   frameOperations: null,
+  r2: { pose: "neutral", editTarget: "keyform", editMode: false,
+        activePoint: null, dragging: false, dirty: false },
   t0: performance.now(),
 };
+
+export const R2_CHEST_POSES = ["neutral", "bust_x_neg", "bust_x_pos", "bust_y_neg", "bust_y_pos"];
+export const R2_CHEST_DEFORMER_ID = "upper_torso";
+
+function cloneJson(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function deepMergeObject(base, override) {
+  for (const [key, value] of Object.entries(override || {})) {
+    if (value && typeof value === "object" && !Array.isArray(value)
+        && base[key] && typeof base[key] === "object" && !Array.isArray(base[key])) {
+      deepMergeObject(base[key], value);
+    } else {
+      base[key] = cloneJson(value);
+    }
+  }
+  return base;
+}
+
+function p3SpecFromManifest(manifest) {
+  return manifest?.motion?.upper_torso_parametric_deformer || null;
+}
+
+/** Apply only R2's explicit chest authoring buckets to a generated manifest. */
+export function applyChestAuthoring(manifest, authoring) {
+  const resolved = cloneJson(manifest);
+  const spec = p3SpecFromManifest(resolved);
+  const override = authoring?.deformers?.[R2_CHEST_DEFORMER_ID];
+  if (!spec || !override || typeof override !== "object") return resolved;
+  // Mirror the R1 binding priority: a present stable instance id wins over
+  // weaker fallbacks.  A stale source id must not accidentally apply merely
+  // because the target tag still happens to match.
+  const target = {
+    source_instance_id: spec.target_instance,
+    target_instance: spec.target_instance,
+    target_part: spec.target_part,
+    target_tag: spec.target_tag,
+  };
+  let bindingField = null;
+  for (const field of ["source_instance_id", "target_instance", "target_part", "target_tag"])
+    if (override[field]) { bindingField = field; break; }
+  if (bindingField && override[bindingField] !== target[bindingField]) return resolved;
+  for (const [sourceKey, targetKey] of [["cage_override", "cage"],
+                                         ["keyform_overrides", "keyforms"]]) {
+    if (override[sourceKey] && typeof override[sourceKey] === "object") {
+      deepMergeObject(spec[targetKey] || (spec[targetKey] = {}), override[sourceKey]);
+    }
+  }
+  // v0.2 runtime manifests expose the same P3 config through both the
+  // compatibility motion block and deformers[]. Keep the two views aligned
+  // before motionFromDeformers() projects the declarative list into runtime
+  // motion, so an authored shape cannot be silently replaced by the base.
+  for (const deformer of resolved.deformers || []) {
+    if (deformer.kind !== "chest_parametric_deformer") continue;
+    const config = deformer.config || {};
+    const sameTarget = (!spec.target_instance || !config.target_instance
+      || spec.target_instance === config.target_instance)
+      && (!spec.target_part || !config.target_part || spec.target_part === config.target_part);
+    if (sameTarget) deformer.config = cloneJson(spec);
+  }
+  return resolved;
+}
+
+function chestAuthoringOverride(manifest, sourceAuthoring) {
+  const spec = p3SpecFromManifest(manifest);
+  if (!spec) return null;
+  const existing = cloneJson(sourceAuthoring?.deformers?.[R2_CHEST_DEFORMER_ID] || {});
+  const binding = {
+    source_instance_id: spec.target_instance,
+    target_instance: spec.target_instance,
+    target_part: spec.target_part,
+    target_tag: spec.target_tag,
+  };
+  for (const key of Object.keys(binding)) if (binding[key] == null) delete binding[key];
+  return { ...binding, ...existing };
+}
+
+export function buildChestAuthoring(manifest, sourceAuthoring = null) {
+  const override = chestAuthoringOverride(manifest, sourceAuthoring);
+  if (!override) return cloneJson(sourceAuthoring || { version: 1, deformers: {} });
+  const authoring = cloneJson(sourceAuthoring || { version: 1, deformers: {} });
+  authoring.version = Number(authoring.version || 1);
+  authoring.deformers ||= {};
+  authoring.deformers[R2_CHEST_DEFORMER_ID] = override;
+  return authoring;
+}
+
+/** Snapshot the currently resolved R2 shape into the separated authoring
+ * payload.  This is used only by an explicit Save/Download action; opening a
+ * generated manifest alone never turns its Auto shape into an override. */
+export function captureChestAuthoring(manifest, sourceAuthoring = null) {
+  const authoring = buildChestAuthoring(manifest, sourceAuthoring);
+  const spec = p3SpecFromManifest(manifest);
+  const override = authoring.deformers?.[R2_CHEST_DEFORMER_ID];
+  if (!spec || !override) return authoring;
+  if (spec.cage) override.cage_override = cloneJson(spec.cage);
+  if (spec.keyforms) override.keyform_overrides = cloneJson(spec.keyforms);
+  return authoring;
+}
 
 /** Set a manifest parameter from a host or a test harness.  Values are
  * clamped to the immutable parameter descriptor range when one is present. */
@@ -586,6 +692,33 @@ document.getElementById("pick").addEventListener("click", () => {
   input.click();
 });
 
+async function filesFromDirectory(handle, prefix = "") {
+  const files = [];
+  for await (const [name, entry] of handle.entries()) {
+    if (entry.kind === "file") {
+      const file = await entry.getFile();
+      file._path = prefix + name;
+      files.push(file);
+    } else if (entry.kind === "directory") {
+      files.push(...await filesFromDirectory(entry, prefix + name + "/"));
+    }
+  }
+  return files;
+}
+
+document.getElementById("pickProject")?.addEventListener("click", async () => {
+  if (!window.showDirectoryPicker) {
+    errEl.textContent = "This browser cannot write a Rig Project folder. Use Choose run folder and Download Authoring.";
+    return;
+  }
+  try {
+    const handle = await window.showDirectoryPicker({ mode: "readwrite" });
+    loadFromFiles(await filesFromDirectory(handle), handle);
+  } catch (error) {
+    if (error?.name !== "AbortError") errEl.textContent = "Could not open Rig Project: " + error.message;
+  }
+});
+
 document.addEventListener("dragover", (e) => e.preventDefault());
 document.addEventListener("drop", async (e) => {
   e.preventDefault();
@@ -625,17 +758,39 @@ export function pathOf(file) {
   return (file._path || file.webkitRelativePath || file.name).replace(/\\/g, "/");
 }
 
-export async function loadFromFiles(files) {
+export async function loadFromFiles(files, directoryHandle = null) {
   errEl.textContent = "";
-  const manifestFile = files.find((f) => /_rig_manifest\.json$/.test(pathOf(f)));
+  const projectFile = files.find((f) => /(^|\/)project\.json$/.test(pathOf(f)));
+  const generatedManifestFile = files.find((f) => /(^|\/)generated\/portrait_rig_manifest\.json$/.test(pathOf(f)));
+  const manifestFile = generatedManifestFile
+    || files.find((f) => /(^|\/)portrait_rig_manifest\.json$/.test(pathOf(f)))
+    || files.find((f) => /_rig_manifest\.json$/.test(pathOf(f)));
   if (!manifestFile) {
     errEl.textContent = "No *_rig_manifest.json in that folder. Run A-001 with " +
                         "\"Export 2.5D rig manifest\" enabled.";
     return;
   }
   let manifest;
+  let authoring = null;
   try {
     manifest = JSON.parse(await manifestFile.text());
+    if (projectFile || generatedManifestFile) {
+      authoring = { version: 1, deformers: {}, physics: {}, parameter_ranges: {},
+        keyform_overrides: {}, cage_overrides: {}, hair_overrides: {}, constraints: {} };
+      for (const [key, filename] of [["deformers", "deformers.json"], ["physics", "physics.json"],
+                                      ["parameter_ranges", "parameter_ranges.json"],
+                                      ["keyform_overrides", "keyform_overrides.json"],
+                                      ["cage_overrides", "cage_overrides.json"],
+                                      ["hair_overrides", "hair_overrides.json"],
+                                      ["constraints", "constraints.json"]]) {
+        const file = files.find((candidate) => pathOf(candidate).endsWith("/authoring/" + filename)
+          || pathOf(candidate) === "authoring/" + filename);
+        if (file) authoring[key] = JSON.parse(await file.text());
+      }
+      const metaFile = files.find((candidate) => pathOf(candidate).endsWith("/authoring/meta.json")
+        || pathOf(candidate) === "authoring/meta.json");
+      if (metaFile) Object.assign(authoring, JSON.parse(await metaFile.text()));
+    }
   } catch (e) {
     errEl.textContent = "Could not parse the manifest: " + e.message;
     return;
@@ -659,7 +814,9 @@ export async function loadFromFiles(files) {
     errEl.textContent = "Missing part images:\n" + missing.join("\n");
     return;
   }
-  build(manifest, images);
+  state.projectDirectoryHandle = directoryHandle;
+  state.projectRootPath = projectFile ? pathOf(projectFile).replace(/project\.json$/, "") : "";
+  build(manifest, images, { autoManifest: manifest, authoring });
   dropEl.classList.add("hidden");
 }
 
@@ -1264,9 +1421,12 @@ export function motionFromDeformers(manifest) {
   return motion;
 }
 
-export function build(manifest, images) {
+export function build(manifest, images, options = {}) {
   const canvas = document.getElementById("gl");
   const overlayCanvas = document.getElementById("regionOverlay");
+  state.autoManifest = cloneJson(options.autoManifest || manifest);
+  state.authoring = cloneJson(options.authoring || null);
+  manifest = applyChestAuthoring(state.autoManifest, state.authoring);
   manifest = { ...manifest, motion: motionFromDeformers(manifest) };
   state.manifest = manifest;
   state.parameters = {};
@@ -1284,6 +1444,8 @@ export function build(manifest, images) {
   state.chestBasisDiag = { clamped: 0 };
   state.p3Parameters = { x: 0, y: 0 };
   state.calibrationRequested = 0;
+  state.r2 = { pose: "neutral", editTarget: "keyform", editMode: false,
+    activePoint: null, dragging: false, dirty: false };
   const physicsSpec = manifest.physics || null;
   const p3SpecForPhysics = manifest.motion?.upper_torso_parametric_deformer;
   const p3ParametricActive = p3SpecForPhysics?.enabled !== false
@@ -1713,6 +1875,7 @@ export function renderPanel() {
         + `profile ${p3.profile || "?"} · binding ${p3.binding?.mode || "?"}`
       : "P3 deformer: unavailable (using P2 compatibility path)";
   }
+  updateR2Meta();
 
   const pack = state.parts.filter((p) => p.expression);
   document.getElementById("packmeta").innerHTML = pack.length
@@ -2116,11 +2279,64 @@ function strandSpringDelta(part, vertexIndex, motion) {
   return delta;
 }
 
+function r2ChestPart() {
+  return state.parts.find((part) => part?.chestParametric) || null;
+}
+
+function r2ChestSpec() {
+  return state.manifest?.motion?.upper_torso_parametric_deformer || null;
+}
+
+function r2PoseOffsets(spec, pose = state.r2?.pose || "neutral") {
+  const poseData = spec?.keyforms?.[pose];
+  const count = Number(spec?.cage?.cols || 6) * Number(spec?.cage?.rows || 4);
+  return Array.from({ length: count }, (_, index) => {
+    const point = poseData?.[index];
+    return Array.isArray(point) ? [Number(point[0]) || 0, Number(point[1]) || 0] : [0, 0];
+  });
+}
+
+function r2DisplayPoints(spec, includePose = state.r2?.editTarget === "keyform") {
+  const rest = spec?.cage?.rest_points || [];
+  const offsets = includePose ? r2PoseOffsets(spec) : [];
+  return rest.map((point, index) => [
+    Number(point?.[0] || 0) + Number(offsets[index]?.[0] || 0),
+    Number(point?.[1] || 0) + Number(offsets[index]?.[1] || 0),
+  ]);
+}
+
+function rebindR2Cage(spec, part) {
+  const bounds = spec?.cage?.bounds;
+  const rest = part?.mesh?.rest;
+  if (!Array.isArray(bounds) || bounds.length !== 4 || !rest) return;
+  const [x1, y1, x2, y2] = bounds.map(Number);
+  const width = Math.max(1e-6, x2 - x1), height = Math.max(1e-6, y2 - y1);
+  const cols = Number(spec.cage.cols || 6), rows = Number(spec.cage.rows || 4);
+  const oldLocked = spec.binding?.locked_vertices || [];
+  const cells = [], uv = [], influence = [];
+  for (let index = 0; index < rest.length / 2; index++) {
+    const x = rest[index * 2], y = rest[index * 2 + 1];
+    const gx = (x - x1) / width * (cols - 1), gy = (y - y1) / height * (rows - 1);
+    const cx = Math.max(0, Math.min(cols - 2, Math.floor(gx)));
+    const cy = Math.max(0, Math.min(rows - 2, Math.floor(gy)));
+    const edge = Math.min(x - x1, x2 - x, y - y1, y2 - y);
+    const fade = Math.max(1, Math.min(width, height) * 0.08);
+    const t = Math.max(0, Math.min(1, edge / fade));
+    const weight = t * t * (3 - 2 * t);
+    cells.push([cx, cy]);
+    uv.push([Math.max(0, Math.min(1, gx - cx)), Math.max(0, Math.min(1, gy - cy))]);
+    influence.push(oldLocked[index] ? 0 : weight);
+  }
+  spec.binding = { ...(spec.binding || {}), vertex_cells: cells, vertex_uv: uv,
+    vertex_influence: influence };
+}
+
 /** P3-A overlays: the actual continuous cage and final binding influence,
  *  rather than the old lobe-only diagnostic. */
 function drawChestParametricOverlay(part) {
   const canvas = document.getElementById("regionOverlay");
-  const showCage = !!document.getElementById("showP3Cage")?.checked;
+  const editMode = !!state.r2?.editMode;
+  const showCage = !!document.getElementById("showP3Cage")?.checked || editMode;
   const showHeatmap = !!document.getElementById("showP3Heatmap")?.checked;
   const showInfluenced = !!document.getElementById("showP3Influenced")?.checked;
   const showLocks = !!document.getElementById("showP3Locks")?.checked;
@@ -2131,14 +2347,26 @@ function drawChestParametricOverlay(part) {
   const spec = part.chestParametric;
   const cage = spec.cage || {}, points = cage.rest_points || [];
   const cols = Number(cage.cols || 6), rows = Number(cage.rows || 4);
+  const displayPoints = r2DisplayPoints(spec, editMode && state.r2.editTarget === "keyform");
   if (showCage) {
-    ctx.strokeStyle = "rgba(99, 220, 255, 0.9)"; ctx.lineWidth = 1.5;
-    const at = (r, c) => points[r * cols + c];
+    ctx.strokeStyle = editMode ? "rgba(103, 232, 166, 0.95)" : "rgba(99, 220, 255, 0.9)";
+    ctx.lineWidth = editMode ? 2 : 1.5;
+    const at = (r, c) => displayPoints[r * cols + c];
     for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
       const p = at(r, c); if (!p) continue;
       if (c + 1 < cols) { const q = at(r, c + 1); ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]); ctx.stroke(); }
       if (r + 1 < rows) { const q = at(r + 1, c); ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]); ctx.stroke(); }
-      ctx.fillStyle = "rgba(99, 220, 255, 0.95)"; ctx.beginPath(); ctx.arc(p[0], p[1], 3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = editMode ? "rgba(103, 232, 166, 0.98)" : "rgba(99, 220, 255, 0.95)";
+      ctx.beginPath(); ctx.arc(p[0], p[1], editMode ? 5 : 3, 0, Math.PI * 2); ctx.fill();
+    }
+    if (editMode && state.r2.editTarget === "cage_bounds" && Array.isArray(cage.bounds)) {
+      const [x1, y1, x2, y2] = cage.bounds.map(Number);
+      ctx.strokeStyle = "rgba(255, 210, 92, 0.95)"; ctx.lineWidth = 2;
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      ctx.fillStyle = "rgba(255, 210, 92, 0.98)";
+      for (const [x, y] of [[x1, y1], [x2, y1], [x1, y2], [x2, y2]]) {
+        ctx.fillRect(x - 5, y - 5, 10, 10);
+      }
     }
   }
   if (showHeatmap) {
@@ -2181,6 +2409,164 @@ function drawChestParametricOverlay(part) {
       ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
     }
   }
+}
+
+function r2CanvasPoint(event) {
+  const canvas = document.getElementById("regionOverlay");
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (event.clientX - rect.left) * state.canvasW / Math.max(1, rect.width),
+    y: (event.clientY - rect.top) * state.canvasH / Math.max(1, rect.height),
+  };
+}
+
+function r2NearestPoint(point, points) {
+  let best = null, distance = Infinity;
+  for (let index = 0; index < points.length; index++) {
+    const candidate = points[index];
+    const current = Math.hypot(candidate[0] - point.x, candidate[1] - point.y);
+    if (current < distance) { distance = current; best = index; }
+  }
+  const hitRadius = Math.max(8, Math.min(state.canvasW, state.canvasH) * 0.045);
+  return distance <= hitRadius ? best : null;
+}
+
+function r2NearestBoundsHandle(point, bounds) {
+  const [x1, y1, x2, y2] = bounds.map(Number);
+  const handles = [[x1, y1], [x2, y1], [x1, y2], [x2, y2]];
+  return r2NearestPoint(point, handles);
+}
+
+function r2MarkDirty() {
+  state.r2.dirty = true;
+  updateR2Meta();
+}
+
+function r2ApplyBounds(spec, part, handle, point) {
+  const oldBounds = spec.cage.bounds.map(Number);
+  const next = oldBounds.slice();
+  if (handle === 0) { next[0] = Math.min(point.x, oldBounds[2] - 1e-3); next[1] = Math.min(point.y, oldBounds[3] - 1e-3); }
+  if (handle === 1) { next[2] = Math.max(point.x, oldBounds[0] + 1e-3); next[1] = Math.min(point.y, oldBounds[3] - 1e-3); }
+  if (handle === 2) { next[0] = Math.min(point.x, oldBounds[2] - 1e-3); next[3] = Math.max(point.y, oldBounds[1] + 1e-3); }
+  if (handle === 3) { next[2] = Math.max(point.x, oldBounds[0] + 1e-3); next[3] = Math.max(point.y, oldBounds[1] + 1e-3); }
+  const oldWidth = Math.max(1e-6, oldBounds[2] - oldBounds[0]);
+  const oldHeight = Math.max(1e-6, oldBounds[3] - oldBounds[1]);
+  const newWidth = Math.max(1e-6, next[2] - next[0]);
+  const newHeight = Math.max(1e-6, next[3] - next[1]);
+  spec.cage.rest_points = spec.cage.rest_points.map(([x, y]) => [
+    next[0] + (Number(x) - oldBounds[0]) / oldWidth * newWidth,
+    next[1] + (Number(y) - oldBounds[1]) / oldHeight * newHeight,
+  ]);
+  spec.cage.bounds = next;
+  rebindR2Cage(spec, part);
+}
+
+function r2PointerDown(event) {
+  if (!state.r2.editMode) return;
+  const spec = r2ChestSpec(), part = r2ChestPart();
+  if (!spec || !part) return;
+  const point = r2CanvasPoint(event);
+  if (state.r2.editTarget === "cage_bounds") {
+    state.r2.activePoint = r2NearestBoundsHandle(point, spec.cage?.bounds || []);
+  } else {
+    state.r2.activePoint = r2NearestPoint(
+      point, r2DisplayPoints(spec, state.r2.editTarget === "keyform"));
+  }
+  if (state.r2.activePoint == null) return;
+  state.r2.dragging = true;
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+  event.preventDefault();
+}
+
+function r2PointerMove(event) {
+  if (!state.r2.dragging) return;
+  const spec = r2ChestSpec(), part = r2ChestPart();
+  if (!spec) return;
+  const point = r2CanvasPoint(event);
+  if (state.r2.editTarget === "cage_bounds") {
+    r2ApplyBounds(spec, part, state.r2.activePoint, point);
+  } else if (state.r2.editTarget === "cage") {
+    spec.cage.rest_points[state.r2.activePoint] = [point.x, point.y];
+  } else {
+    const rest = spec.cage.rest_points[state.r2.activePoint];
+    const keyform = spec.keyforms[state.r2.pose] ||
+      (spec.keyforms[state.r2.pose] = spec.cage.rest_points.map(() => [0, 0]));
+    keyform[state.r2.activePoint] = [point.x - Number(rest[0]), point.y - Number(rest[1])];
+  }
+  r2MarkDirty();
+  event.preventDefault();
+}
+
+function r2PointerUp(event) {
+  state.r2.dragging = false;
+  state.r2.activePoint = null;
+  event.currentTarget.releasePointerCapture?.(event.pointerId);
+}
+
+function updateR2Meta() {
+  const el = document.getElementById("r2Meta");
+  if (!el) return;
+  const spec = r2ChestSpec();
+  if (!spec) { el.textContent = "R2 authoring: no P3 chest deformer"; return; }
+  const source = state.authoring?.deformers?.[R2_CHEST_DEFORMER_ID];
+  const status = state.r2?.dirty ? "unsaved correction" : source ? "authored override" : "Auto";
+  el.textContent = `R2 authoring: ${status} · ${spec.cage?.cols || "?"}×${spec.cage?.rows || "?"} cage`;
+}
+
+function syncP3DeformerConfig(manifest) {
+  const spec = p3SpecFromManifest(manifest);
+  if (!spec) return manifest;
+  for (const deformer of manifest.deformers || []) {
+    if (deformer.kind === "chest_parametric_deformer") deformer.config = cloneJson(spec);
+  }
+  return manifest;
+}
+
+async function writeR2File(relativePath, text) {
+  const handle = state.projectDirectoryHandle;
+  if (!handle) return false;
+  const pieces = relativePath.split("/");
+  const filename = pieces.pop();
+  let directory = handle;
+  for (const piece of pieces) directory = await directory.getDirectoryHandle(piece, { create: true });
+  const file = await directory.getFileHandle(filename, { create: true });
+  const writable = await file.createWritable();
+  await writable.write(text);
+  await writable.close();
+  return true;
+}
+
+function downloadR2File(filename, value) {
+  const blob = new Blob([JSON.stringify(value, null, 2) + "\n"], { type: "application/json" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob); link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 0);
+}
+
+async function persistR2Authoring(message = "R2 correction saved") {
+  const authoring = state.r2.dirty
+    ? captureChestAuthoring(state.manifest, state.authoring)
+    : buildChestAuthoring(state.manifest, state.authoring);
+  state.authoring = authoring;
+  const resolved = syncP3DeformerConfig(cloneJson(state.manifest));
+  const deformersText = JSON.stringify(authoring.deformers || {}, null, 2) + "\n";
+  const meta = { version: Number(authoring.version || 1), source_revision: authoring.source_revision || "" };
+  let written = false;
+  try {
+    if (state.projectDirectoryHandle) {
+      await writeR2File("authoring/deformers.json", deformersText);
+      await writeR2File("authoring/meta.json", JSON.stringify(meta, null, 2) + "\n");
+      await writeR2File("portrait_rig_manifest.json", JSON.stringify(resolved, null, 2) + "\n");
+      written = true;
+    }
+  } catch (error) {
+    document.getElementById("r2Meta").textContent = "R2 save failed: " + error.message;
+  }
+  if (!written) downloadR2File("deformers.json", authoring.deformers || {});
+  state.r2.dirty = false;
+  updateR2Meta();
+  if (written) document.getElementById("r2Meta").textContent = message;
 }
 
 function chestParametricValues(motion, spec) {
@@ -3080,6 +3466,60 @@ document.getElementById("bustNeutral").addEventListener("click", () => setP3Pose
 document.getElementById("bustYPlus").addEventListener("click", () => setP3Pose(0, 1));
 document.getElementById("bustXMinus").addEventListener("click", () => setP3Pose(-1, 0));
 document.getElementById("bustXPlus").addEventListener("click", () => setP3Pose(1, 0));
+
+const r2Overlay = document.getElementById("regionOverlay");
+const r2EditMode = document.getElementById("r2EditMode");
+const r2Pose = document.getElementById("r2Pose");
+const r2EditTarget = document.getElementById("r2EditTarget");
+function setR2EditMode(enabled) {
+  state.r2.editMode = !!enabled;
+  r2Overlay?.classList.toggle("r2-editable", state.r2.editMode);
+  updateR2Meta();
+}
+function setR2Pose(pose) {
+  if (!R2_CHEST_POSES.includes(pose)) return;
+  state.r2.pose = pose;
+  const vectors = {
+    neutral: [0, 0], bust_x_neg: [-1, 0], bust_x_pos: [1, 0],
+    bust_y_neg: [0, -1], bust_y_pos: [0, 1],
+  };
+  state.motionQA.p3Pose = { x: vectors[pose][0], y: vectors[pose][1] };
+  updateR2Meta();
+}
+function resetR2ToAuto() {
+  const autoSpec = p3SpecFromManifest(state.autoManifest);
+  const currentSpec = r2ChestSpec();
+  if (!autoSpec || !currentSpec) return;
+  state.manifest.motion.upper_torso_parametric_deformer = cloneJson(autoSpec);
+  syncP3DeformerConfig(state.manifest);
+  for (const part of state.parts) if (part.chestParametric) {
+    part.chestParametric = state.manifest.motion.upper_torso_parametric_deformer;
+  }
+  state.authoring ||= { version: 1, deformers: {} };
+  state.authoring.deformers ||= {};
+  delete state.authoring.deformers[R2_CHEST_DEFORMER_ID];
+  state.r2.dirty = false;
+  updateR2Meta();
+  persistR2Authoring("R2 chest reset to Auto");
+}
+r2EditMode?.addEventListener("change", () => setR2EditMode(r2EditMode.checked));
+r2Pose?.addEventListener("change", () => setR2Pose(r2Pose.value));
+r2EditTarget?.addEventListener("change", () => {
+  state.r2.editTarget = r2EditTarget.value;
+  updateR2Meta();
+});
+r2Overlay?.addEventListener("pointerdown", r2PointerDown);
+r2Overlay?.addEventListener("pointermove", r2PointerMove);
+r2Overlay?.addEventListener("pointerup", r2PointerUp);
+r2Overlay?.addEventListener("pointercancel", r2PointerUp);
+document.getElementById("r2Save")?.addEventListener("click", () => persistR2Authoring());
+document.getElementById("r2Reset")?.addEventListener("click", resetR2ToAuto);
+document.getElementById("r2Download")?.addEventListener("click", () => {
+  const authoring = state.r2.dirty
+    ? captureChestAuthoring(state.manifest, state.authoring)
+    : buildChestAuthoring(state.manifest, state.authoring);
+  downloadR2File("deformers.json", authoring.deformers || {});
+});
 for (const id of ["showP3Cage", "showP3Heatmap", "showP3Influenced", "showP3Locks", "showP3Occluders"]) {
   document.getElementById(id).addEventListener("change", () => {
     const cage = document.getElementById("showP3Cage")?.checked;

@@ -8,6 +8,8 @@ from .compiler import (
 )
 from .project import (
     RigProject, create_rig_project, create_rig_project_from_assembly,
+    reset_chest_to_auto, set_chest_cage_bounds, set_chest_cage_points,
+    set_chest_keyform,
     load_rig_project, load_rig_source, open_rig,
     reset_current_deformer_to_auto, reset_current_pose,
     reset_deformer_to_auto, reset_entire_rig_to_auto, resolve_binding, resolve_rig,
@@ -25,5 +27,7 @@ __all__ = [
     "set_deformer_override", "reset_current_pose",
     "reset_current_deformer_to_auto", "reset_deformer_to_auto",
     "reset_entire_rig_to_auto",
+    "set_chest_cage_bounds", "set_chest_cage_points", "set_chest_keyform",
+    "reset_chest_to_auto",
 ]
 

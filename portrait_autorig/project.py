@@ -25,6 +25,8 @@ from PIL import Image
 RIG_PROJECT_FORMAT = "portrait-rig-project"
 RIG_PROJECT_VERSION = 1
 AUTHORING_VERSION = 1
+CHEST_DEFORMER_ID = "upper_torso"
+CHEST_KEYFORM_NAMES = ("neutral", "bust_x_neg", "bust_x_pos", "bust_y_neg", "bust_y_pos")
 
 _AUTHORING_FILES = (
     "deformers.json",
@@ -188,6 +190,22 @@ class RigProject:
 
     def reset_entire_rig_to_auto(self) -> None:
         reset_entire_rig_to_auto(self)
+
+    def set_chest_cage_bounds(self, bounds: list[float] | tuple[float, ...]) -> None:
+        set_chest_cage_bounds(self, bounds)
+
+    def set_chest_cage_points(
+        self, points: list[list[float]] | tuple[tuple[float, float], ...]
+    ) -> None:
+        set_chest_cage_points(self, points)
+
+    def set_chest_keyform(
+        self, pose: str, points: list[list[float]] | tuple[tuple[float, float], ...]
+    ) -> None:
+        set_chest_keyform(self, pose, points)
+
+    def reset_chest_to_auto(self) -> None:
+        reset_chest_to_auto(self)
 
 
 def _find_manifest(root: Path) -> Path:
@@ -366,6 +384,94 @@ def set_deformer_override(project: RigProject, deformer_id: str,
         raise ValueError("deformer override requires a stable target binding")
     project.authoring.setdefault("deformers", {})[str(deformer_id)] = value
     project.resolve()
+
+
+def _chest_spec(manifest: Mapping[str, Any]) -> dict[str, Any] | None:
+    motion = manifest.get("motion")
+    if not isinstance(motion, Mapping):
+        return None
+    spec = motion.get("upper_torso_parametric_deformer")
+    return spec if isinstance(spec, dict) else None
+
+
+def _chest_binding(project: RigProject) -> dict[str, Any]:
+    spec = _chest_spec(project.generated_manifest)
+    if spec is None:
+        raise ValueError("R2 chest authoring requires a P3 parametric chest deformer")
+    binding = {}
+    for key in ("target_instance", "target_part", "target_tag"):
+        value = spec.get(key)
+        if isinstance(value, str) and value:
+            binding[key] = value
+    if not binding:
+        raise ValueError("P3 chest deformer has no stable authoring target")
+    return binding
+
+
+def _finite_pairs(value: Any, expected: int, label: str) -> list[list[float]]:
+    if not isinstance(value, (list, tuple)) or len(value) != expected:
+        raise ValueError(f"{label} must contain exactly {expected} points")
+    points: list[list[float]] = []
+    for point in value:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            raise ValueError(f"{label} points must be [x, y] pairs")
+        x, y = float(point[0]), float(point[1])
+        if not np.isfinite(x) or not np.isfinite(y):
+            raise ValueError(f"{label} points must be finite")
+        points.append([x, y])
+    return points
+
+
+def set_chest_cage_bounds(project: RigProject,
+                          bounds: list[float] | tuple[float, ...]) -> None:
+    """Persist an R2 correction for the P3 cage bounds."""
+    if not isinstance(bounds, (list, tuple)) or len(bounds) != 4:
+        raise ValueError("chest cage bounds must be [x1, y1, x2, y2]")
+    values = [float(value) for value in bounds]
+    if not all(np.isfinite(value) for value in values):
+        raise ValueError("chest cage bounds must be finite")
+    if values[2] <= values[0] or values[3] <= values[1]:
+        raise ValueError("chest cage bounds must have positive width and height")
+    override = dict(project.authoring.setdefault("deformers", {}).get(CHEST_DEFORMER_ID) or {})
+    override.update(_chest_binding(project))
+    cage = dict(override.get("cage_override") or {})
+    cage["bounds"] = values
+    override["cage_override"] = cage
+    project.authoring["deformers"][CHEST_DEFORMER_ID] = override
+    project.resolve()
+
+
+def set_chest_cage_points(project: RigProject,
+                          points: list[list[float]] | tuple[tuple[float, float], ...]) -> None:
+    """Persist all 24 P3 rest cage control points as an R2 correction."""
+    normalised = _finite_pairs(points, 24, "chest cage points")
+    override = dict(project.authoring.setdefault("deformers", {}).get(CHEST_DEFORMER_ID) or {})
+    override.update(_chest_binding(project))
+    cage = dict(override.get("cage_override") or {})
+    cage["rest_points"] = normalised
+    override["cage_override"] = cage
+    project.authoring["deformers"][CHEST_DEFORMER_ID] = override
+    project.resolve()
+
+
+def set_chest_keyform(project: RigProject, pose: str,
+                      points: list[list[float]] | tuple[tuple[float, float], ...]) -> None:
+    """Persist one complete P3 keyform correction without touching physics."""
+    if pose not in CHEST_KEYFORM_NAMES:
+        raise ValueError(f"unsupported chest keyform: {pose!r}")
+    normalised = _finite_pairs(points, 24, f"chest keyform {pose}")
+    override = dict(project.authoring.setdefault("deformers", {}).get(CHEST_DEFORMER_ID) or {})
+    override.update(_chest_binding(project))
+    keyforms = dict(override.get("keyform_overrides") or {})
+    keyforms[pose] = normalised
+    override["keyform_overrides"] = keyforms
+    project.authoring["deformers"][CHEST_DEFORMER_ID] = override
+    project.resolve()
+
+
+def reset_chest_to_auto(project: RigProject) -> None:
+    """Reset only the authored P3 chest shape to the generated base."""
+    reset_current_deformer_to_auto(project, CHEST_DEFORMER_ID)
 
 
 def reset_current_pose(project: RigProject) -> None:
@@ -618,5 +724,7 @@ __all__ = [
     "load_rig_project", "save_rig_project", "open_rig", "set_deformer_override",
     "create_rig_project_from_assembly", "load_rig_source",
     "reset_current_pose", "reset_current_deformer_to_auto", "reset_deformer_to_auto",
-    "reset_entire_rig_to_auto",
+    "reset_entire_rig_to_auto", "CHEST_DEFORMER_ID", "CHEST_KEYFORM_NAMES",
+    "set_chest_cage_bounds", "set_chest_cage_points", "set_chest_keyform",
+    "reset_chest_to_auto",
 ]
