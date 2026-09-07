@@ -32,6 +32,7 @@
   #canvasWrap { position: relative; max-width: 100%; max-height: 100vh; }
   canvas { max-width: 100%; max-height: 100vh; display: block; }
   #regionOverlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  #regionOverlay.r2-editable { pointer-events: auto; cursor: crosshair; }
   #drop {
     position: absolute; inset: 24px; border: 2px dashed var(--line); border-radius: 12px;
     display: grid; place-content: center; text-align: center; gap: 14px; padding: 32px;
@@ -78,6 +79,7 @@
        <code>rig/images/</code>, or drop the folder here.</p>
     <div class="row" style="justify-content:center">
       <button id="pick">Choose run folder</button>
+      <button id="pickProject">Open Rig Project</button>
     </div>
     <p id="err"></p>
   </div>
@@ -206,6 +208,38 @@
      physics and inspect the generated continuous cage keyforms directly.
      Bust 0 must be exact rest; Body Kick tests the same keyforms through the
      runtime parameter bridge.</p>
+
+  <h2>Chest Authoring (R2)</h2>
+  <div class="meta" id="r2Meta">R2 authoring: no P3 chest deformer</div>
+  <label>Pose
+    <select id="r2Pose" aria-label="Chest authoring pose">
+      <option value="neutral">Bust 0</option>
+      <option value="bust_x_neg">BustX -1</option>
+      <option value="bust_x_pos">BustX +1</option>
+      <option value="bust_y_neg">BustY -1</option>
+      <option value="bust_y_pos">BustY +1</option>
+    </select>
+  </label>
+  <label>Edit target
+    <select id="r2EditTarget" aria-label="Chest authoring edit target">
+      <option value="keyform">Keyform points</option>
+      <option value="cage">Cage points</option>
+      <option value="cage_bounds">Cage bounds</option>
+    </select>
+  </label>
+  <label class="row"><input type="checkbox" id="r2EditMode"> Edit mode</label>
+  <div class="row">
+    <button id="r2Save">Save Correction</button>
+    <button id="r2Reset">Reset Deformer to Auto</button>
+  </div>
+  <div class="row">
+    <button id="r2Download">Download Authoring</button>
+  </div>
+  <p class="hint">R2 edits the generated P3 cage/keyform shape only. Drag a
+     visible control point after enabling Edit mode. Physics values remain
+     untouched. Save Correction writes the separated authoring payload when
+     the browser exposes a project folder; Download Authoring is the portable
+     fallback.</p>
 
   <label class="row"><input type="checkbox" id="doBlink" checked> Blink</label>
   <label class="row"><input type="checkbox" id="doBreathe" checked> Breathing</label>

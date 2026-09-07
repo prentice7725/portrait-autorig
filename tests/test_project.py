@@ -15,8 +15,12 @@ from portrait_autorig.project import (
     reset_current_deformer_to_auto,
     reset_current_pose,
     reset_entire_rig_to_auto,
+    reset_chest_to_auto,
     resolve_binding,
     resolve_rig,
+    set_chest_cage_bounds,
+    set_chest_cage_points,
+    set_chest_keyform,
 )
 
 
@@ -48,6 +52,10 @@ def _images() -> dict[str, np.ndarray]:
     image = np.zeros((4, 4, 4), dtype=np.uint8)
     image[..., 3] = 255
     return {"topwear": image, "front_hair": image.copy()}
+
+
+def _points(offset=0.0) -> list[list[float]]:
+    return [[float(index + offset), float(index * 2 + offset)] for index in range(24)]
 
 
 def _source(root: Path) -> Path:
@@ -140,6 +148,25 @@ def test_resolve_rig_does_not_mutate_generated_base():
     )
     assert report["status"] == "MATCH"
     assert resolved["motion"]["upper_torso_parametric_deformer"]["cage"]["bounds"] == [0, 0, 8, 8]
+
+
+def test_chest_authoring_helpers_persist_cage_and_keyform_without_physics(tmp_path):
+    project = create_rig_project(tmp_path / "A002.rigproject", _manifest(), _images())
+    set_chest_cage_bounds(project, [0, 1, 8, 9])
+    set_chest_cage_points(project, _points(10))
+    set_chest_keyform(project, "bust_y_pos", _points(20))
+    project.save()
+
+    loaded = load_rig_project(project.root)
+    override = loaded.authoring["deformers"]["upper_torso"]
+    assert override["target_instance"] == "topwear_instance"
+    assert override["cage_override"]["bounds"] == [0.0, 1.0, 8.0, 9.0]
+    assert override["keyform_overrides"]["bust_y_pos"] == _points(20)
+    assert "physics" not in loaded.resolved_manifest
+    assert loaded.generated_manifest["motion"]["upper_torso_parametric_deformer"]["cage"]["bounds"] == [1, 1, 7, 7]
+
+    reset_chest_to_auto(loaded)
+    assert loaded.authoring["deformers"] == {}
 
 
 def test_open_legacy_rig_uses_separate_project_and_stays_match_after_save(tmp_path):
