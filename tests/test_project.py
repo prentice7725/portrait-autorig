@@ -11,6 +11,7 @@ from portrait_autorig.image import composite_layers
 from portrait_autorig.project import (
     create_rig_project,
     load_rig_project,
+    open_rig,
     reset_current_deformer_to_auto,
     reset_current_pose,
     reset_entire_rig_to_auto,
@@ -139,6 +140,46 @@ def test_resolve_rig_does_not_mutate_generated_base():
     )
     assert report["status"] == "MATCH"
     assert resolved["motion"]["upper_torso_parametric_deformer"]["cage"]["bounds"] == [0, 0, 8, 8]
+
+
+def test_open_legacy_rig_uses_separate_project_and_stays_match_after_save(tmp_path):
+    source = tmp_path / "A002.rig"
+    (source / "rig" / "images").mkdir(parents=True)
+    manifest = _manifest()
+    (source / "portrait_rig_manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    for name, image in _images().items():
+        from PIL import Image
+        Image.fromarray(image, mode="RGBA").save(source / "rig" / "images" / f"{name}.png")
+    before = {
+        path.relative_to(source).as_posix(): path.read_bytes()
+        for path in source.rglob("*") if path.is_file()
+    }
+
+    project = open_rig(source)
+    assert project.root == tmp_path / "A002.rigproject"
+    assert {
+        path.relative_to(source).as_posix(): path.read_bytes()
+        for path in source.rglob("*") if path.is_file()
+    } == before
+    assert not (source / "project.json").exists()
+
+    project.set_deformer_override(
+        "upper_torso", {"source_instance_id": "topwear_instance",
+                         "range_override": {"x": 9.0}},
+    )
+    project.save()
+    reloaded = load_rig_project(project.root)
+    assert reloaded.source_revision_status == "MATCH"
+    assert reloaded.resolved_manifest["motion"]["upper_torso_parametric_deformer"]["ranges_px"]["x"] == 9.0
+    assert {
+        path.relative_to(source).as_posix(): path.read_bytes()
+        for path in source.rglob("*") if path.is_file()
+    } == before
+    assert (project.root / "authoring" / "meta.json").is_file()
+    meta = json.loads((project.root / "authoring" / "meta.json").read_text(encoding="utf-8"))
+    assert meta["source_revision"] == project.source["source_revision"]
 
 
 def test_compiler_emits_rig_project_without_changing_runtime_manifest_contract(tmp_path):
