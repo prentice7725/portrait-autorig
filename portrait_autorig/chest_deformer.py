@@ -195,6 +195,7 @@ def build_chest_parametric_deformer(
                             or part.get("source_instance_id") or part.get("name")),
         "target_part": part.get("name"),
         "target_tag": part.get("tag", "topwear"), "profile": profile,
+        "breath_isolated": True,
         "parameters": {"x": "ParamBustX", "y": "ParamBustY"},
         "ranges_px": {"x": float(range_x_px), "y": float(range_y_px)},
         "cage": {"cols": cols, "rows": rows, "bounds": [round(v, 4) for v in bounds],

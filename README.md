@@ -240,8 +240,8 @@ GUI workflow와 direct Assembly compiler가 자동으로 `physics.upper_torso_dr
 checkbox나 seethrough import는 필요하지 않습니다. Composer region이 없거나
 명시적으로 disabled이면 physics opt-in도 생성하지 않습니다.
 
-Preview는 `AutoRig Preview P2.5.1`와 physics model을 Run 패널에 표시하며, physics
-block이 없는 구형 Rig Bundle은 `P2.5.1 PHYSICS NOT ACTIVE` 경고를 냅니다. GUI가
+Preview는 `AutoRig Preview P3.0`와 physics model을 Run 패널에 표시하며, physics
+block이 없는 구형 Rig Bundle은 `PHYSICS NOT ACTIVE` 경고를 냅니다. GUI가
 여는 preview server는 no-cache headers를 사용해 현재 checkout의
 `preview/index.html`/`runtime.mjs`/`physics.mjs` 조합을 실행합니다.
 
@@ -324,7 +324,7 @@ P3 authored Assembly compile은 `motion.upper_torso_parametric_deformer`를
 추가로 생성합니다. 이 블록은 6×4의 하나의 연속 cage, bilinear vertex binding,
 `Neutral`과 `BustX/BustY` 네 개의 자동 keyform을 담습니다. `ParamBustY`는 기존 torso
 physics의 상대 px 상태를 `ranges_px.y`로 정규화하고, `ParamBreath`는 P3
-keyform에 섞지 않습니다. Preview의 `BustY ±1`/`BustX ±1` 버튼은 physics를
+keyform과 inertial spring 입력에서 분리합니다. Preview의 `BustY ±1`/`BustX ±1` 버튼은 physics를
 우회해 deformer만 검사하며, P3 블록이 있으면 P2.5 procedural field는 같은
 topwear에 적용하지 않습니다. `Show Cage`, `Show Influenced Mesh`,
 `Show Influence Heatmap`, `Show Attachment/Locks`, `Show Occluders`로 실제
@@ -351,6 +351,7 @@ node preview/check_chest_basis_reference_parity.mjs
 node preview/check_body_kick_pipeline.mjs
 node preview/check_chest_p3_keyforms.mjs
 node preview/check_chest_p3_real_kick.mjs
+node preview/check_chest_p3_breath_isolation.mjs
 ```
 
 테스트 의존성에는 원본 Composer schema를 직접 검증하기 위한 `jsonschema`가 포함되어
