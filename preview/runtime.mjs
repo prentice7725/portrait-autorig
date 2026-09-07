@@ -335,12 +335,13 @@ export const state = {
   p3Parameters: { x: 0, y: 0 },
   p3SeparateBreath: false,
   frameOperations: null,
-  r2: { pose: "neutral", editTarget: "keyform", editMode: false,
+  r2: { pose: "bust_x_neg", editTarget: "keyform", editMode: false,
         activePoint: null, dragging: false, dirty: false },
   t0: performance.now(),
 };
 
 export const R2_CHEST_POSES = ["neutral", "bust_x_neg", "bust_x_pos", "bust_y_neg", "bust_y_pos"];
+export const R2_CHEST_EDIT_POSES = ["bust_x_neg", "bust_x_pos", "bust_y_neg", "bust_y_pos"];
 export const R2_CHEST_DEFORMER_ID = "upper_torso";
 
 function cloneJson(value) {
@@ -382,11 +383,34 @@ export function applyChestAuthoring(manifest, authoring) {
   for (const field of ["source_instance_id", "target_instance", "target_part", "target_tag"])
     if (override[field]) { bindingField = field; break; }
   if (bindingField && override[bindingField] !== target[bindingField]) return resolved;
+  const baseRestPoints = cloneJson(spec.cage?.rest_points);
   for (const [sourceKey, targetKey] of [["cage_override", "cage"],
                                          ["keyform_overrides", "keyforms"]]) {
     if (override[sourceKey] && typeof override[sourceKey] === "object") {
-      deepMergeObject(spec[targetKey] || (spec[targetKey] = {}), override[sourceKey]);
+      const value = targetKey === "keyforms"
+        ? Object.fromEntries(Object.entries(override[sourceKey]).filter(([key]) => key !== "neutral"))
+        : override[sourceKey];
+      deepMergeObject(spec[targetKey] || (spec[targetKey] = {}), value);
     }
+  }
+  const currentRestPoints = spec.cage?.rest_points;
+  if (Array.isArray(baseRestPoints) && Array.isArray(currentRestPoints)
+      && baseRestPoints.length === currentRestPoints.length
+      && baseRestPoints.every((point, index) => Array.isArray(point) && point.length === 2
+        && Array.isArray(currentRestPoints[index]) && currentRestPoints[index].length === 2)) {
+    const deltas = baseRestPoints.map((basePoint, index) => [
+      Number(currentRestPoints[index][0]) - Number(basePoint[0]),
+      Number(currentRestPoints[index][1]) - Number(basePoint[1]),
+    ]);
+    if (deltas.some(([x, y]) => Math.abs(x) > 1e-9 || Math.abs(y) > 1e-9))
+      spec.cage.rest_point_deltas = deltas;
+    else delete spec.cage.rest_point_deltas;
+  } else if (spec.cage) {
+    delete spec.cage.rest_point_deltas;
+  }
+  if (spec.keyforms?.neutral) {
+    // Neutral remains an invariant, not an authored pose.
+    spec.keyforms.neutral = Array.from({ length: spec.cage?.rest_points?.length || 0 }, () => [0, 0]);
   }
   // v0.2 runtime manifests expose the same P3 config through both the
   // compatibility motion block and deformers[]. Keep the two views aligned
@@ -435,8 +459,23 @@ export function captureChestAuthoring(manifest, sourceAuthoring = null) {
   const spec = p3SpecFromManifest(manifest);
   const override = authoring.deformers?.[R2_CHEST_DEFORMER_ID];
   if (!spec || !override) return authoring;
-  if (spec.cage) override.cage_override = cloneJson(spec.cage);
-  if (spec.keyforms) override.keyform_overrides = cloneJson(spec.keyforms);
+  if (spec.cage) {
+    const cage = cloneJson(spec.cage);
+    delete cage.rest_point_deltas;
+    override.cage_override = cage;
+  }
+  if (spec.keyforms) {
+    const keyforms = cloneJson(spec.keyforms);
+    delete keyforms.neutral;
+    override.keyform_overrides = keyforms;
+  }
+  return authoring;
+}
+
+export function clearChestAuthoring(sourceAuthoring = null) {
+  const authoring = cloneJson(sourceAuthoring || { version: 1, deformers: {} });
+  authoring.deformers ||= {};
+  delete authoring.deformers[R2_CHEST_DEFORMER_ID];
   return authoring;
 }
 
@@ -1444,7 +1483,7 @@ export function build(manifest, images, options = {}) {
   state.chestBasisDiag = { clamped: 0 };
   state.p3Parameters = { x: 0, y: 0 };
   state.calibrationRequested = 0;
-  state.r2 = { pose: "neutral", editTarget: "keyform", editMode: false,
+  state.r2 = { pose: "bust_x_neg", editTarget: "keyform", editMode: false,
     activePoint: null, dragging: false, dirty: false };
   const physicsSpec = manifest.physics || null;
   const p3SpecForPhysics = manifest.motion?.upper_torso_parametric_deformer;
@@ -1629,6 +1668,17 @@ export function build(manifest, images, options = {}) {
       p3Occluders: (p3Spec && isSoftMorphTag(part.tag)) ? chestOccluders : [],
     };
   });
+
+  // A persisted bounds correction changes which mesh vertices are in the
+  // cage. Rebuild only that authored binding; generated manifests keep their
+  // compiler-provided binding byte-for-byte.
+  const autoCage = p3SpecFromManifest(state.autoManifest)?.cage;
+  const authoredCage = state.authoring?.deformers?.[R2_CHEST_DEFORMER_ID]?.cage_override;
+  const boundsChanged = Array.isArray(autoCage?.bounds) && Array.isArray(authoredCage?.bounds)
+    && authoredCage.bounds.some((value, index) => Number(value) !== Number(autoCage.bounds[index]));
+  if (boundsChanged) {
+    for (const part of state.parts) if (part.chestParametric) rebindR2Cage(part.chestParametric, part);
+  }
 
   state.variantSets = manifest.variant_sets || {};
   state.variantSelections = {};
@@ -2463,6 +2513,8 @@ function r2ApplyBounds(spec, part, handle, point) {
 
 function r2PointerDown(event) {
   if (!state.r2.editMode) return;
+  if (state.r2.editTarget === "keyform"
+      && !R2_CHEST_EDIT_POSES.includes(state.r2.pose)) return;
   const spec = r2ChestSpec(), part = r2ChestPart();
   if (!spec || !part) return;
   const point = r2CanvasPoint(event);
@@ -2544,10 +2596,12 @@ function downloadR2File(filename, value) {
   setTimeout(() => URL.revokeObjectURL(link.href), 0);
 }
 
-async function persistR2Authoring(message = "R2 correction saved") {
-  const authoring = state.r2.dirty
-    ? captureChestAuthoring(state.manifest, state.authoring)
-    : buildChestAuthoring(state.manifest, state.authoring);
+async function persistR2Authoring(message = "R2 correction saved", options = {}) {
+  const authoring = options.preserveAuthoring
+    ? cloneJson(state.authoring || { version: 1, deformers: {} })
+    : state.r2.dirty
+      ? captureChestAuthoring(state.manifest, state.authoring)
+      : buildChestAuthoring(state.manifest, state.authoring);
   state.authoring = authoring;
   const resolved = syncP3DeformerConfig(cloneJson(state.manifest));
   const deformersText = JSON.stringify(authoring.deformers || {}, null, 2) + "\n";
@@ -2595,6 +2649,20 @@ function chestParametricValues(motion, spec) {
   return { x: 0, y: Math.max(-1, Math.min(1, ((left + right) * 0.5 - equilibrium) / rangeY)) };
 }
 
+function bilinearCageValue(values, cx, cy, u, v, cols) {
+  if (!Array.isArray(values)) return [0, 0];
+  const index = (row, col) => row * cols + col;
+  const p00 = values[index(cy, cx)] || [0, 0], p10 = values[index(cy, cx + 1)] || [0, 0];
+  const p01 = values[index(cy + 1, cx)] || [0, 0], p11 = values[index(cy + 1, cx + 1)] || [0, 0];
+  const a = (1 - u) * (1 - v), b = u * (1 - v), c = (1 - u) * v, d = u * v;
+  return [
+    a * Number(p00[0] || 0) + b * Number(p10[0] || 0)
+      + c * Number(p01[0] || 0) + d * Number(p11[0] || 0),
+    a * Number(p00[1] || 0) + b * Number(p10[1] || 0)
+      + c * Number(p01[1] || 0) + d * Number(p11[1] || 0),
+  ];
+}
+
 function chestParametricDelta(part, vertexIndex, motion, operation) {
   const spec = part.chestParametric || operation.config;
   if (!spec?.enabled || spec.version !== 1) return [0, 0];
@@ -2610,20 +2678,21 @@ function chestParametricDelta(part, vertexIndex, motion, operation) {
   const v = Math.max(0, Math.min(1, Number(uv[1]) || 0));
   const params = chestParametricValues(motion, spec);
   const keyforms = spec.keyforms || {};
-  const zero = [0, 0];
   const blend = (name) => keyforms[name] || [];
   const addPose = (out, name, amount) => {
     const pose = blend(name);
-    const index = (row, col) => row * cols + col;
-    const p00 = pose[index(cy, cx)] || zero, p10 = pose[index(cy, cx + 1)] || zero;
-    const p01 = pose[index(cy + 1, cx)] || zero, p11 = pose[index(cy + 1, cx + 1)] || zero;
-    const a = (1 - u) * (1 - v), b = u * (1 - v), c = (1 - u) * v, d = u * v;
-    out[0] += amount * (a * Number(p00[0] || 0) + b * Number(p10[0] || 0)
-      + c * Number(p01[0] || 0) + d * Number(p11[0] || 0));
-    out[1] += amount * (a * Number(p00[1] || 0) + b * Number(p10[1] || 0)
-      + c * Number(p01[1] || 0) + d * Number(p11[1] || 0));
+    const [dx, dy] = bilinearCageValue(pose, cx, cy, u, v, cols);
+    out[0] += amount * dx;
+    out[1] += amount * dy;
   };
   const out = [0, 0];
+  // Cage edits are shape corrections around Auto. They contribute only when
+  // a BustX/Y pose is active, so Bust 0 remains exact rest by contract.
+  const cageCorrection = bilinearCageValue(spec.cage?.rest_point_deltas,
+    cx, cy, u, v, cols);
+  const cageAmount = Math.max(Math.abs(params.x), Math.abs(params.y));
+  out[0] += cageAmount * cageCorrection[0];
+  out[1] += cageAmount * cageCorrection[1];
   if (params.x < 0) addPose(out, "bust_x_neg", -params.x);
   else addPose(out, "bust_x_pos", params.x);
   if (params.y < 0) addPose(out, "bust_y_neg", -params.y);
@@ -3477,7 +3546,7 @@ function setR2EditMode(enabled) {
   updateR2Meta();
 }
 function setR2Pose(pose) {
-  if (!R2_CHEST_POSES.includes(pose)) return;
+  if (!R2_CHEST_EDIT_POSES.includes(pose)) return;
   state.r2.pose = pose;
   const vectors = {
     neutral: [0, 0], bust_x_neg: [-1, 0], bust_x_pos: [1, 0],
@@ -3495,12 +3564,10 @@ function resetR2ToAuto() {
   for (const part of state.parts) if (part.chestParametric) {
     part.chestParametric = state.manifest.motion.upper_torso_parametric_deformer;
   }
-  state.authoring ||= { version: 1, deformers: {} };
-  state.authoring.deformers ||= {};
-  delete state.authoring.deformers[R2_CHEST_DEFORMER_ID];
+  state.authoring = clearChestAuthoring(state.authoring);
   state.r2.dirty = false;
   updateR2Meta();
-  persistR2Authoring("R2 chest reset to Auto");
+  persistR2Authoring("R2 chest reset to Auto", { preserveAuthoring: true });
 }
 r2EditMode?.addEventListener("change", () => setR2EditMode(r2EditMode.checked));
 r2Pose?.addEventListener("change", () => setR2Pose(r2Pose.value));

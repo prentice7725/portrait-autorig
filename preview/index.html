@@ -213,7 +213,6 @@
   <div class="meta" id="r2Meta">R2 authoring: no P3 chest deformer</div>
   <label>Pose
     <select id="r2Pose" aria-label="Chest authoring pose">
-      <option value="neutral">Bust 0</option>
       <option value="bust_x_neg">BustX -1</option>
       <option value="bust_x_pos">BustX +1</option>
       <option value="bust_y_neg">BustY -1</option>
@@ -235,11 +234,11 @@
   <div class="row">
     <button id="r2Download">Download Authoring</button>
   </div>
-  <p class="hint">R2 edits the generated P3 cage/keyform shape only. Drag a
-     visible control point after enabling Edit mode. Physics values remain
-     untouched. Save Correction writes the separated authoring payload when
-     the browser exposes a project folder; Download Authoring is the portable
-     fallback.</p>
+  <p class="hint">R2 edits the generated P3 cage/keyform shape only. Neutral is
+     locked to exact rest. Drag a visible control point after enabling Edit
+     mode. Physics values remain untouched. Save Correction writes the
+     separated authoring payload when the browser exposes a project folder;
+     Download Authoring is the portable fallback.</p>
 
   <label class="row"><input type="checkbox" id="doBlink" checked> Blink</label>
   <label class="row"><input type="checkbox" id="doBreathe" checked> Breathing</label>

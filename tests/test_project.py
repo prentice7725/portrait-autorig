@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from portrait_autorig.bundle import PortraitAsset
 from portrait_autorig.compiler import compile_asset
@@ -151,7 +152,9 @@ def test_resolve_rig_does_not_mutate_generated_base():
 
 
 def test_chest_authoring_helpers_persist_cage_and_keyform_without_physics(tmp_path):
-    project = create_rig_project(tmp_path / "A002.rigproject", _manifest(), _images())
+    manifest = _manifest()
+    manifest["motion"]["upper_torso_parametric_deformer"]["cage"]["rest_points"] = _points()
+    project = create_rig_project(tmp_path / "A002.rigproject", manifest, _images())
     set_chest_cage_bounds(project, [0, 1, 8, 9])
     set_chest_cage_points(project, _points(10))
     set_chest_keyform(project, "bust_y_pos", _points(20))
@@ -162,11 +165,19 @@ def test_chest_authoring_helpers_persist_cage_and_keyform_without_physics(tmp_pa
     assert override["target_instance"] == "topwear_instance"
     assert override["cage_override"]["bounds"] == [0.0, 1.0, 8.0, 9.0]
     assert override["keyform_overrides"]["bust_y_pos"] == _points(20)
+    assert loaded.resolved_manifest["motion"]["upper_torso_parametric_deformer"]["cage"]["rest_point_deltas"][0] == [10.0, 10.0]
     assert "physics" not in loaded.resolved_manifest
     assert loaded.generated_manifest["motion"]["upper_torso_parametric_deformer"]["cage"]["bounds"] == [1, 1, 7, 7]
 
     reset_chest_to_auto(loaded)
     assert loaded.authoring["deformers"] == {}
+    loaded.save()
+    reloaded = load_rig_project(loaded.root)
+    assert reloaded.authoring["deformers"] == {}
+    assert reloaded.resolved_manifest == reloaded.generated_manifest
+
+    with pytest.raises(ValueError):
+        reloaded.set_chest_keyform("neutral", _points())
 
 
 def test_open_legacy_rig_uses_separate_project_and_stays_match_after_save(tmp_path):

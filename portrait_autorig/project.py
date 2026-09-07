@@ -27,6 +27,7 @@ RIG_PROJECT_VERSION = 1
 AUTHORING_VERSION = 1
 CHEST_DEFORMER_ID = "upper_torso"
 CHEST_KEYFORM_NAMES = ("neutral", "bust_x_neg", "bust_x_pos", "bust_y_neg", "bust_y_pos")
+CHEST_EDITABLE_KEYFORM_NAMES = ("bust_x_neg", "bust_x_pos", "bust_y_neg", "bust_y_pos")
 
 _AUTHORING_FILES = (
     "deformers.json",
@@ -293,11 +294,14 @@ def _apply_deformer_override(manifest: dict[str, Any], override: Mapping[str, An
     for value in motion.values():
         if isinstance(value, dict):
             specs.append(value)
+    matched_specs: list[dict[str, Any]] = []
     for spec in specs:
         spec_target = spec.get("target_instance")
         if (target_instance and spec_target == target_instance
                 or target_part and spec.get("target_part") == target_part
                 or target_tag and spec.get("target_tag") == target_tag):
+            matched_specs.append(spec)
+            base_rest_points = _json_copy((spec.get("cage") or {}).get("rest_points"))
             for override_key, spec_key in (
                 ("cage_override", "cage"),
                 ("keyform_overrides", "keyforms"),
@@ -305,11 +309,27 @@ def _apply_deformer_override(manifest: dict[str, Any], override: Mapping[str, An
             ):
                 value = override.get(override_key)
                 if isinstance(value, Mapping):
+                    if override_key == "keyform_overrides" and spec.get("version") == 1:
+                        value = {key: item for key, item in value.items() if key != "neutral"}
                     if not isinstance(spec.get(spec_key), dict):
                         spec[spec_key] = {}
                     _deep_merge(spec[spec_key], value)
             if isinstance(override.get("patch"), Mapping):
                 _deep_merge(spec, override["patch"])
+            current_rest_points = _json_copy((spec.get("cage") or {}).get("rest_points"))
+            if (isinstance(base_rest_points, list) and isinstance(current_rest_points, list)
+                    and len(base_rest_points) == len(current_rest_points)
+                    and all(isinstance(point, list) and len(point) == 2
+                            for point in base_rest_points + current_rest_points)):
+                deltas = [
+                    [round(float(current[0]) - float(base[0]), 6),
+                     round(float(current[1]) - float(base[1]), 6)]
+                    for base, current in zip(base_rest_points, current_rest_points)
+                ]
+                if any(abs(value) > 1e-9 for point in deltas for value in point):
+                    spec.setdefault("cage", {})["rest_point_deltas"] = deltas
+                else:
+                    spec.setdefault("cage", {}).pop("rest_point_deltas", None)
 
     for deformer in manifest.get("deformers", []):
         if not isinstance(deformer, dict):
@@ -323,6 +343,16 @@ def _apply_deformer_override(manifest: dict[str, Any], override: Mapping[str, An
                 or target_tag and deformer_target.get("tag") == target_tag):
             if isinstance(override.get("patch"), Mapping):
                 _deep_merge(config, override["patch"])
+            if deformer.get("kind") == "chest_parametric_deformer":
+                matching_spec = next((spec for spec in matched_specs
+                                      if (not target_instance
+                                          or spec.get("target_instance") == target_instance)
+                                      and (not target_part
+                                           or spec.get("target_part") == target_part)
+                                      and (not target_tag
+                                           or spec.get("target_tag") == target_tag)), None)
+                if matching_spec is not None:
+                    deformer["config"] = _json_copy(matching_spec)
 
 
 def resolve_rig(generated_manifest: Mapping[str, Any],
@@ -457,7 +487,7 @@ def set_chest_cage_points(project: RigProject,
 def set_chest_keyform(project: RigProject, pose: str,
                       points: list[list[float]] | tuple[tuple[float, float], ...]) -> None:
     """Persist one complete P3 keyform correction without touching physics."""
-    if pose not in CHEST_KEYFORM_NAMES:
+    if pose not in CHEST_EDITABLE_KEYFORM_NAMES:
         raise ValueError(f"unsupported chest keyform: {pose!r}")
     normalised = _finite_pairs(points, 24, f"chest keyform {pose}")
     override = dict(project.authoring.setdefault("deformers", {}).get(CHEST_DEFORMER_ID) or {})
@@ -725,6 +755,7 @@ __all__ = [
     "create_rig_project_from_assembly", "load_rig_source",
     "reset_current_pose", "reset_current_deformer_to_auto", "reset_deformer_to_auto",
     "reset_entire_rig_to_auto", "CHEST_DEFORMER_ID", "CHEST_KEYFORM_NAMES",
+    "CHEST_EDITABLE_KEYFORM_NAMES",
     "set_chest_cage_bounds", "set_chest_cage_points", "set_chest_keyform",
     "reset_chest_to_auto",
 ]
