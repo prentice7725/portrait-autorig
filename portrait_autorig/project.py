@@ -35,6 +35,7 @@ _AUTHORING_FILES = (
     "hair_overrides.json",
     "constraints.json",
 )
+_AUTHORING_META_FILE = "meta.json"
 
 
 def _json_copy(value: Any) -> Any:
@@ -447,7 +448,8 @@ def create_rig_project(output_dir: str | os.PathLike[str],
                    "source_revision": reference["source_revision"]},
         "generated_base": {"manifest": "generated/portrait_rig_manifest.json",
                            "images": "generated/rig/images"},
-        "authoring": {"root": "authoring", "version": AUTHORING_VERSION},
+        "authoring": {"root": "authoring", "meta": "authoring/meta.json",
+                      "version": AUTHORING_VERSION},
         "qa": {"status": "UNREVIEWED"},
     }
     project = RigProject(root, project_data, reference,
@@ -480,6 +482,10 @@ def save_rig_project(project: RigProject) -> Path:
     for filename in _AUTHORING_FILES:
         key = filename[:-5]
         _write_json(root / "authoring" / filename, project.authoring.get(key) or {})
+    _write_json(root / "authoring" / _AUTHORING_META_FILE, {
+        "version": AUTHORING_VERSION,
+        "source_revision": project.authoring.get("source_revision", ""),
+    })
 
     generated_image_root = root / "generated" / "rig" / "images"
     runtime_image_root = root / "rig" / "images"
@@ -527,6 +533,11 @@ def load_rig_project(directory: str | os.PathLike[str]) -> RigProject:
         generated_images = _load_generated_images(root, generated)
     authoring = _default_authoring()
     authoring_root = root / str((project_data.get("authoring") or {}).get("root", "authoring"))
+    meta_path = authoring_root / _AUTHORING_META_FILE
+    if meta_path.is_file():
+        meta = _read_json(meta_path)
+        authoring["version"] = int(meta.get("version", AUTHORING_VERSION))
+        authoring["source_revision"] = str(meta.get("source_revision", ""))
     for filename in _AUTHORING_FILES:
         path = authoring_root / filename
         if path.is_file():
@@ -545,20 +556,27 @@ def load_rig_project(directory: str | os.PathLike[str]) -> RigProject:
     return project
 
 
-def open_rig(path: str | os.PathLike[str]) -> RigProject:
+def open_rig(path: str | os.PathLike[str],
+             project_dir: str | os.PathLike[str] | None = None) -> RigProject:
     """Open a Rig Project or an existing generated Rig directory.
 
-    Existing generated rigs are treated as read-only generated bases until
-    saved as a project.  Assembly/Portrait Bundle directories are accepted as
-    source locations for callers that will compile them before creating a
-    project; this function deliberately does not compile or mutate them.
+    Existing generated rigs are converted into a sibling ``.rigproject`` by
+    default.  The generated source directory is never used as the project
+    destination, so opening or saving authoring data cannot rewrite its source
+    manifest.  Pass ``project_dir`` to choose another editable destination.
     """
     root = Path(path).expanduser().resolve()
     if (root / "project.json").is_file():
         return load_rig_project(root)
     manifest_path = _find_manifest(root)
     manifest = _read_json(manifest_path)
-    return create_rig_project(root, manifest, _load_generated_images(root, manifest),
+    destination = (Path(project_dir).expanduser().resolve()
+                   if project_dir is not None else root.with_suffix(".rigproject"))
+    if destination == root:
+        raise ValueError("legacy Rig source and editable Rig Project destination must differ")
+    if (destination / "project.json").is_file():
+        return load_rig_project(destination)
+    return create_rig_project(destination, manifest, _load_generated_images(root, manifest),
                               source=root, source_kind="rig", source_id=root.name)
 
 
