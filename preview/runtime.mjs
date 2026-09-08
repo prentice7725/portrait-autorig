@@ -335,6 +335,7 @@ export const state = {
   p3Parameters: { x: 0, y: 0 },
   p3SeparateBreath: false,
   frameOperations: null,
+  displayPreset: "full",
   r2: { pose: "bust_x_neg", editTarget: "keyform", editMode: false,
         activePoint: null, dragging: false, dirty: false },
   r3: { dirty: false },
@@ -345,8 +346,57 @@ export const R2_CHEST_POSES = ["neutral", "bust_x_neg", "bust_x_pos", "bust_y_ne
 export const R2_CHEST_EDIT_POSES = ["bust_x_neg", "bust_x_pos", "bust_y_neg", "bust_y_pos"];
 export const R2_CHEST_DEFORMER_ID = "upper_torso";
 
+export const R4_DISPLAY_PRESETS = Object.freeze({
+  full: { label: "100%", width: null, height: null },
+  game_portrait: { label: "Game portrait", width: 360, height: 640 },
+  desk_portrait: { label: "Desk portrait", width: 720, height: 1280 },
+});
+
 function cloneJson(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function r4DisplayConfig(id) {
+  const fallback = R4_DISPLAY_PRESETS[id] || R4_DISPLAY_PRESETS.full;
+  const authored = state.manifest?.preview?.display_presets?.[id];
+  if (!authored || typeof authored !== "object") return fallback;
+  return {
+    ...fallback,
+    width: Number.isFinite(Number(authored.width)) && Number(authored.width) > 0
+      ? Number(authored.width) : fallback.width,
+    height: Number.isFinite(Number(authored.height)) && Number(authored.height) > 0
+      ? Number(authored.height) : fallback.height,
+  };
+}
+
+export function applyDisplayPreset(id = "full") {
+  const presetId = R4_DISPLAY_PRESETS[id] ? id : "full";
+  state.displayPreset = presetId;
+  const canvas = document.getElementById("gl");
+  const overlay = document.getElementById("regionOverlay");
+  const wrap = document.getElementById("canvasWrap");
+  if (!canvas || !overlay || !wrap || !(state.canvasW > 0 && state.canvasH > 0)) return presetId;
+  const config = r4DisplayConfig(presetId);
+  const viewportWidth = config.width || state.canvasW;
+  const viewportHeight = config.height || state.canvasH;
+  const scale = Math.min(viewportWidth / state.canvasW, viewportHeight / state.canvasH);
+  const contentWidth = Math.max(1, Math.round(state.canvasW * scale));
+  const contentHeight = Math.max(1, Math.round(state.canvasH * scale));
+  wrap.style.width = `${viewportWidth}px`;
+  wrap.style.height = `${viewportHeight}px`;
+  for (const item of [canvas, overlay]) {
+    item.classList.add("r4-sized");
+    item.style.width = `${contentWidth}px`;
+    item.style.height = `${contentHeight}px`;
+  }
+  overlay.style.left = `${Math.round((viewportWidth - contentWidth) / 2)}px`;
+  overlay.style.top = `${Math.round((viewportHeight - contentHeight) / 2)}px`;
+  const meta = document.getElementById("r4DisplayMeta");
+  if (meta) meta.textContent = `Preview size: ${config.label} · ${viewportWidth}×${viewportHeight} target · `
+    + `${contentWidth}×${contentHeight} content`;
+  const select = document.getElementById("r4DisplayPreset");
+  if (select) select.value = presetId;
+  return presetId;
 }
 
 function deepMergeObject(base, override) {
@@ -1560,6 +1610,7 @@ export function build(manifest, images, options = {}) {
   canvas.height = state.canvasH;
   overlayCanvas.width = state.canvasW;
   overlayCanvas.height = state.canvasH;
+  applyDisplayPreset(state.displayPreset);
 
   const { gl, prog, loc } = initGL(canvas);
   state.gl = gl; state.prog = prog; state.loc = loc;
@@ -3481,6 +3532,10 @@ function updateQaBadge() {
 
 document.getElementById("gazeX").addEventListener("input", () => syncSlider("gazeX"));
 document.getElementById("gazeY").addEventListener("input", () => syncSlider("gazeY"));
+
+document.getElementById("r4DisplayPreset")?.addEventListener("change", (event) => {
+  applyDisplayPreset(event.target.value);
+});
 
 document.getElementById("mouthOpen").addEventListener("input", () => {
   document.getElementById("doTalk").checked = false;
