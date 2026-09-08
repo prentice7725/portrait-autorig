@@ -232,13 +232,15 @@ vertical 1.0을 그대로 유지합니다. authored lobe weight(`lowerBias`)가 
 0.35로 고칩니다 — 로브 하단(QA probe 지점)은 그대로 두고 중심부에도 최소 35%
 반응을 보장합니다. 이 보정은 region/lock geometry를 바꾸지 않습니다.
 
-Composer Assembly의 `rig_intent.regions[*]`에서 `topwear`/`topwear_with_arms`/
-`topwear_with_handwear` 대상의 `enabled: true` torso region을 authoring하면,
-GUI workflow와 direct Assembly compiler가 자동으로 `physics.upper_torso_driver`
-를 생성합니다. `response_profile`은 `soft`/`firm_bounce`/`springy` preset으로
-변환되고 새 manifest에는 `model: inertial_relative_v2`가 명시됩니다. 별도 GUI
-checkbox나 seethrough import는 필요하지 않습니다. Composer region이 없거나
-명시적으로 disabled이면 physics opt-in도 생성하지 않습니다.
+Composer Assembly의 `rig_intent.regions[*]`는 최종 가슴 authoring이 아니라
+선택적인 `Motion Hint`입니다. `target`, 대략적인 질량/위치, attachment,
+occluder 의도, `response_profile`만 generated base를 초기화할 때 참고합니다.
+최종 cage/keyform/range/physics 값은 Rig Studio의 Rig Project authoring이
+소유합니다. Composer hint가 없어도 AutoRig는 해당 캐릭터의 topwear geometry에서
+편집 가능한 P3 chest base를 생성하며, 이 경우 physics는 자동 opt-in하지 않고
+Rig Studio에서 calibration을 저장할 때 활성화됩니다. 기존 hint가 있는 Assembly는
+호환성을 위해 기존 generated seed와 runtime manifest를 유지하지만, 수정 결과는
+Composer가 아니라 `authoring/`에 저장됩니다.
 
 Preview는 `AutoRig Preview P3.0`와 physics model을 Run 패널에 표시하며, physics
 block이 없는 구형 Rig Bundle은 `PHYSICS NOT ACTIVE` 경고를 냅니다. GUI가
@@ -295,11 +297,11 @@ block이 없거나 driver가 비활성화되면 기존 rest reference 경로를 
 `motion.upper_torso_soft_morph.physics_distribution`로 기록되고, 이전 v2
 manifest는 preview의 보수적 fallback으로 읽힙니다.
 
-Composer가 authoring한 `upper_torso_secondary`의 lobe 중심/반경은 target instance
-정규화 좌표입니다. Assembly compile은 이를 `coordinate_space:
-"canvas_normalized"`로 manifest에 표시하고, preview는 cropped topwear bbox로
-재정규화하지 않습니다. 따라서 Composer overlay와 Rig overlay가 같은 캔버스 위치를
-가리키며, AutoRig가 별도의 가슴 영역을 다시 추정하지 않습니다.
+Composer의 `upper_torso_secondary` Motion Hint가 제공하는 lobe 중심/반경은 target
+instance 정규화 좌표입니다. Assembly compile은 generated base에 이를
+`coordinate_space: "canvas_normalized"`로 보존하고, preview는 cropped topwear
+bbox로 재정규화하지 않습니다. Rig Studio의 cage/influence correction은 이 base를
+authoring override로 대체하며, Composer hint 자체는 변경하지 않습니다.
 
 `center_lock`/`neckline_lock`/center transition은 반대로 **항상 topwear crop
 자기 자신의 width/height 기준 fraction**입니다 (`coordinate_space`와 무관).
@@ -320,8 +322,8 @@ vertex` 경로는 `preview/check_body_kick_pipeline.mjs`와
 `preview/check_chest_basis_motion_shape.mjs`에서 실제 mesh probe로 검증합니다.
 Shape QA에는 Carrier gain과 Carrier basis overlay도 포함되어 있습니다.
 
-P3 authored Assembly compile은 `motion.upper_torso_parametric_deformer`를
-추가로 생성합니다. 이 블록은 6×4의 하나의 연속 cage, bilinear vertex binding,
+Assembly compile은 Motion Hint 유무와 관계없이 `motion.upper_torso_parametric_deformer`를
+생성할 수 있는 topwear에 대해 generated P3 base를 만듭니다. 이 블록은 6×4의 하나의 연속 cage, bilinear vertex binding,
 `Neutral`과 `BustX/BustY` 네 개의 자동 keyform을 담습니다. `ParamBustY`는 기존 torso
 physics의 상대 px 상태를 `ranges_px.y`로 정규화하고, `ParamBreath`는 P3
 keyform과 inertial spring 입력에서 분리합니다. Preview의 `BustY ±1`/`BustX ±1` 버튼은 physics를

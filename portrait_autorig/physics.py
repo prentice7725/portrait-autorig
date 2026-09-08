@@ -70,11 +70,12 @@ def default_p2_3_physics_spec(response_profile: str = "soft") -> dict[str, Any]:
 
 
 def physics_spec_from_rig_intent(rig_intent: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Translate an enabled Composer torso region into the P2.3 spec.
+    """Build a generated-base physics seed from a Composer motion hint.
 
-    This deliberately consumes only the Assembly file contract; it does not
-    import Composer or seethrough code.  ``None`` means no authored torso
-    secondary region (or an explicitly disabled one).
+    This is a compatibility helper for callers that explicitly want to seed a
+    generated base from the Assembly contract.  It is not the Rig Studio
+    authoring source of truth: final physics calibration is stored in the Rig
+    Project authoring bucket and resolved later.
     """
     if not isinstance(rig_intent, dict):
         return None

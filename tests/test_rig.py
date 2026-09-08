@@ -406,9 +406,13 @@ class AnchorTests(unittest.TestCase):
 
     def test_expression_donors_follow_head_motion_plane(self):
         self.assertEqual(group_for_tag("eye_closed"), GROUP_HEAD)
+        self.assertEqual(group_for_tag("eyes_closed"), GROUP_HEAD)
         self.assertEqual(group_for_tag("mouth_open"), GROUP_HEAD)
+        self.assertEqual(group_for_tag("mouth_a"), GROUP_HEAD)
         self.assertEqual(depth_owner_for_tag("eye_closed"), "eyewhite")
+        self.assertEqual(depth_owner_for_tag("eyes_closed"), "eyewhite")
         self.assertEqual(depth_owner_for_tag("mouth_open"), "mouth")
+        self.assertEqual(depth_owner_for_tag("mouth_a"), "mouth")
 
 
 class BuildRigTests(unittest.TestCase):
@@ -437,7 +441,9 @@ class BuildRigTests(unittest.TestCase):
         deformer_kinds = {d["kind"] for d in manifest["deformers"]}
         self.assertEqual(deformer_kinds,
                          {"parallax_turn", "shell_turn", "weighted_rotation",
-                          "continuous_field", "body_sway", "eye_fold", "gaze"})
+                          "continuous_field", "body_sway", "eye_fold", "gaze", "jaw_open"})
+        self.assertEqual(manifest["motion"]["jaw_open"]["target_tag"], "face")
+        self.assertEqual(manifest["deformers"][-1]["kind"], "jaw_open")
 
     def test_every_part_carries_a_frozen_mesh_topology_hash(self):
         # directive v0.2 #11-12 (P0-G): generate mesh -> hash -> freeze.

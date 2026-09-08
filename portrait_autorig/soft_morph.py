@@ -417,10 +417,9 @@ def find_authored_region(rig_intent: dict[str, Any] | None) -> dict[str, Any] | 
     """The first RigIntent region (enabled or not -- callers decide what to
     do with a disabled one) whose `target` names the surface this module's
     Phase 1 scope can act on. None when there is no `rig_intent` at all, or
-    none of its regions target `topwear` -- both cases mean "AutoRig must
-    not invent a region" for that compile (see
-    `authored_upper_torso_soft_morph_spec`'s caller in `rig.py`), never a
-    reason to fall back to `derive_upper_torso_soft_region`'s guess."""
+    none of its regions target `topwear`. Callers may then use the
+    character-derived AutoRig base; this function only identifies an optional
+    Composer motion hint."""
     if not rig_intent:
         return None
     for region in (rig_intent.get("regions") or {}).values():

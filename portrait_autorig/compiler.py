@@ -91,13 +91,15 @@ def compile_assembly_asset(asset: AssemblyAsset, output_dir: str | os.PathLike[s
     `rest_reference=asset.reference` -- rest_fidelity is checked against
     Composer's own rendered `reference.png` (the real Assembly Truth, Master
     doc #2), not a composite rebuilt from the same layers the rig itself
-    was derived from -- and `rig_intent=asset.rig_intent`, which replaces
-    `upper_torso_soft_morph`'s alpha-guessed region with whatever Composer's
-    C4 authoring actually declared (or explicitly disables it, never a
-    guess, when nothing was authored).
+    was derived from -- and `rig_intent=asset.rig_intent`, which supplies an
+    optional Composer motion hint for the generated chest base.  When no hint
+    is present, AutoRig derives an editable first cage from the character's
+    topwear geometry.  Final corrections and calibration belong to the Rig
+    Project authoring layer.
     """
-    # Composer's enabled upper-torso region is the physics opt-in boundary.
-    # Keep direct compiler callers on the same P2.3 path as the GUI workflow.
+    # Preserve the legacy generated-base seed when a Composer motion hint is
+    # present.  Final physics calibration is still authored in Rig Studio and
+    # resolves over this base in the Rig Project.
     if physics is None:
         physics = physics_spec_from_rig_intent(asset.rig_intent)
     preflight = rig_preflight(asset.layers, original_rgba=None,
@@ -136,6 +138,7 @@ def compile_assembly_asset(asset: AssemblyAsset, output_dir: str | os.PathLike[s
         variant_sets=asset.variant_sets,
         expression_presets=asset.expressions,
         variant_layers=asset.instance_layers,
+        variant_reference_visibility=asset.variant_visibility,
         instance_to_tag=asset.instance_to_tag,
         variant_draw_order=[asset.instance_to_tag[i] for i in asset.instance_draw_order],
         preflight=preflight,

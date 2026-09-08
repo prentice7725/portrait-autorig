@@ -210,6 +210,7 @@ export const PHASE_DEFORMER_HANDLERS = {
     }
   },
   local_soft_field(deformer, context) { registerDeformerOperation(deformer, context); },
+  jaw_open(deformer, context) { registerDeformerOperation(deformer, context); },
   chest_parametric_deformer(deformer, context) { registerDeformerOperation(deformer, context); },
   strand_spring(deformer, context) { registerDeformerOperation(deformer, context); },
   upper_torso_physics(deformer, context) { registerDeformerOperation(deformer, context); },
@@ -336,6 +337,7 @@ export const state = {
   p3SeparateBreath: false,
   frameOperations: null,
   displayPreset: "full",
+  r5Hair: { layer: "all" },
   r2: { pose: "bust_x_neg", editTarget: "keyform", editMode: false,
         activePoint: null, dragging: false, dirty: false },
   r3: { dirty: false },
@@ -1527,6 +1529,9 @@ export function motionFromDeformers(manifest) {
   const p3 = (byKind.chest_parametric_deformer || [])[0];
   if (p3) motion.upper_torso_parametric_deformer = p3.config || {};
 
+  const jaw = (byKind.jaw_open || [])[0];
+  if (jaw) motion.jaw_open = jaw.config || {};
+
   return motion;
 }
 
@@ -1586,6 +1591,7 @@ export function build(manifest, images, options = {}) {
   state.p3SeparateBreath = false;
   state.physicsSimTime = 0;
   state.bodyPulse = { x: 0, y: 0, vx: 0, vy: 0 };
+  state.mouthOpen = 0;
   state.motionGraph = [];
   state.chestTrajectoryGraph = [];
   state.chestBasisDiag = { clamped: 0 };
@@ -1594,6 +1600,7 @@ export function build(manifest, images, options = {}) {
   state.r2 = { pose: "bust_x_neg", editTarget: "keyform", editMode: false,
     activePoint: null, dragging: false, dirty: false };
   state.r3 = { dirty: false };
+  state.r5Hair = { layer: "all" };
   const p3SpecForPhysics = manifest.motion?.upper_torso_parametric_deformer;
   const p3ParametricActive = p3SpecForPhysics?.enabled !== false
     && Boolean(p3SpecForPhysics) && p3SpecForPhysics.breath_isolated !== false;
@@ -2007,6 +2014,29 @@ export function renderPanel() {
     row.append(cb, z, name);
     host.appendChild(row);
   }
+  updateR5HairControls();
+}
+
+function updateR5HairControls() {
+  const spec = state.manifest?.hair_zones;
+  const meta = document.getElementById("r5HairMeta");
+  const select = document.getElementById("r5HairLayer");
+  if (!spec || !select) return;
+  const zones = spec.zones || {};
+  const tags = Object.keys(zones);
+  select.innerHTML = "";
+  const all = document.createElement("option");
+  all.value = "all"; all.textContent = "All supported hair layers"; select.appendChild(all);
+  for (const tag of tags) {
+    const option = document.createElement("option");
+    option.value = tag; option.textContent = `${tag} (${zones[tag].length} zones)`;
+    select.appendChild(option);
+  }
+  select.value = tags.includes(state.r5Hair.layer) ? state.r5Hair.layer : "all";
+  const count = tags.reduce((sum, tag) => sum + (zones[tag] || []).length, 0);
+  if (meta) meta.textContent = count
+    ? `Hair detection: ${count} zone${count === 1 ? "" : "s"} · ${spec.status || "READY"}`
+    : `Hair detection: ${spec.status || "DISABLED"}`;
 }
 
 /** `Show region` debug overlay (design doc 18): the two derived ellipses plus
@@ -2388,6 +2418,47 @@ function strandSpringDelta(part, vertexIndex, motion) {
     }
   }
   return delta;
+}
+
+/** R5 inspection overlay. It is intentionally drawn before the older chest
+ * overlays so the latter can share the same canvas without leaving stale
+ * lines when the R5 toggle changes. */
+export function drawHairZonesOverlay() {
+  const canvas = document.getElementById("regionOverlay");
+  if (!canvas?.getContext) return;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, state.canvasW, state.canvasH);
+  if (!document.getElementById("showR5HairZones")?.checked) return;
+  const spec = state.manifest?.hair_zones;
+  if (!spec?.zones) return;
+  const selected = state.r5Hair?.layer || "all";
+  const showRoots = !!document.getElementById("showR5HairRoots")?.checked;
+  const colors = {
+    "front hair": "rgba(110,168,254,0.95)",
+    "back hair": "rgba(254,168,110,0.95)",
+    hair: "rgba(166,120,255,0.95)",
+  };
+  for (const [tag, zones] of Object.entries(spec.zones)) {
+    if (selected !== "all" && selected !== tag) continue;
+    const color = colors[tag] || "rgba(103,232,166,0.95)";
+    for (const zone of zones || []) {
+      const [x1, y1, x2, y2] = (zone.bbox || []).map(Number);
+      if (![x1, y1, x2, y2].every(Number.isFinite)) continue;
+      ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1); ctx.setLineDash([]);
+      ctx.fillStyle = color; ctx.font = "12px sans-serif";
+      ctx.fillText(`${zone.zone_id} · ${zone.class}`, x1 + 4, Math.max(14, y1 - 5));
+      if (!showRoots) continue;
+      const root = zone.root?.position?.map(Number), tip = zone.tip?.position?.map(Number);
+      if (!root || !tip || root.length !== 2 || tip.length !== 2) continue;
+      ctx.strokeStyle = "rgba(255,255,255,0.65)"; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(root[0], root[1]); ctx.lineTo(tip[0], tip[1]); ctx.stroke();
+      ctx.fillStyle = "rgba(103,232,166,0.98)";
+      ctx.beginPath(); ctx.arc(root[0], root[1], 5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "rgba(255,103,126,0.98)";
+      ctx.beginPath(); ctx.arc(tip[0], tip[1], 5, 0, Math.PI * 2); ctx.fill();
+    }
+  }
 }
 
 function r2ChestPart() {
@@ -2862,6 +2933,33 @@ function chestParametricDelta(part, vertexIndex, motion, operation) {
   return [out[0] * influence, out[1] * influence];
 }
 
+/** R5 face-motion correction: lower-face/jaw follow the mouth-open parameter.
+ * The generated config is derived from this character's face and mouth boxes;
+ * this function only evaluates its normalized influence at a mesh vertex. */
+export function jawOpenDelta(part, x, y, motion, operation) {
+  const spec = operation?.config || motion?.jaw_open;
+  if (!spec?.enabled || spec.version !== 1 || part?.spec?.tag !== (spec.target_tag || "face")) {
+    return [0, 0];
+  }
+  const amount = Math.max(0, Math.min(1, Number(motion?.mouthOpen || 0)));
+  if (amount === 0) return [0, 0];
+  const influence = spec.influence || {};
+  const startY = Number(influence.start_y);
+  const endY = Number(influence.end_y);
+  const centerX = Number(influence.center_x);
+  const radiusX = Math.max(1e-6, Number(influence.radius_x));
+  const edgeGain = Math.max(0, Math.min(1, Number(influence.edge_gain ?? 0.45)));
+  if (![startY, endY, centerX, radiusX].every(Number.isFinite) || !(endY > startY)) {
+    return [0, 0];
+  }
+  const vertical = smoothstep(startY, endY, y);
+  const horizontal = 1 - smoothstep(0, 1, Math.min(1, Math.abs(x - centerX) / radiusX));
+  const weight = vertical * (edgeGain + (1 - edgeGain) * horizontal);
+  const faceHeight = Math.max(1, Number(part.spec.xyxy?.[3]) - Number(part.spec.xyxy?.[1]));
+  const drop = faceHeight * Math.max(0, Number(spec.max_drop_ratio || 0)) * amount;
+  return [0, drop * weight];
+}
+
 function geometryOperations(part) {
   // Legacy manifests have no operation list.  Their canonical order is kept
   // as a compatibility adapter; declarative v0.2 manifests use the exact list
@@ -2939,6 +3037,11 @@ export function deform(part, now, motion) {
         case "gaze": {
           const gaze = gazeDelta(part, motion);
           if (gaze[0] !== 0 || gaze[1] !== 0) { x += gaze[0]; y += gaze[1]; }
+          break;
+        }
+        case "jaw_open": {
+          const delta = jawOpenDelta(part, x, y, motion, operation);
+          x += delta[0]; y += delta[1];
           break;
         }
         case "parallax_turn":
@@ -3243,7 +3346,7 @@ function motionGeometryKey(motion) {
   return JSON.stringify({
     turnX: motion.turnX, turnY: motion.turnY, tiltRad: motion.tiltRad,
     shell: motion.shell, blink: motion.blink, squash: motion.squash,
-    mouthOpen: motion.mouthOpen, breath: motion.breath, breathAmp: motion.breathAmp,
+    mouthOpen: motion.mouthOpen, jawOpen: motion.jaw_open, breath: motion.breath, breathAmp: motion.breathAmp,
     lidRatio: motion.lidRatio, lidThickness: motion.lidThickness, chestX: motion.chestX,
     softMorph: motion.softMorph, physics: {
       torso: [torso.value ?? 0, torso.left?.value ?? null, torso.right?.value ?? null],
@@ -3497,6 +3600,7 @@ export function frame(now) {
   }
   drawMotionGraph();
   drawChestTrajectory();
+  drawHairZonesOverlay();
   drawSoftRegionOverlay();
   drawChestBasisOverlay(chestTopwear);
   drawChestParametricOverlay(chestTopwear);
@@ -3535,6 +3639,12 @@ document.getElementById("gazeY").addEventListener("input", () => syncSlider("gaz
 
 document.getElementById("r4DisplayPreset")?.addEventListener("change", (event) => {
   applyDisplayPreset(event.target.value);
+});
+
+document.getElementById("showR5HairZones")?.addEventListener("change", () => {});
+document.getElementById("showR5HairRoots")?.addEventListener("change", () => {});
+document.getElementById("r5HairLayer")?.addEventListener("change", (event) => {
+  state.r5Hair.layer = event.target.value || "all";
 });
 
 document.getElementById("mouthOpen").addEventListener("input", () => {

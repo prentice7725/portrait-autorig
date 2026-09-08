@@ -552,12 +552,11 @@ class RigPreflightAuthoredRegionTests(unittest.TestCase):
         preflight = rig_preflight(self._layers(), rig_intent=rig_intent)
         self.assertEqual(preflight["checks"]["upper_torso_soft_morph"]["status"], "READY")
 
-    def test_rig_intent_present_but_no_matching_region_is_disabled_not_guessed(self):
-        # Master doc invariant #11: an Assembly Bundle whose author did not
-        # author a region must not fall back to the auto-derived guess.
+    def test_rig_intent_present_but_no_matching_region_uses_auto_generated_base(self):
+        # Composer no longer owns final chest geometry.  An Assembly without
+        # a motion hint still needs an editable AutoRig base for Rig Studio.
         preflight = rig_preflight(self._layers(), rig_intent={})
-        self.assertEqual(preflight["checks"]["upper_torso_soft_morph"]["status"], "DISABLED")
-        self.assertIn("no_region", preflight["checks"]["upper_torso_soft_morph"]["reasons"])
+        self.assertEqual(preflight["checks"]["upper_torso_soft_morph"]["status"], "READY")
 
     def test_topwear_alias_is_a_valid_torso_surface(self):
         layers = self._layers()
@@ -592,10 +591,10 @@ class BuildRigAuthoredRegionTests(unittest.TestCase):
         self.assertTrue(spec["enabled"])
         self.assertEqual(manifest["capabilities"]["upper_torso_secondary"], "ready")
 
-    def test_rig_intent_given_but_no_region_authored_disables_rather_than_guesses(self):
+    def test_rig_intent_given_but_no_region_authored_generates_editable_base(self):
         manifest, _ = build_rig(self._layers(), frame_size=(CANVAS, CANVAS), rig_intent={})
         spec = manifest["motion"]["upper_torso_soft_morph"]
-        self.assertEqual(spec["source"], "assembly_rig_intent")
-        self.assertFalse(spec["enabled"])
-        self.assertEqual(spec["status"], "DISABLED")
-        self.assertEqual(manifest["capabilities"]["upper_torso_secondary"], "disabled")
+        self.assertEqual(spec["source"], "topwear_geometry")
+        self.assertTrue(spec["enabled"])
+        self.assertIn("upper_torso_parametric_deformer", manifest["motion"])
+        self.assertEqual(manifest["capabilities"]["upper_torso_secondary"], "ready")

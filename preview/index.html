@@ -107,6 +107,19 @@
      Letterboxing preserves the rig aspect ratio; scroll the stage for a larger
      desk target. This is a display-only QA mode and does not alter the manifest.</p>
 
+  <h2>Hair Zones (R5)</h2>
+  <div class="meta" id="r5HairMeta">Hair detection: not available</div>
+  <label class="row"><input type="checkbox" id="showR5HairZones"> Show detected zones</label>
+  <label class="row"><input type="checkbox" id="showR5HairRoots"> Show root / tip</label>
+  <label>Layer
+    <select id="r5HairLayer" aria-label="R5 hair layer">
+      <option value="all">All supported hair layers</option>
+    </select>
+  </label>
+  <p class="hint">R5 detects only <code>front hair</code>, <code>back hair</code>,
+     and <code>hair</code>. Zones are inspection data; chain and keyform editing
+     remains R6.</p>
+
   <h2>Idle</h2>
   <label class="row"><input type="checkbox" id="autoIdle"> Auto idle motion</label>
   <label class="row"><input type="checkbox" id="bodySway" checked> Body sway</label>

@@ -15,7 +15,7 @@ from typing import Any
 from .parameters import (
     PARAM_ANGLE_X, PARAM_ANGLE_Y, PARAM_ANGLE_Z,
     PARAM_BREATH, PARAM_EYE_L_OPEN, PARAM_EYE_R_OPEN, PARAM_EYEBALL_X, PARAM_EYEBALL_Y,
-    PARAM_UPPER_TORSO_SECONDARY, PARAM_BUST_X, PARAM_BUST_Y,
+    PARAM_UPPER_TORSO_SECONDARY, PARAM_BUST_X, PARAM_BUST_Y, PARAM_MOUTH_OPEN,
     parameter_descriptor, standard_parameter_registry,
 )
 
@@ -23,7 +23,7 @@ __all__ = [
     "RIG_MANIFEST_VERSION_01", "RIG_MANIFEST_VERSION_02", "RIG_MANIFEST_VERSION",
     "DEFORMER_PARALLAX_TURN", "DEFORMER_SHELL_TURN", "DEFORMER_WEIGHTED_ROTATION",
     "DEFORMER_CONTINUOUS_FIELD", "DEFORMER_EYE_FOLD", "DEFORMER_GAZE",
-    "DEFORMER_SPRITE_SWAP", "DEFORMER_VISIBILITY_CURVE", "DEFORMER_LOCAL_SOFT_FIELD", "DEFORMER_CHEST_PARAMETRIC", "DEFORMER_KINDS",
+    "DEFORMER_SPRITE_SWAP", "DEFORMER_VISIBILITY_CURVE", "DEFORMER_LOCAL_SOFT_FIELD", "DEFORMER_CHEST_PARAMETRIC", "DEFORMER_JAW_OPEN", "DEFORMER_KINDS",
     "DEFORMER_STRAND_SPRING", "DEFORMER_UPPER_TORSO_PHYSICS", "physics_deformer_entries",
     "DRIVER_UPPER_TORSO_SECONDARY",
     "PHASE_BASE", "PHASE_PRIMARY", "PHASE_CORRECTIVE", "PHASE_SECONDARY",
@@ -58,12 +58,14 @@ DEFORMER_LOCAL_SOFT_FIELD = "local_soft_field"
 DEFORMER_STRAND_SPRING = "strand_spring"
 DEFORMER_UPPER_TORSO_PHYSICS = "upper_torso_physics"
 DEFORMER_CHEST_PARAMETRIC = "chest_parametric_deformer"
+DEFORMER_JAW_OPEN = "jaw_open"
 DEFORMER_KINDS = frozenset({
     DEFORMER_PARALLAX_TURN, DEFORMER_SHELL_TURN, DEFORMER_WEIGHTED_ROTATION,
     DEFORMER_CONTINUOUS_FIELD, DEFORMER_BODY_SWAY, DEFORMER_EYE_FOLD, DEFORMER_GAZE, DEFORMER_SPRITE_SWAP,
     DEFORMER_VISIBILITY_CURVE,
     DEFORMER_LOCAL_SOFT_FIELD,
     DEFORMER_STRAND_SPRING, DEFORMER_UPPER_TORSO_PHYSICS, DEFORMER_CHEST_PARAMETRIC,
+    DEFORMER_JAW_OPEN,
 })
 
 # UpperTorsoSecondaryDriver (directive v0.2 #18-19): a driver *kind* name,
@@ -181,6 +183,15 @@ def deformers_from_motion(motion: dict[str, Any]) -> list[dict[str, Any]]:
             "parameters": [PARAM_EYEBALL_X, PARAM_EYEBALL_Y],
             "targets": {"tags": ["iridesl", "iridesr", "irides", "eyel", "eyer", "eyes"]},
             "config": config, "phase": PHASE_PRIMARY,
+        })
+
+    jaw_open = motion.get("jaw_open")
+    if isinstance(jaw_open, dict) and jaw_open.get("enabled", True):
+        deformers.append({
+            "id": "jaw_open", "kind": DEFORMER_JAW_OPEN,
+            "parameters": [PARAM_MOUTH_OPEN],
+            "targets": {"tag": jaw_open.get("target_tag", "face")},
+            "config": dict(jaw_open), "phase": PHASE_CORRECTIVE,
         })
 
     curves = motion.get("visibility_curves") or motion.get("visibility_curve")

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
 import cv2
@@ -26,6 +26,8 @@ from .manifest import (
 from .mesh import contour_mesh_spec, mesh_spec, motion_aware_mesh_spec
 from .strand_topology import build_strand_specs
 from .constraints import boundary_stitch_spec, compile_clip_masks
+from .face_motion import build_jaw_open_spec
+from .hair_detection import HAIR_SEMANTIC_TAGS, detect_hair_zones
 from .physics import validate_physics_spec
 from .semantic import SEMANTIC_Z_ORDER
 from .topology import mesh_topology_hash
@@ -162,6 +164,12 @@ def group_for_tag(tag: str) -> str:
     the conservative choice: a mystery layer that fails to follow the head is
     a missed opportunity, while one that follows it can tear off the torso."""
     if tag in HEAD_TAGS:
+        return GROUP_HEAD
+    # Variant state labels are still face-owned geometry.  Composer permits
+    # arbitrary state suffixes (for example ``eyes_closed`` and ``mouth_a``),
+    # so enumerating only the canonical open/closed labels would send donor
+    # layers to the body motion plane and leave them behind during a turn.
+    if tag.startswith(("eye_", "eyes_", "mouth_")):
         return GROUP_HEAD
     if tag in NECK_TAGS:
         return GROUP_NECK
@@ -619,15 +627,12 @@ def rig_preflight(layer_dict: dict[str, np.ndarray], *,
                   alpha_threshold: int = 10) -> dict[str, Any]:
     """Assess rig readiness without re-judging static Portrait validity.
 
-    `rig_intent`, when given (Assembly Bundle input), is Composer's own
-    authored RigIntent (`assembly.AssemblyAsset.rig_intent`). Its presence
-    -- not just a matching region inside it -- is what tells
-    `upper_torso_soft_morph` checking to use `soft_morph.find_authored_
-    region` instead of `derive_upper_torso_soft_region`'s guess: an
-    Assembly Bundle whose author simply did not author a region is still
-    "AutoRig must not invent one" (Master doc #23 invariant #11), not a
-    reason to fall back to Portrait Bundle's legacy auto-derivation. `None`
-    (every Portrait Bundle caller) keeps today's auto-derivation exactly.
+    `rig_intent`, when given (Assembly Bundle input), is Composer's optional
+    motion-hint payload (`assembly.AssemblyAsset.rig_intent`). A matching
+    region may seed the generated base; absence of a matching region uses the
+    character-derived AutoRig base so Rig Studio still receives an editable
+    first rig. `None` (every Portrait Bundle caller) keeps today's
+    auto-derivation exactly.
     """
     available = {
         tag for tag, image in layer_dict.items()
@@ -730,13 +735,19 @@ def rig_preflight(layer_dict: dict[str, np.ndarray], *,
     }
     chest_neck_box = neck_bbox(probe, alpha_threshold=alpha_threshold)
     authored_region = soft_morph.find_authored_region(rig_intent)
-    if rig_intent is not None:
-        # Assembly path: authored region or nothing -- never a guess.
+    if authored_region is not None:
+        # Composer contributes an optional motion hint.  Its rough geometry
+        # can seed the generated base, but it is not the final authoring
+        # truth; Rig Studio corrections resolve on top of this output.
         chest_region = soft_morph.region_from_rig_intent(
             soft_morph.soft_morph_layer(probe), authored_region,
             alpha_threshold=alpha_threshold,
         )
     else:
+        # An Assembly does not need a Composer-authored region in order to
+        # produce an editable first rig.  AutoRig derives a conservative
+        # initial region from this character's own topwear geometry; Rig
+        # Studio can then correct the cage, influence, and attachment.
         chest_region = soft_morph.derive_upper_torso_soft_region(
             soft_morph.soft_morph_layer(probe), neck_box=chest_neck_box,
             alpha_threshold=alpha_threshold,
@@ -1070,6 +1081,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
               variant_sets: dict[str, Any] | None = None,
               expression_presets: dict[str, Any] | None = None,
               variant_layers: dict[str, np.ndarray] | None = None,
+              variant_reference_visibility: Mapping[str, bool] | None = None,
               instance_to_tag: dict[str, str] | None = None,
               variant_draw_order: Sequence[str] | None = None,
               provenance: dict[str, Any] | None = None,
@@ -1123,17 +1135,14 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
     every Portrait Bundle caller) keeps today's self-recomposited check.
 
     `rig_intent`, when given (Assembly Bundle input, `AssemblyAsset.
-    rig_intent`), replaces `upper_torso_soft_morph`'s alpha-guessed region
-    with whatever Composer's C4 `secondary_regions.py` actually authored
-    (`soft_morph.find_authored_region`/`region_from_rig_intent`) -- geometry,
-    locks, author_strength, and response_profile all come from there, not
-    from `derive_upper_torso_soft_region`'s guess; a bundle whose author did
-    not author a region compiles with the field disabled rather than
-    falling back to a guess (Master doc #23 invariant #11). `soft_morph_
-    preflight` still runs unchanged against the authored geometry and the
-    real compiled art -- AutoRig keeps owning geometry/deformation safety
-    even though it no longer decides where the lobes are centred. None (the
-    default, every Portrait Bundle caller) keeps today's auto-derivation.
+    rig_intent`), may seed `upper_torso_soft_morph` from Composer's optional
+    motion hint. Its geometry, locks, author_strength, and response_profile
+    are generated-base inputs only; Rig Studio authoring resolves on top.
+    When no matching hint exists, the character-derived AutoRig region is used
+    so the Assembly still produces an editable first rig. `soft_morph_
+    preflight` still runs unchanged against the selected generated geometry and
+    the real compiled art. None (the default, every Portrait Bundle caller)
+    keeps today's auto-derivation.
     """
     working: dict[str, np.ndarray] = {}
     for tag, img in layer_dict.items():
@@ -1259,6 +1268,15 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
                 derived_report["accepted"] = True
 
     # Stage D.
+    hair_layers = {tag: working[tag] for tag in HAIR_SEMANTIC_TAGS if tag in working}
+    hair_zones = detect_hair_zones(
+        hair_layers, frame_size=(canvas_h, canvas_w), alpha_threshold=alpha_threshold
+    )
+    for tag, zones in hair_zones.get("zones", {}).items():
+        for zone in zones:
+            source_id = (source_instance_ids or {}).get(tag)
+            if source_id:
+                zone["source_instance_id"] = source_id
     neck_box = neck_bbox(working, alpha_threshold=alpha_threshold)
     depths: dict[str, float] = {}
     for tag, arr in working.items():
@@ -1400,13 +1418,20 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         compiled_variants, compiled_presets, variant_deformers, variant_report = compile_variant_bindings(
             variant_sets, expression_presets, instance_to_tag, variant_part_names
         )
-        # Rest/reference validation uses Composer's authored `active` member;
-        # runtime is reset to VariantSet.default immediately after that check.
+        # Assembly callers provide the exact source visibility used to render
+        # reference.png.  This must not be confused with VariantSet.active:
+        # active is an authoring selection and can describe a state different
+        # from the one Composer actually rendered into this bundle.  Direct
+        # build_rig callers without source visibility retain the historical
+        # active-member fallback.
         for set_id, spec in compiled_variants.items():
-            active_members = visible_variant_members(spec, spec["active"])
             for member in spec["members"]:
                 part = next(p for p in parts if p.get("variant_member") == member)
-                part["visible"] = member in active_members
+                if variant_reference_visibility is not None:
+                    part["visible"] = bool(variant_reference_visibility.get(member, False))
+                else:
+                    active_members = visible_variant_members(spec, spec["active"])
+                    part["visible"] = member in active_members
                 part["variant_set"] = set_id
     else:
         compiled_variants, compiled_presets, variant_deformers, variant_report = {}, {}, [], {
@@ -1414,6 +1439,9 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         }
 
     motion_payload = json.loads(json.dumps(motion if motion is not None else DEFAULT_MOTION))
+    jaw_open = build_jaw_open_spec(parts)
+    if jaw_open is not None:
+        motion_payload["jaw_open"] = jaw_open
     if visibility_curves:
         motion_payload["visibility_curves"] = json.loads(json.dumps(list(visibility_curves)))
     manifest = {
@@ -1431,6 +1459,7 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         },
         "anchors": anchors,
         "parts": parts,
+        "hair_zones": hair_zones,
         "motion": motion_payload,
         "rig_preflight": json.loads(json.dumps(preflight)),
     }
@@ -1483,26 +1512,22 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         manifest["source"]["provenance"] = json.loads(json.dumps(provenance))
         manifest["provenance"] = json.loads(json.dumps(provenance))
     if "upper_torso_soft_morph" not in manifest["motion"]:
-        if rig_intent is not None:
-            # Assembly path: Composer's authored region, or explicitly
-            # disabled -- never `derive_upper_torso_soft_region`'s guess
-            # (Master doc #23 invariant #11).
-            authored_region = soft_morph.find_authored_region(rig_intent)
+        authored_region = soft_morph.find_authored_region(rig_intent)
+        if authored_region is not None:
+            # The hint seeds the generated base.  Final corrections remain in
+            # the Rig Project authoring buckets and are applied by resolve.
             manifest["motion"]["upper_torso_soft_morph"] = (
                 soft_morph.authored_upper_torso_soft_morph_spec(
                     authored_region, working, frame_size=(canvas_h, canvas_w),
                     neck_box=neck_box, occluder_alpha=chest_occluder_alpha(working),
                     alpha_threshold=alpha_threshold,
-                ) if authored_region is not None else {
-                    "enabled": False, "mode": "two_lobe", "strength": 0.0,
-                    "source": "assembly_rig_intent", "status": "DISABLED",
-                    "status_reasons": ["no_authored_region"],
-                }
+                )
             )
         else:
             # Data-derived, not a static default: recomputed every run
             # against this character's own `topwear` geometry, the way
-            # anchors are.
+            # anchors are.  This makes the Assembly -> Rig Studio path
+            # editable even when Composer supplied no motion hint.
             manifest["motion"]["upper_torso_soft_morph"] = soft_morph.upper_torso_soft_morph_spec(
                 working, frame_size=(canvas_h, canvas_w), neck_box=neck_box,
                 occluder_alpha=chest_occluder_alpha(working), alpha_threshold=alpha_threshold,
@@ -1534,12 +1559,11 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
                 topwear_part["mesh"]["topology_hash"] = mesh_topology_hash(
                     topwear_part["mesh"], tuple(int(v) for v in topwear_part["xyxy"]))
 
-    # P3-A: Composer-authored torso regions get one continuous cage and
-    # compile-time keyforms.  The legacy Portrait Bundle auto-derived path is
-    # intentionally left on P2.x so rebuilding an old bundle does not silently
-    # change its shape contract.
+    # P3-A: every usable chest surface gets an editable generated cage.  A
+    # Composer motion hint may seed the base, but absence of that hint must
+    # not prevent Rig Studio from authoring the chest.
     p3_spec = manifest["motion"].get("upper_torso_parametric_deformer")
-    if p3_spec is None and soft_spec.get("enabled") and soft_spec.get("source") == "assembly_rig_intent":
+    if p3_spec is None and rig_intent is not None and soft_spec.get("enabled"):
         topwear_part = next((part for part in parts if part.get("tag") in soft_morph.SOFT_MORPH_TAGS), None)
         if topwear_part is not None:
             p3_spec = build_chest_parametric_deformer(
