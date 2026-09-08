@@ -20,6 +20,7 @@ const base = {
   motion: { upper_torso_parametric_deformer: { ranges_px: { x: 6, y: 6 } } },
 };
 const authored = { physics: { upper_torso: {
+  profile: "springy", input_mode: "translation", enabled: true,
   natural_frequency_hz: 2.7, damping_ratio: 0.42, lag_seconds_y: 0.8,
   max_displacement_px: 9.5,
 } }, deformers: { upper_torso: { range_override: { x: 7, y: 11 } } } };
@@ -34,6 +35,13 @@ if (resolved.physics.upper_torso_driver.natural_frequency_hz !== 2.7
   throw new Error("R3 physics authoring did not resolve into the runtime driver");
 const ranges = resolved.motion.upper_torso_parametric_deformer.ranges_px;
 if (ranges.x !== 7 || ranges.y !== 11) throw new Error("R3 range correction did not resolve");
+const driverSpec = resolved.physics.upper_torso_driver;
+createUpperTorsoSecondaryDriver({
+  model: driverSpec.model, profile: driverSpec.profile, inputMode: driverSpec.input_mode,
+  naturalFrequencyHz: driverSpec.natural_frequency_hz, dampingRatio: driverSpec.damping_ratio,
+  lagSecondsX: driverSpec.lag_seconds_x, lagSecondsY: driverSpec.lag_seconds_y,
+  maxDisplacementPx: driverSpec.max_displacement_px,
+});
 
 const make = (frequency, damping, max) => createUpperTorsoSecondaryDriver({
   model: "inertial_relative_v2", naturalFrequencyHz: frequency, dampingRatio: damping,

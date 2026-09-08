@@ -28,9 +28,12 @@
     font: 13px/1.5 ui-sans-serif, system-ui, "Segoe UI", sans-serif;
     display: grid; grid-template-columns: 1fr 320px; height: 100vh;
   }
-  #stage { position: relative; display: grid; place-items: center; overflow: hidden; }
-  #canvasWrap { position: relative; max-width: 100%; max-height: 100vh; }
-  canvas { max-width: 100%; max-height: 100vh; display: block; }
+  #stage { position: relative; display: flex; align-items: center; justify-content: center;
+           overflow: auto; padding: 16px; }
+  #canvasWrap { position: relative; display: grid; place-items: center; flex: 0 0 auto;
+                background: #0c0e12; box-shadow: 0 0 0 1px rgba(255,255,255,.06); }
+  canvas { display: block; }
+  canvas.r4-sized { max-width: none; max-height: none; }
   #regionOverlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   #regionOverlay.r2-editable { pointer-events: auto; cursor: crosshair; }
   #drop {
@@ -90,6 +93,19 @@
   <div class="meta" id="runmeta">no run loaded</div>
   <div id="physicsWarning" class="warn" hidden></div>
   <div class="meta" id="profiler">profiler waiting</div>
+
+  <h2>Preview Size (R4)</h2>
+  <label>Display preset
+    <select id="r4DisplayPreset" aria-label="Game preview display preset">
+      <option value="full">100%</option>
+      <option value="game_portrait">Game portrait</option>
+      <option value="desk_portrait">Desk portrait</option>
+    </select>
+  </label>
+  <div class="meta" id="r4DisplayMeta">Preview size: not loaded</div>
+  <p class="hint">The viewport is shown at the selected deployment size.
+     Letterboxing preserves the rig aspect ratio; scroll the stage for a larger
+     desk target. This is a display-only QA mode and does not alter the manifest.</p>
 
   <h2>Idle</h2>
   <label class="row"><input type="checkbox" id="autoIdle"> Auto idle motion</label>
