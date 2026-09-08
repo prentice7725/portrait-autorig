@@ -494,6 +494,8 @@ export function clearChestAuthoring(sourceAuthoring = null) {
   const authoring = cloneJson(sourceAuthoring || { version: 1, deformers: {} });
   authoring.deformers ||= {};
   delete authoring.deformers[R2_CHEST_DEFORMER_ID];
+  for (const bucket of ["keyform_overrides", "cage_overrides"])
+    delete authoring[bucket]?.[R2_CHEST_DEFORMER_ID];
   return authoring;
 }
 
@@ -2732,7 +2734,7 @@ async function persistR2Authoring(message = "R2 correction saved", options = {})
   if (written) document.getElementById("r2Meta").textContent = message;
 }
 
-function chestParametricValues(motion, spec) {
+export function chestParametricValues(motion, spec) {
   const names = spec.parameters || { x: "ParamBustX", y: "ParamBustY" };
   const direct = state.motionQA?.p3Pose;
   if (direct) return {

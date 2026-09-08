@@ -113,7 +113,11 @@ Runtime.deform(correctedPart, 0, motion);
 for (let index = 0; index < autoRest.length; index++)
 if (Math.abs(correctedPart.mesh.live[index] - autoRest[index]) > 1e-6)
     throw new Error("R2 neutral pose is not exact rest");
-const cleared = Runtime.clearChestAuthoring(saved);
+const cleared = Runtime.clearChestAuthoring({ ...saved,
+  physics: { upper_torso: { natural_frequency_hz: 2.7 } },
+});
 if (Object.hasOwn(cleared.deformers, "upper_torso"))
   throw new Error("R2 reset left a chest override behind");
+if (cleared.physics.upper_torso.natural_frequency_hz !== 2.7)
+  throw new Error("R2 reset deleted R3 physics authoring");
 console.log(`R2 chest authoring passed (cage delta ${cageDifference.toFixed(3)}px, neutral exact rest)`);

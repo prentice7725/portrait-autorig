@@ -193,10 +193,20 @@ def test_r3_chest_physics_and_ranges_round_trip_separately_from_shape(tmp_path):
     }}
     project = create_rig_project(tmp_path / "A002.rigproject", manifest, _images())
     set_chest_physics(project, {
+        "profile": "springy", "input_mode": "translation", "enabled": True,
         "natural_frequency_hz": 2.7, "damping_ratio": 0.42,
         "lag_seconds_y": 0.8, "max_displacement_px": 9.5,
     })
     set_chest_parameter_range(project, {"x": 7.0, "y": 11.0})
+    set_chest_keyform(project, "bust_y_pos", _points(20))
+    with pytest.raises(ValueError):
+        set_chest_physics(project, {"profile": "custom"})
+    with pytest.raises(ValueError):
+        set_chest_physics(project, {"input_mode": "angular_velocity"})
+    with pytest.raises(ValueError):
+        set_chest_physics(project, {"enabled": "yes"})
+    with pytest.raises(ValueError):
+        set_chest_physics(project, {"idle_lag_max_px": 0})
     project.save()
 
     loaded = load_rig_project(project.root)
@@ -210,10 +220,17 @@ def test_r3_chest_physics_and_ranges_round_trip_separately_from_shape(tmp_path):
     assert loaded.generated_manifest["physics"]["upper_torso_driver"]["damping_ratio"] == 0.75
     assert (project.root / "authoring" / "physics.json").is_file()
 
-    reset_chest_physics_to_auto(loaded)
-    assert "upper_torso" not in loaded.authoring["physics"]
-    assert "range_override" not in loaded.authoring["deformers"].get("upper_torso", {})
-    assert loaded.resolved_manifest["physics"]["upper_torso_driver"]["damping_ratio"] == 0.75
+    reset_chest_to_auto(loaded)
+    assert loaded.authoring["deformers"] == {}
+    assert loaded.authoring["physics"]["upper_torso"]["profile"] == "springy"
+    loaded.save()
+    after_shape_reset = load_rig_project(loaded.root)
+    assert after_shape_reset.authoring["physics"]["upper_torso"]["natural_frequency_hz"] == 2.7
+
+    reset_chest_physics_to_auto(after_shape_reset)
+    assert "upper_torso" not in after_shape_reset.authoring["physics"]
+    assert after_shape_reset.authoring["deformers"] == {}
+    assert after_shape_reset.resolved_manifest["physics"]["upper_torso_driver"]["damping_ratio"] == 0.75
 
 
 def test_open_legacy_rig_uses_separate_project_and_stays_match_after_save(tmp_path):

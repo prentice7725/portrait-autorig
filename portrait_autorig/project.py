@@ -22,6 +22,8 @@ from typing import Any, Mapping
 import numpy as np
 from PIL import Image
 
+from .physics import INPUT_MODES, UpperTorsoSecondaryDriver
+
 RIG_PROJECT_FORMAT = "portrait-rig-project"
 RIG_PROJECT_VERSION = 1
 AUTHORING_VERSION = 1
@@ -530,8 +532,9 @@ def set_chest_physics(project: RigProject, override: Mapping[str, Any]) -> None:
     if unknown:
         raise ValueError(f"unsupported chest physics fields: {sorted(unknown)}")
     values = _json_copy(override)
-    positive = ("natural_frequency_hz", "max_displacement_px", "max_velocity_px_s")
-    nonnegative = ("lag_seconds_x", "lag_seconds_y", "idle_lag_max_px", "kick_lag_max_px")
+    positive = ("natural_frequency_hz", "max_displacement_px", "max_velocity_px_s",
+                "idle_lag_max_px", "kick_lag_max_px")
+    nonnegative = ("lag_seconds_x", "lag_seconds_y")
     for field in (*positive, *nonnegative, "damping_ratio"):
         if field not in values:
             continue
@@ -545,15 +548,19 @@ def set_chest_physics(project: RigProject, override: Mapping[str, Any]) -> None:
             raise ValueError(f"chest physics {field} must be positive")
         if field in nonnegative and number < 0:
             raise ValueError(f"chest physics {field} must be non-negative")
-        if field == "damping_ratio" and not 0 <= number <= 2:
-            raise ValueError("chest physics damping_ratio must be in [0, 2]")
+        if field == "damping_ratio" and number < 0:
+            raise ValueError("chest physics damping_ratio must be non-negative")
         values[field] = number
-    if "profile" in values and values["profile"] not in {"soft", "firm_bounce", "springy", "custom"}:
+    if "profile" in values and values["profile"] not in UpperTorsoSecondaryDriver.PROFILES:
         raise ValueError("unsupported chest physics profile")
+    if "input_mode" in values and values["input_mode"] not in INPUT_MODES:
+        raise ValueError("unsupported chest physics input_mode")
     if "model" in values and values["model"] not in {
         "legacy_target_v1", "inertial_relative_v1", "inertial_relative_v2"
     }:
         raise ValueError("unsupported chest physics model")
+    if "enabled" in values and not isinstance(values["enabled"], bool):
+        raise ValueError("chest physics enabled must be a boolean")
     project.authoring.setdefault("physics", {}).setdefault(CHEST_DEFORMER_ID, {}).update(values)
     project.resolve()
 
@@ -586,7 +593,14 @@ def set_chest_parameter_range(project: RigProject, ranges: Mapping[str, Any]) ->
 
 def reset_chest_to_auto(project: RigProject) -> None:
     """Reset only the authored P3 chest shape to the generated base."""
-    reset_current_deformer_to_auto(project, CHEST_DEFORMER_ID)
+    override = project.authoring.setdefault("deformers", {}).get(CHEST_DEFORMER_ID)
+    if isinstance(override, dict):
+        # R2 owns the shape correction and its range/cage payload.  Physics is
+        # an independent R3 bucket and must survive this operation.
+        project.authoring["deformers"].pop(CHEST_DEFORMER_ID, None)
+    for bucket in ("keyform_overrides", "cage_overrides"):
+        project.authoring.setdefault(bucket, {}).pop(CHEST_DEFORMER_ID, None)
+    project.resolve()
 
 
 def reset_chest_physics_to_auto(project: RigProject) -> None:
