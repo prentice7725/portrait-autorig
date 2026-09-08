@@ -50,6 +50,7 @@ const { weightAt, buildMesh, deform, state, scheduleBlink, startBlink, blinkAmou
         expressionSwap, opacityOf, SWAP_HI, motionFromDeformers, bodySwayPosition } = Runtime;
 const { applyVariantSet, applyExpressionPreset, evaluateVisibilityPhase } = Runtime;
 const { evaluateAllPhases } = Runtime;
+const { jawOpenDelta } = Runtime;
 
 let failures = 0;
 function check(name, cond, detail = "") {
@@ -66,6 +67,22 @@ check("midpoint is halfway", near(weightAt(grad, 150), 0.275));
 check("above the band clamps to top", near(weightAt(grad, 0), 0.55));
 check("below the band clamps to bottom", near(weightAt(grad, 999), 0.0));
 check("constant mode is flat", near(weightAt({ mode: "constant", value: 0.16 }, 12), 0.16));
+
+console.log("\njaw-open corrective deformation");
+const jawPart = { spec: { tag: "face", xyxy: [100, 40, 300, 340] } };
+const jawOperation = { kind: "jaw_open", config: {
+  version: 1, enabled: true, target_tag: "face", max_drop_ratio: 0.028,
+  influence: { start_y: 170, end_y: 340, center_x: 200, radius_x: 120, edge_gain: 0.45 },
+} };
+check("jaw neutral preserves exact rest", near(jawOpenDelta(jawPart, 200, 260,
+  { mouthOpen: 0 }, jawOperation)[1], 0));
+check("jaw open moves lower face down", jawOpenDelta(jawPart, 200, 300,
+  { mouthOpen: 1 }, jawOperation)[1] > 0);
+check("jaw open leaves upper face unchanged", near(jawOpenDelta(jawPart, 200, 100,
+  { mouthOpen: 1 }, jawOperation)[1], 0));
+check("jaw target binding is strict", near(jawOpenDelta(
+  { spec: { tag: "head", xyxy: [100, 40, 300, 340] } }, 200, 300,
+  { mouthOpen: 1 }, jawOperation)[1], 0));
 
 console.log("\ncontour mesh (P1-A, absorption plan #8)");
 {

@@ -129,6 +129,15 @@ class DeformersFromMotionTests(unittest.TestCase):
         self.assertEqual(deformers[0]["config"]["max_x"], 0.2)
         self.assertIn("max_y", deformers[0]["config"])
 
+    def test_jaw_open_becomes_corrective_mouth_deformer(self):
+        deformers = manifest.deformers_from_motion({
+            "jaw_open": {"target_tag": "face", "max_drop_ratio": 0.028},
+        })
+        self.assertEqual(len(deformers), 1)
+        self.assertEqual(deformers[0]["kind"], "jaw_open")
+        self.assertEqual(deformers[0]["phase"], "corrective")
+        self.assertEqual(deformers[0]["parameters"], ["ParamMouthOpenY"])
+
     def test_visibility_curves_are_visibility_deformers(self):
         deformers = manifest.deformers_from_motion({
             "visibility_curves": [{

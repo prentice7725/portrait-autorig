@@ -91,6 +91,11 @@ class AssemblyAsset:
     # Composer members are LayerInstance ids; retain their positioned images
     # and semantic tags even when inactive so runtime swapping is lossless.
     instance_layers: dict[str, np.ndarray]
+    # Composer's actual source visibility is the only trustworthy state for
+    # validating reference.png.  It is intentionally separate from
+    # VariantSet.active, which is an authoring selection and may describe a
+    # state that was not used to render this bundle's reference.
+    variant_visibility: dict[str, bool]
     instance_to_tag: dict[str, str]
     instance_draw_order: list[str]
     reference: np.ndarray              # Composer's own rendered reference.png
@@ -299,6 +304,7 @@ def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
         for member in (spec.get("members") or [])
     }
     instance_layers: dict[str, np.ndarray] = {}
+    variant_visibility: dict[str, bool] = {}
     instance_to_tag: dict[str, str] = {}
     instance_draw_order: list[str] = []
     for inst_id in draw_order_ids:
@@ -326,6 +332,10 @@ def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
                 full = Image.new("RGBA", (width, height), (0, 0, 0, 0))
                 full.alpha_composite(positioned, dest=(x, y))
                 instance_layers[str(inst_id)] = np.array(full, dtype=np.uint8)
+                variant_visibility[str(inst_id)] = bool(
+                    inst.get("visible", True)
+                    and float(inst.get("opacity", 1.0)) > 0.0
+                )
             if (not inst.get("visible", True)
                     or float(inst.get("opacity", 1.0)) <= 0.0
                     or str(inst_id) in variant_member_ids):
@@ -376,6 +386,7 @@ def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
         variant_sets=variant_sets,
         expressions=manifest.get("expressions") or {},
         instance_layers=instance_layers,
+        variant_visibility=variant_visibility,
         instance_to_tag=instance_to_tag,
         instance_draw_order=instance_draw_order,
         reference=reference,
