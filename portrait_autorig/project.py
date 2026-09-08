@@ -205,6 +205,15 @@ class RigProject:
     ) -> None:
         set_chest_keyform(self, pose, points)
 
+    def set_chest_physics(self, override: Mapping[str, Any]) -> None:
+        set_chest_physics(self, override)
+
+    def set_chest_parameter_range(self, ranges: Mapping[str, Any]) -> None:
+        set_chest_parameter_range(self, ranges)
+
+    def reset_chest_physics_to_auto(self) -> None:
+        reset_chest_physics_to_auto(self)
+
     def reset_chest_to_auto(self) -> None:
         reset_chest_to_auto(self)
 
@@ -374,7 +383,14 @@ def resolve_rig(generated_manifest: Mapping[str, Any],
     if authoring_data.get("physics") and isinstance(authoring_data.get("physics"), Mapping):
         if not isinstance(resolved.get("physics"), dict):
             resolved["physics"] = {}
-        _deep_merge(resolved["physics"], authoring_data["physics"])
+        # Authoring calls the editable chest bucket ``upper_torso`` while
+        # the runtime manifest keeps its historical driver key.
+        for key, value in authoring_data["physics"].items():
+            target_key = "upper_torso_driver" if key == "upper_torso" else key
+            if isinstance(value, Mapping) and isinstance(resolved["physics"].get(target_key), dict):
+                _deep_merge(resolved["physics"][target_key], value)
+            else:
+                resolved["physics"][target_key] = _json_copy(value)
     if (authoring_data.get("parameter_ranges")
             and isinstance(authoring_data.get("parameter_ranges"), Mapping)):
         if not isinstance(resolved.get("parameter_ranges"), dict):
@@ -499,9 +515,89 @@ def set_chest_keyform(project: RigProject, pose: str,
     project.resolve()
 
 
+_CHEST_PHYSICS_FIELDS = {
+    "profile", "model", "input_mode", "natural_frequency_hz", "damping_ratio",
+    "lag_seconds_x", "lag_seconds_y", "max_displacement_px", "max_velocity_px_s",
+    "idle_lag_max_px", "kick_lag_max_px", "enabled",
+}
+
+
+def set_chest_physics(project: RigProject, override: Mapping[str, Any]) -> None:
+    """Persist explicit R3 chest timing/response calibration values."""
+    if not isinstance(override, Mapping) or not override:
+        raise ValueError("chest physics override must be a non-empty object")
+    unknown = set(override) - _CHEST_PHYSICS_FIELDS
+    if unknown:
+        raise ValueError(f"unsupported chest physics fields: {sorted(unknown)}")
+    values = _json_copy(override)
+    positive = ("natural_frequency_hz", "max_displacement_px", "max_velocity_px_s")
+    nonnegative = ("lag_seconds_x", "lag_seconds_y", "idle_lag_max_px", "kick_lag_max_px")
+    for field in (*positive, *nonnegative, "damping_ratio"):
+        if field not in values:
+            continue
+        try:
+            number = float(values[field])
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"chest physics {field} must be finite") from error
+        if not np.isfinite(number):
+            raise ValueError(f"chest physics {field} must be finite")
+        if field in positive and number <= 0:
+            raise ValueError(f"chest physics {field} must be positive")
+        if field in nonnegative and number < 0:
+            raise ValueError(f"chest physics {field} must be non-negative")
+        if field == "damping_ratio" and not 0 <= number <= 2:
+            raise ValueError("chest physics damping_ratio must be in [0, 2]")
+        values[field] = number
+    if "profile" in values and values["profile"] not in {"soft", "firm_bounce", "springy", "custom"}:
+        raise ValueError("unsupported chest physics profile")
+    if "model" in values and values["model"] not in {
+        "legacy_target_v1", "inertial_relative_v1", "inertial_relative_v2"
+    }:
+        raise ValueError("unsupported chest physics model")
+    project.authoring.setdefault("physics", {}).setdefault(CHEST_DEFORMER_ID, {}).update(values)
+    project.resolve()
+
+
+def set_chest_parameter_range(project: RigProject, ranges: Mapping[str, Any]) -> None:
+    """Persist the R3 BustX/BustY-to-pixel range correction."""
+    if not isinstance(ranges, Mapping):
+        raise TypeError("chest parameter range must be an object")
+    values: dict[str, float] = {}
+    for axis in ("x", "y"):
+        if axis not in ranges:
+            continue
+        try:
+            value = float(ranges[axis])
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"chest range {axis} must be finite") from error
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f"chest range {axis} must be positive and finite")
+        values[axis] = value
+    if not values:
+        raise ValueError("chest parameter range requires x and/or y")
+    override = dict(project.authoring.setdefault("deformers", {}).get(CHEST_DEFORMER_ID) or {})
+    override.update(_chest_binding(project))
+    current = dict(override.get("range_override") or {})
+    current.update(values)
+    override["range_override"] = current
+    project.authoring["deformers"][CHEST_DEFORMER_ID] = override
+    project.resolve()
+
+
 def reset_chest_to_auto(project: RigProject) -> None:
     """Reset only the authored P3 chest shape to the generated base."""
     reset_current_deformer_to_auto(project, CHEST_DEFORMER_ID)
+
+
+def reset_chest_physics_to_auto(project: RigProject) -> None:
+    """Reset R3 physics/ranges while retaining any R2 shape correction."""
+    project.authoring.setdefault("physics", {}).pop(CHEST_DEFORMER_ID, None)
+    override = project.authoring.setdefault("deformers", {}).get(CHEST_DEFORMER_ID)
+    if isinstance(override, dict):
+        override.pop("range_override", None)
+        if not any(key in override for key in ("cage_override", "keyform_overrides", "patch")):
+            project.authoring["deformers"].pop(CHEST_DEFORMER_ID, None)
+    project.resolve()
 
 
 def reset_current_pose(project: RigProject) -> None:
@@ -757,5 +853,6 @@ __all__ = [
     "reset_entire_rig_to_auto", "CHEST_DEFORMER_ID", "CHEST_KEYFORM_NAMES",
     "CHEST_EDITABLE_KEYFORM_NAMES",
     "set_chest_cage_bounds", "set_chest_cage_points", "set_chest_keyform",
+    "set_chest_physics", "set_chest_parameter_range", "reset_chest_physics_to_auto",
     "reset_chest_to_auto",
 ]

@@ -17,11 +17,14 @@ from portrait_autorig.project import (
     reset_current_pose,
     reset_entire_rig_to_auto,
     reset_chest_to_auto,
+    reset_chest_physics_to_auto,
     resolve_binding,
     resolve_rig,
     set_chest_cage_bounds,
     set_chest_cage_points,
     set_chest_keyform,
+    set_chest_physics,
+    set_chest_parameter_range,
 )
 
 
@@ -178,6 +181,39 @@ def test_chest_authoring_helpers_persist_cage_and_keyform_without_physics(tmp_pa
 
     with pytest.raises(ValueError):
         reloaded.set_chest_keyform("neutral", _points())
+
+
+def test_r3_chest_physics_and_ranges_round_trip_separately_from_shape(tmp_path):
+    manifest = _manifest()
+    manifest["physics"] = {"upper_torso_driver": {
+        "model": "inertial_relative_v2", "profile": "soft",
+        "natural_frequency_hz": 1.8, "damping_ratio": 0.75,
+        "lag_seconds_x": 0.0, "lag_seconds_y": 1.4,
+        "max_displacement_px": 16.0,
+    }}
+    project = create_rig_project(tmp_path / "A002.rigproject", manifest, _images())
+    set_chest_physics(project, {
+        "natural_frequency_hz": 2.7, "damping_ratio": 0.42,
+        "lag_seconds_y": 0.8, "max_displacement_px": 9.5,
+    })
+    set_chest_parameter_range(project, {"x": 7.0, "y": 11.0})
+    project.save()
+
+    loaded = load_rig_project(project.root)
+    assert loaded.authoring["physics"]["upper_torso"]["damping_ratio"] == 0.42
+    driver = loaded.resolved_manifest["physics"]["upper_torso_driver"]
+    assert driver["natural_frequency_hz"] == 2.7
+    assert driver["max_displacement_px"] == 9.5
+    assert loaded.resolved_manifest["motion"]["upper_torso_parametric_deformer"]["ranges_px"] == {
+        "x": 7.0, "y": 11.0,
+    }
+    assert loaded.generated_manifest["physics"]["upper_torso_driver"]["damping_ratio"] == 0.75
+    assert (project.root / "authoring" / "physics.json").is_file()
+
+    reset_chest_physics_to_auto(loaded)
+    assert "upper_torso" not in loaded.authoring["physics"]
+    assert "range_override" not in loaded.authoring["deformers"].get("upper_torso", {})
+    assert loaded.resolved_manifest["physics"]["upper_torso_driver"]["damping_ratio"] == 0.75
 
 
 def test_open_legacy_rig_uses_separate_project_and_stays_match_after_save(tmp_path):
