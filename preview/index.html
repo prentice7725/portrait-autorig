@@ -124,6 +124,38 @@
     <button id="chest2px">Chest 2px</button>
     <button id="chest4px">Chest 4px</button>
   </div>
+  <h2>Chest Physics Calibration (R3)</h2>
+  <div class="meta" id="r3Meta">R3 calibration: no physics driver</div>
+  <label>Preset
+    <select id="r3Preset" aria-label="Chest physics preset">
+      <option value="soft">Soft</option>
+      <option value="firm">Firm</option>
+      <option value="springy">Springy</option>
+    </select>
+  </label>
+  <div class="row">
+    <button id="r3ApplyPreset">Apply Preset</button>
+    <button id="r3Save">Save Calibration</button>
+    <button id="r3Reset">Reset Physics to Auto</button>
+  </div>
+  <label>Natural frequency <span class="val" id="r3Frequencyv">1.80 Hz</span>
+    <input type="range" id="r3Frequency" min="0.5" max="4" step="0.01" value="1.8"></label>
+  <label>Damping ratio <span class="val" id="r3Dampingv">0.75</span>
+    <input type="range" id="r3Damping" min="0" max="2" step="0.01" value="0.75"></label>
+  <label>Range X <span class="val" id="r3RangeXv">6.00px</span>
+    <input type="range" id="r3RangeX" min="0.1" max="64" step="0.1" value="6"></label>
+  <label>Range Y <span class="val" id="r3RangeYv">6.00px</span>
+    <input type="range" id="r3RangeY" min="0.1" max="64" step="0.1" value="6"></label>
+  <label>Lag X <span class="val" id="r3LagXv">0.00s</span>
+    <input type="range" id="r3LagX" min="0" max="5" step="0.01" value="0"></label>
+  <label>Lag Y <span class="val" id="r3LagYv">1.40s</span>
+    <input type="range" id="r3LagY" min="0" max="5" step="0.01" value="1.4"></label>
+  <label>Max displacement <span class="val" id="r3MaxDisplacementv">16.00px</span>
+    <input type="range" id="r3MaxDisplacement" min="0.1" max="64" step="0.1" value="16"></label>
+  <p class="hint">R3 changes timing and physical response only. Body Kick X/Y
+     and Auto idle above are live probes; BustX/Y shape authoring remains in
+     R2. Save Calibration writes <code>authoring/physics.json</code> and the
+     range correction separately from the generated base.</p>
   <label class="row"><input type="checkbox" id="doSoftMorph"> Chest Soft Morph</label>
   <label>Strength <span class="val" id="softStrengthv">0.00</span>
     <input type="range" id="softStrength" min="0" max="1" step="0.01" value="0"></label>

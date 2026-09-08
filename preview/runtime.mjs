@@ -337,6 +337,7 @@ export const state = {
   frameOperations: null,
   r2: { pose: "bust_x_neg", editTarget: "keyform", editMode: false,
         activePoint: null, dragging: false, dirty: false },
+  r3: { dirty: false },
   t0: performance.now(),
 };
 
@@ -393,6 +394,9 @@ export function applyChestAuthoring(manifest, authoring) {
       deepMergeObject(spec[targetKey] || (spec[targetKey] = {}), value);
     }
   }
+  if (override.range_override && typeof override.range_override === "object") {
+    deepMergeObject(spec.ranges_px || (spec.ranges_px = {}), override.range_override);
+  }
   const currentRestPoints = spec.cage?.rest_points;
   if (Array.isArray(baseRestPoints) && Array.isArray(currentRestPoints)
       && baseRestPoints.length === currentRestPoints.length
@@ -424,6 +428,20 @@ export function applyChestAuthoring(manifest, authoring) {
       && (!spec.target_part || !config.target_part || spec.target_part === config.target_part);
     if (sameTarget) deformer.config = cloneJson(spec);
   }
+  return resolved;
+}
+
+/** Project R3's separated physics authoring bucket into the historical
+ * runtime driver key.  No bucket means byte-equivalent generated behavior. */
+export function applyPhysicsAuthoring(manifest, authoring) {
+  const resolved = cloneJson(manifest);
+  const physics = authoring?.physics;
+  if (!physics || typeof physics !== "object") return resolved;
+  const override = physics.upper_torso || physics.upper_torso_driver;
+  if (!override || typeof override !== "object") return resolved;
+  resolved.physics ||= {};
+  resolved.physics.upper_torso_driver = deepMergeObject(
+    cloneJson(resolved.physics.upper_torso_driver || {}), override);
   return resolved;
 }
 
@@ -1460,12 +1478,50 @@ export function motionFromDeformers(manifest) {
   return motion;
 }
 
+function createPhysicsDrivers(manifest, p3ParametricActive = false) {
+  const physicsSpec = manifest.physics || null;
+  if (!physicsSpec) return null;
+  const config = physicsSpec.config || {};
+  const drivers = {};
+  const strandSpec = physicsSpec.strand_driver;
+  if (strandSpec?.enabled !== false && Array.isArray(strandSpec?.strands) && strandSpec.strands.length) {
+    drivers.strand = createStrandSpringDriver(strandSpec.strands, {
+      stiffness: strandSpec.stiffness, damping: strandSpec.damping,
+      mass: strandSpec.mass, input_mode: strandSpec.input_mode || "translation", config,
+    });
+  }
+  const torsoSpec = physicsSpec.upper_torso_driver;
+  if (torsoSpec?.enabled !== false && torsoSpec) {
+    drivers.torso = createUpperTorsoSecondaryDriver({
+      model: torsoSpec.model || "legacy_target_v1", profile: torsoSpec.profile || "soft",
+      translationGain: torsoSpec.translation_gain ?? 1, angleGain: torsoSpec.angle_gain ?? 0.25,
+      turnAsymmetry: torsoSpec.turn_asymmetry ?? 0.08, velocityGain: torsoSpec.velocity_gain ?? 0.03,
+      accelerationGain: torsoSpec.acceleration_gain ?? 0.005, breathGain: torsoSpec.breath_gain ?? 1,
+      poseBiasGain: torsoSpec.pose_bias_gain ?? 0.05, inertiaGainX: torsoSpec.inertia_gain_x ?? 0.015,
+      inertiaGainY: torsoSpec.inertia_gain_y ?? 0.045, velocityDragX: torsoSpec.velocity_drag_x ?? 0.002,
+      velocityDragY: torsoSpec.velocity_drag_y ?? 0.006, settleGain: torsoSpec.settle_gain ?? 0.08,
+      leftMaterialScale: torsoSpec.left_material_scale || {}, rightMaterialScale: torsoSpec.right_material_scale || {},
+      breathDisplacementPx: torsoSpec.breath_displacement_px ?? 0.8, poseBiasPx: torsoSpec.pose_bias_px ?? 0.15,
+      inertiaCouplingX: torsoSpec.inertia_coupling_x ?? 0.08, inertiaCouplingY: torsoSpec.inertia_coupling_y ?? 0.3,
+      dragCouplingX: torsoSpec.drag_coupling_x ?? 0.01, dragCouplingY: torsoSpec.drag_coupling_y ?? 0.02,
+      lagSecondsX: torsoSpec.lag_seconds_x ?? 0, lagSecondsY: torsoSpec.lag_seconds_y ?? 1.4,
+      idleLagMaxPx: torsoSpec.idle_lag_max_px ?? 5.0, kickLagMaxPx: torsoSpec.kick_lag_max_px ?? 12.0,
+      naturalFrequencyHz: torsoSpec.natural_frequency_hz, dampingRatio: torsoSpec.damping_ratio,
+      maxDisplacementPx: torsoSpec.max_displacement_px ?? 16, maxVelocityPxS: torsoSpec.max_velocity_px_s ?? 24,
+      settleTimeScaleS: torsoSpec.settle_time_scale_s ?? 0.03, separateBreath: p3ParametricActive,
+      inputMode: torsoSpec.input_mode || "translation", config,
+    });
+  }
+  return Object.keys(drivers).length ? drivers : null;
+}
+
 export function build(manifest, images, options = {}) {
   const canvas = document.getElementById("gl");
   const overlayCanvas = document.getElementById("regionOverlay");
   state.autoManifest = cloneJson(options.autoManifest || manifest);
   state.authoring = cloneJson(options.authoring || null);
-  manifest = applyChestAuthoring(state.autoManifest, state.authoring);
+  manifest = applyPhysicsAuthoring(
+    applyChestAuthoring(state.autoManifest, state.authoring), state.authoring);
   manifest = { ...manifest, motion: motionFromDeformers(manifest) };
   state.manifest = manifest;
   state.parameters = {};
@@ -1485,62 +1541,13 @@ export function build(manifest, images, options = {}) {
   state.calibrationRequested = 0;
   state.r2 = { pose: "bust_x_neg", editTarget: "keyform", editMode: false,
     activePoint: null, dragging: false, dirty: false };
-  const physicsSpec = manifest.physics || null;
+  state.r3 = { dirty: false };
   const p3SpecForPhysics = manifest.motion?.upper_torso_parametric_deformer;
   const p3ParametricActive = p3SpecForPhysics?.enabled !== false
     && Boolean(p3SpecForPhysics) && p3SpecForPhysics.breath_isolated !== false;
   state.p3SeparateBreath = p3ParametricActive;
-  if (physicsSpec) {
-    const config = physicsSpec.config || {};
-    state.physicsDrivers = {};
-    const strandSpec = physicsSpec.strand_driver;
-    if (strandSpec?.enabled !== false && Array.isArray(strandSpec?.strands) && strandSpec.strands.length) {
-      state.physicsDrivers.strand = createStrandSpringDriver(strandSpec.strands, {
-        stiffness: strandSpec.stiffness, damping: strandSpec.damping,
-        mass: strandSpec.mass, input_mode: strandSpec.input_mode || "translation", config,
-      });
-    }
-    const torsoSpec = physicsSpec.upper_torso_driver;
-    if (torsoSpec?.enabled !== false && torsoSpec) {
-      state.physicsDrivers.torso = createUpperTorsoSecondaryDriver({
-        model: torsoSpec.model || "legacy_target_v1",
-        profile: torsoSpec.profile || "soft",
-        translationGain: torsoSpec.translation_gain ?? 1,
-        angleGain: torsoSpec.angle_gain ?? 0.25,
-        turnAsymmetry: torsoSpec.turn_asymmetry ?? 0.08,
-        velocityGain: torsoSpec.velocity_gain ?? 0.03,
-        accelerationGain: torsoSpec.acceleration_gain ?? 0.005,
-        breathGain: torsoSpec.breath_gain ?? 1,
-        poseBiasGain: torsoSpec.pose_bias_gain ?? 0.05,
-        inertiaGainX: torsoSpec.inertia_gain_x ?? 0.015,
-        inertiaGainY: torsoSpec.inertia_gain_y ?? 0.045,
-        velocityDragX: torsoSpec.velocity_drag_x ?? 0.002,
-        velocityDragY: torsoSpec.velocity_drag_y ?? 0.006,
-        settleGain: torsoSpec.settle_gain ?? 0.08,
-        leftMaterialScale: torsoSpec.left_material_scale || {},
-        rightMaterialScale: torsoSpec.right_material_scale || {},
-        breathDisplacementPx: torsoSpec.breath_displacement_px ?? 0.8,
-        poseBiasPx: torsoSpec.pose_bias_px ?? 0.15,
-        inertiaCouplingX: torsoSpec.inertia_coupling_x ?? 0.08,
-        inertiaCouplingY: torsoSpec.inertia_coupling_y ?? 0.3,
-        dragCouplingX: torsoSpec.drag_coupling_x ?? 0.01,
-        dragCouplingY: torsoSpec.drag_coupling_y ?? 0.02,
-        lagSecondsX: torsoSpec.lag_seconds_x ?? 0,
-        lagSecondsY: torsoSpec.lag_seconds_y ?? 1.4,
-        idleLagMaxPx: torsoSpec.idle_lag_max_px ?? 5.0,
-        kickLagMaxPx: torsoSpec.kick_lag_max_px ?? 12.0,
-        naturalFrequencyHz: torsoSpec.natural_frequency_hz,
-        dampingRatio: torsoSpec.damping_ratio,
-        maxDisplacementPx: torsoSpec.max_displacement_px ?? 16,
-        maxVelocityPxS: torsoSpec.max_velocity_px_s ?? 24,
-        settleTimeScaleS: torsoSpec.settle_time_scale_s ?? 0.03,
-        separateBreath: p3ParametricActive,
-        inputMode: torsoSpec.input_mode || "translation",
-        config,
-      });
-    }
-    resetPhysics();
-  }
+  state.physicsDrivers = createPhysicsDrivers(manifest, p3ParametricActive);
+  if (state.physicsDrivers) resetPhysics();
   for (const descriptor of (manifest.parameters || [])) {
     if (descriptor && descriptor.id) state.parameters[descriptor.id] = Number(descriptor.default ?? 0);
   }
@@ -1926,6 +1933,7 @@ export function renderPanel() {
       : "P3 deformer: unavailable (using P2 compatibility path)";
   }
   updateR2Meta();
+  updateR3Controls();
 
   const pack = state.parts.filter((p) => p.expression);
   document.getElementById("packmeta").innerHTML = pack.length
@@ -2596,6 +2604,101 @@ function downloadR2File(filename, value) {
   setTimeout(() => URL.revokeObjectURL(link.href), 0);
 }
 
+export const R3_CHEST_PRESETS = Object.freeze({
+  soft: { profile: "soft", natural_frequency_hz: 1.8, damping_ratio: 0.75 },
+  firm: { profile: "firm_bounce", natural_frequency_hz: 2.4, damping_ratio: 0.55 },
+  springy: { profile: "springy", natural_frequency_hz: 2.2, damping_ratio: 0.35 },
+});
+
+function r3Driver() { return state.manifest?.physics?.upper_torso_driver || null; }
+
+function updateR3Controls() {
+  const driver = r3Driver();
+  if (!driver) return;
+  const values = {
+    r3Frequency: driver.natural_frequency_hz ?? 1.8,
+    r3Damping: driver.damping_ratio ?? 0.75,
+    r3RangeX: state.manifest.motion?.upper_torso_parametric_deformer?.ranges_px?.x ?? 1,
+    r3RangeY: state.manifest.motion?.upper_torso_parametric_deformer?.ranges_px?.y ?? 1,
+    r3LagX: driver.lag_seconds_x ?? 0,
+    r3LagY: driver.lag_seconds_y ?? 1.4,
+    r3MaxDisplacement: driver.max_displacement_px ?? 16,
+  };
+  for (const [id, value] of Object.entries(values)) {
+    const input = document.getElementById(id);
+    if (input) input.value = value;
+    const output = document.getElementById(`${id}v`);
+    if (output) output.textContent = Number(value).toFixed(id === "r3Damping" ? 2 : 2);
+  }
+  const meta = document.getElementById("r3Meta");
+  if (meta) meta.textContent = state.r3?.dirty ? "R3 calibration: unsaved" : "R3 calibration: Auto";
+}
+
+function refreshR3Runtime() {
+  let resolved = applyChestAuthoring(state.autoManifest, state.authoring);
+  resolved = applyPhysicsAuthoring(resolved, state.authoring);
+  state.manifest = { ...resolved, motion: motionFromDeformers(resolved) };
+  const p3 = state.manifest.motion?.upper_torso_parametric_deformer;
+  state.p3SeparateBreath = p3?.enabled !== false && Boolean(p3) && p3.breath_isolated !== false;
+  state.physicsDrivers = createPhysicsDrivers(state.manifest, state.p3SeparateBreath);
+  resetPhysics();
+  for (const part of state.parts) if (part.chestParametric) part.chestParametric = p3;
+  updateR3Controls();
+}
+
+function setR3PhysicsField(field, value) {
+  const driver = r3Driver();
+  if (!driver || !Number.isFinite(Number(value))) return;
+  const numeric = Number(value);
+  driver[field] = numeric;
+  state.authoring ||= { version: 1, deformers: {}, physics: {} };
+  state.authoring.physics ||= {};
+  state.authoring.physics.upper_torso ||= {};
+  state.authoring.physics.upper_torso[field] = numeric;
+  state.r3.dirty = true;
+  refreshR3Runtime();
+}
+
+function setR3Range(axis, value) {
+  const numeric = Number(value);
+  if (!(numeric > 0) || !Number.isFinite(numeric)) return;
+  const spec = state.manifest.motion?.upper_torso_parametric_deformer;
+  if (!spec) return;
+  spec.ranges_px ||= {};
+  spec.ranges_px[axis] = numeric;
+  state.authoring ||= { version: 1, deformers: {}, physics: {} };
+  state.authoring.deformers ||= {};
+  const override = state.authoring.deformers.upper_torso ||= {};
+  override.range_override ||= {};
+  override.range_override[axis] = numeric;
+  state.r3.dirty = true;
+  updateR3Controls();
+}
+
+function applyR3Preset(name) {
+  const preset = R3_CHEST_PRESETS[name];
+  if (!preset || !r3Driver()) return;
+  for (const [field, value] of Object.entries(preset)) setR3PhysicsField(field, value);
+  const meta = document.getElementById("r3Meta");
+  if (meta) meta.textContent = `R3 calibration: ${name} preset (unsaved)`;
+}
+
+function resetR3ToAuto() {
+  const authoring = cloneJson(state.authoring || { version: 1, deformers: {}, physics: {} });
+  authoring.physics ||= {};
+  delete authoring.physics.upper_torso;
+  const override = authoring.deformers?.upper_torso;
+  if (override) {
+    delete override.range_override;
+    if (!override.cage_override && !override.keyform_overrides && !override.patch)
+      delete authoring.deformers.upper_torso;
+  }
+  state.authoring = authoring;
+  state.r3.dirty = false;
+  refreshR3Runtime();
+  persistR2Authoring("R3 chest physics reset to Auto", { preserveAuthoring: true });
+}
+
 async function persistR2Authoring(message = "R2 correction saved", options = {}) {
   const authoring = options.preserveAuthoring
     ? cloneJson(state.authoring || { version: 1, deformers: {} })
@@ -2605,11 +2708,15 @@ async function persistR2Authoring(message = "R2 correction saved", options = {})
   state.authoring = authoring;
   const resolved = syncP3DeformerConfig(cloneJson(state.manifest));
   const deformersText = JSON.stringify(authoring.deformers || {}, null, 2) + "\n";
+  const physicsText = JSON.stringify(authoring.physics || {}, null, 2) + "\n";
+  const rangesText = JSON.stringify(authoring.parameter_ranges || {}, null, 2) + "\n";
   const meta = { version: Number(authoring.version || 1), source_revision: authoring.source_revision || "" };
   let written = false;
   try {
     if (state.projectDirectoryHandle) {
       await writeR2File("authoring/deformers.json", deformersText);
+      await writeR2File("authoring/physics.json", physicsText);
+      await writeR2File("authoring/parameter_ranges.json", rangesText);
       await writeR2File("authoring/meta.json", JSON.stringify(meta, null, 2) + "\n");
       await writeR2File("portrait_rig_manifest.json", JSON.stringify(resolved, null, 2) + "\n");
       written = true;
@@ -2617,9 +2724,11 @@ async function persistR2Authoring(message = "R2 correction saved", options = {})
   } catch (error) {
     document.getElementById("r2Meta").textContent = "R2 save failed: " + error.message;
   }
-  if (!written) downloadR2File("deformers.json", authoring.deformers || {});
+  if (!written) downloadR2File("authoring.json", authoring);
   state.r2.dirty = false;
+  state.r3.dirty = false;
   updateR2Meta();
+  updateR3Controls();
   if (written) document.getElementById("r2Meta").textContent = message;
 }
 
@@ -3477,6 +3586,33 @@ document.getElementById("resetMotion").addEventListener("click", () => {
   const toggle = document.getElementById("bodySway"); if (toggle) toggle.checked = true;
   resetPhysics();
 });
+
+const R3_SLIDERS = [
+  ["r3Frequency", "natural_frequency_hz"], ["r3Damping", "damping_ratio"],
+  ["r3LagX", "lag_seconds_x"], ["r3LagY", "lag_seconds_y"],
+  ["r3MaxDisplacement", "max_displacement_px"],
+];
+for (const [id, field] of R3_SLIDERS) {
+  document.getElementById(id)?.addEventListener("input", (event) => {
+    const value = Number(event.target.value);
+    document.getElementById(`${id}v`).textContent = value.toFixed(2);
+    setR3PhysicsField(field, value);
+  });
+}
+for (const [id, axis] of [["r3RangeX", "x"], ["r3RangeY", "y"]]) {
+  document.getElementById(id)?.addEventListener("input", (event) => {
+    const value = Number(event.target.value);
+    document.getElementById(`${id}v`).textContent = value.toFixed(2);
+    setR3Range(axis, value);
+  });
+}
+document.getElementById("r3ApplyPreset")?.addEventListener("click", () => {
+  applyR3Preset(document.getElementById("r3Preset")?.value || "soft");
+});
+document.getElementById("r3Save")?.addEventListener("click", () => {
+  persistR2Authoring("R3 chest calibration saved", { preserveAuthoring: true });
+});
+document.getElementById("r3Reset")?.addEventListener("click", resetR3ToAuto);
 
 // P2.5 directive #31-33: Chest Shape QA controls -- gain multipliers, static
 // poses, and side isolation. These retune/inspect the basis; they never
