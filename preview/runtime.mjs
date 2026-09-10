@@ -329,6 +329,7 @@ export const state = {
   variantSelections: {},
   variantFades: {},
   parameters: {},
+  parameterOverrides: {},
   gazeTargets: [],
   eyeOpening: { l: null, r: null },
   phaseTrace: [],
@@ -559,10 +560,30 @@ export function setParameter(id, value) {
   if (!Number.isFinite(numeric)) numeric = descriptor?.default ?? 0;
   if (descriptor) numeric = Math.max(descriptor.min, Math.min(descriptor.max, numeric));
   state.parameters[id] = numeric;
+  // This is the compatibility adapter for the current DOM-backed runtime.
+  // New parameter controls write here; the legacy fields remain mirrors, not
+  // a second source of truth.
+  if (id === "ParamAngleX") state.turnX = numeric;
+  if (id === "ParamAngleY") state.turnY = numeric;
+  if (id === "ParamAngleZ") state.tiltDeg = numeric;
+  if (id === "ParamEyeBallX") state.gazeTargets[0] = numeric;
+  if (id === "ParamEyeBallY") state.gazeTargets[1] = numeric;
+  if (id === "ParamMouthOpenY") state.mouthOpen = numeric;
+  if (["ParamBreath", "ParamEyeLOpen", "ParamEyeROpen"].includes(id))
+    state.parameterOverrides[id] = numeric;
+  const legacyId = {
+    ParamAngleX: "turnX", ParamAngleY: "turnY", ParamAngleZ: "tilt",
+    ParamEyeBallX: "gazeX", ParamEyeBallY: "gazeY", ParamMouthOpenY: "mouthOpen",
+  }[id];
+  if (legacyId && typeof document !== "undefined") {
+    const element = document.getElementById(legacyId);
+    if (element) element.value = numeric;
+  }
   return numeric;
 }
 
 function parameterValue(id, motion = {}) {
+  if (state.parameterOverrides[id] != null) return Number(state.parameterOverrides[id]);
   if (motion.parameters && motion.parameters[id] != null) return Number(motion.parameters[id]);
   if (id === "ParamAngleX") return Number(motion.turnX ?? state.turnX ?? 0);
   if (id === "ParamAngleY") return Number(motion.turnY ?? state.turnY ?? 0);
@@ -1591,6 +1612,7 @@ export function build(manifest, images, options = {}) {
   state.p3SeparateBreath = false;
   state.physicsSimTime = 0;
   state.bodyPulse = { x: 0, y: 0, vx: 0, vy: 0 };
+  state.parameterOverrides = {};
   state.mouthOpen = 0;
   state.motionGraph = [];
   state.chestTrajectoryGraph = [];
@@ -1852,6 +1874,11 @@ export function build(manifest, images, options = {}) {
   document.getElementById("softVertv").textContent = Number(softVert.value).toFixed(1) + "px";
 
   renderPanel();
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("rigstudio:manifestready", {
+      detail: { manifest: state.manifest, parameters: { ...state.parameters } },
+    }));
+  }
   requestAnimationFrame(frame);
 }
 
@@ -3400,7 +3427,13 @@ export function frame(now) {
   }
 
   const useArt = document.getElementById("useArt").checked;
-  const blink = blinkAmount(now);
+  const animatedBlink = blinkAmount(now);
+  const blink = {
+    l: state.parameterOverrides.ParamEyeLOpen != null
+      ? 1 - Number(state.parameterOverrides.ParamEyeLOpen) : animatedBlink.l,
+    r: state.parameterOverrides.ParamEyeROpen != null
+      ? 1 - Number(state.parameterOverrides.ParamEyeROpen) : animatedBlink.r,
+  };
   const swap = {
     l: expressionSwap(blink.l, useArt && !!state.art.l),
     r: expressionSwap(blink.r, useArt && !!state.art.r),
@@ -3423,8 +3456,10 @@ export function frame(now) {
     }
   }
 
-  const breathSin = document.getElementById("doBreathe").checked
+  const automaticBreath = document.getElementById("doBreathe").checked
     ? Math.sin(t * 2 * Math.PI / state.manifest.motion.breathing.period_s) : 0;
+  const breathSin = state.parameterOverrides.ParamBreath != null
+    ? Number(state.parameterOverrides.ParamBreath) : automaticBreath;
   // Same signal as the global breathing field, reshaped so exhale moves less
   // than inhale (design doc 9) -- this is the one scalar chest soft morph
   // rides on, it never runs on a clock of its own.
@@ -3622,6 +3657,27 @@ export function syncSlider(id) {
   if (id === "tilt") { state.tiltDeg = value; document.getElementById("tiltv").textContent = value.toFixed(1) + "°"; }
   if (id === "gazeX") { setParameter("ParamEyeBallX", value); document.getElementById("gazeXv").textContent = value.toFixed(2); }
   if (id === "gazeY") { setParameter("ParamEyeBallY", value); document.getElementById("gazeYv").textContent = value.toFixed(2); }
+}
+
+// P2 parameter-panel adapter.  The runtime owns the write and mirrors only
+// the old DOM-backed fields needed by the current renderer.
+if (typeof window !== "undefined") {
+  window.addEventListener("rigstudio:setparameter", (event) => {
+    const { id, value, source = "manual" } = event.detail || {};
+    if (!id) return;
+    const numeric = setParameter(id, value);
+    if (["ParamAngleX", "ParamAngleY", "ParamAngleZ"].includes(id)) {
+      const autoIdle = document.getElementById("autoIdle");
+      if (autoIdle) autoIdle.checked = false;
+    }
+    if (id === "ParamMouthOpenY") {
+      const talk = document.getElementById("doTalk");
+      if (talk) talk.checked = false;
+    }
+    window.dispatchEvent(new CustomEvent("rigstudio:parameterchange", {
+      detail: { id, value: numeric, source },
+    }));
+  });
 }
 
 function updateQaBadge() {

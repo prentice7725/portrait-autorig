@@ -1,0 +1,39 @@
+{
+  "version": "0.2",
+  "canvas": { "width": 256, "height": 256 },
+  "source": { "run_id": "p2-fixture", "tag_version": "test", "depth": "table" },
+  "anchors": {},
+  "parts": [],
+  "motion": {
+    "head_turn": { "max_x": 1, "max_y": 1 },
+    "head_tilt": { "max_deg": 15 },
+    "breathing": { "period_s": 4, "amplitude_px": 3 },
+    "blink": { "close_s": 0.08, "hold_s": 0.34, "open_s": 0.16, "interval_s": [1.6, 5.4] }
+  },
+  "capabilities": {
+    "head_turn": "ready",
+    "gaze": "degraded",
+    "mouth_open": "ready"
+  },
+  "parameters": [
+    { "id": "ParamAngleX", "min": -1, "max": 1, "default": 0 },
+    { "id": "ParamAngleY", "min": -1, "max": 1, "default": 0 },
+    { "id": "ParamAngleZ", "min": -1, "max": 1, "default": 0 },
+    { "id": "ParamEyeBallX", "min": -1, "max": 1, "default": 0 },
+    { "id": "ParamEyeBallY", "min": -1, "max": 1, "default": 0 },
+    { "id": "ParamMouthOpenY", "min": 0, "max": 1, "default": 0 },
+    { "id": "ParamBreath", "min": -1, "max": 1, "default": 0 },
+    { "id": "ParamMouthForm", "min": -1, "max": 1, "default": 0 },
+    { "id": "ParamCustomSmile", "min": -2, "max": 2, "default": 0 }
+  ],
+  "deformers": [
+    { "id": "head_x", "kind": "parameter_probe", "parameters": ["ParamAngleX"] },
+    { "id": "head_y", "kind": "parameter_probe", "parameters": ["ParamAngleY"] },
+    { "id": "head_z", "kind": "parameter_probe", "parameters": ["ParamAngleZ"] },
+    { "id": "gaze", "kind": "parameter_probe", "parameters": ["ParamEyeBallX", "ParamEyeBallY"] },
+    { "id": "mouth", "kind": "parameter_probe", "parameters": ["ParamMouthOpenY"] },
+    { "id": "breath", "kind": "parameter_probe", "parameters": ["ParamBreath"] },
+    { "id": "custom", "kind": "parameter_probe", "parameters": ["ParamCustomSmile"] }
+  ],
+  "evaluation": { "phases": ["base", "primary", "corrective", "secondary", "constraints", "visibility", "render"] }
+}
