@@ -3,9 +3,9 @@
  *
  * Extracted verbatim out of index.html's inline <script> (PORTRAIT_AUTORIG_
  * PRIOR_ART_ABSORPTION_PLAN v0.1 #5, #18, P0-C): every function, constant,
- * and the shared `state` object are unchanged, only `export` was added to
- * each top-level declaration. This is the canonical deformation/build/
- * animation logic; index.html loads it as a module script, and
+ * and the shared `state` object are retained as compatibility seams. Preview
+ * input arbitration and DOM event wiring live in rig-controller.mjs; this is
+ * the canonical deformation/build/render logic, and
  * check_deformation.mjs / measure_disocclusion.mjs import it directly
  * instead of string-slicing HTML and `new Function`-evaluating it.
  *
@@ -20,8 +20,9 @@
 "use strict";
 
 import { createStrandSpringDriver, createUpperTorsoSecondaryDriver } from "./physics.mjs";
+import { createRigController } from "./rig-controller.mjs";
 
-export const PREVIEW_RUNTIME_VERSION = "P3.0";
+export const PREVIEW_RUNTIME_VERSION = "P6.3";
 
 // Parallax strength as a fraction of the canvas, so the same manifest reads
 // the same at any render resolution. Near layers travel further than far ones,
@@ -328,6 +329,7 @@ export const state = {
   variantSets: {},
   variantSelections: {},
   variantFades: {},
+  activeExpression: null,
   parameters: {},
   parameterOverrides: {},
   gazeTargets: [],
@@ -345,6 +347,11 @@ export const state = {
   editSession: { active: false, enteredAt: 0, snapshot: null, physicsSuspended: false },
   t0: performance.now(),
 };
+
+// P5 seam: controller owns preview inputs and UI arbitration; this runtime
+// keeps the shared state object as the compatibility surface for deformation
+// and existing QA harnesses.
+export const rigController = createRigController({ runtimeState: state });
 
 export const R2_CHEST_POSES = ["neutral", "bust_x_neg", "bust_x_pos", "bust_y_neg", "bust_y_pos"];
 export const R2_CHEST_EDIT_POSES = ["bust_x_neg", "bust_x_pos", "bust_y_neg", "bust_y_pos"];
@@ -556,47 +563,11 @@ export function clearChestAuthoring(sourceAuthoring = null) {
 /** Set a manifest parameter from a host or a test harness.  Values are
  * clamped to the immutable parameter descriptor range when one is present. */
 export function setParameter(id, value) {
-  const descriptor = (state.manifest?.parameters || []).find((p) => p.id === id);
-  let numeric = Number(value);
-  if (!Number.isFinite(numeric)) numeric = descriptor?.default ?? 0;
-  if (descriptor) numeric = Math.max(descriptor.min, Math.min(descriptor.max, numeric));
-  state.parameters[id] = numeric;
-  // This is the compatibility adapter for the current DOM-backed runtime.
-  // New parameter controls write here; the legacy fields remain mirrors, not
-  // a second source of truth.
-  if (id === "ParamAngleX") state.turnX = numeric;
-  if (id === "ParamAngleY") state.turnY = numeric;
-  if (id === "ParamAngleZ") state.tiltDeg = numeric;
-  if (id === "ParamEyeBallX") state.gazeTargets[0] = numeric;
-  if (id === "ParamEyeBallY") state.gazeTargets[1] = numeric;
-  if (id === "ParamMouthOpenY") state.mouthOpen = numeric;
-  if (["ParamBreath", "ParamEyeLOpen", "ParamEyeROpen"].includes(id))
-    state.parameterOverrides[id] = numeric;
-  const legacyId = {
-    ParamAngleX: "turnX", ParamAngleY: "turnY", ParamAngleZ: "tilt",
-    ParamEyeBallX: "gazeX", ParamEyeBallY: "gazeY", ParamMouthOpenY: "mouthOpen",
-  }[id];
-  if (legacyId && typeof document !== "undefined") {
-    const element = document.getElementById(legacyId);
-    if (element) element.value = numeric;
-  }
-  return numeric;
+  return rigController.setParameter(id, value);
 }
 
 function parameterValue(id, motion = {}) {
-  if (state.parameterOverrides[id] != null) return Number(state.parameterOverrides[id]);
-  if (motion.parameters && motion.parameters[id] != null) return Number(motion.parameters[id]);
-  if (id === "ParamAngleX") return Number(motion.turnX ?? state.turnX ?? 0);
-  if (id === "ParamAngleY") return Number(motion.turnY ?? state.turnY ?? 0);
-  if (id === "ParamAngleZ") return Number(motion.tiltRad ?? 0);
-  if (id === "ParamEyeLOpen" && motion.blink) return 1 - Number(motion.blink.l ?? 0);
-  if (id === "ParamEyeROpen" && motion.blink) return 1 - Number(motion.blink.r ?? 0);
-  if (id === "ParamMouthOpenY" && motion.mouthOpen != null) return Number(motion.mouthOpen);
-  if (id === "ParamBreath" && motion.breath != null) return Number(motion.breath);
-  if (id === "ParamEyeBallX") return Number(motion.gazeX ?? state.parameters[id] ?? 0);
-  if (id === "ParamEyeBallY") return Number(motion.gazeY ?? state.parameters[id] ?? 0);
-  if (state.parameters[id] != null) return Number(state.parameters[id]);
-  return 0;
+  return rigController.parameterValue(id, motion);
 }
 
 /** Runtime binding for Composer VariantSets (P0-F2).  Composer instance ids
@@ -684,6 +655,27 @@ export function applyExpressionPreset(presetId, options = {}) {
   const result = [];
   for (const [setId, memberId] of selections) result.push(applyVariantSet(setId, memberId, options));
   return result;
+}
+
+function applyExpressionSelection(presetId) {
+  if (presetId == null) {
+    for (const [setId, spec] of Object.entries(state.variantSets || {})) {
+      if (spec.default != null) applyVariantSet(setId, spec.default, { transition: "discrete" });
+    }
+    state.activeExpression = null;
+    return null;
+  }
+  const result = applyExpressionPreset(presetId, { transition: "discrete" });
+  state.activeExpression = presetId;
+  return result;
+}
+
+export function setExpression(presetId) {
+  return rigController.setExpression(presetId);
+}
+
+export function releaseExpression() {
+  return rigController.releaseExpression();
 }
 
 function visibilityCurveValue(deformer, value) {
@@ -1634,6 +1626,7 @@ export function build(manifest, images, options = {}) {
   for (const descriptor of (manifest.parameters || [])) {
     if (descriptor && descriptor.id) state.parameters[descriptor.id] = Number(descriptor.default ?? 0);
   }
+  rigController.configure(manifest, { onExpressionChange: applyExpressionSelection });
   state.phaseTrace = [];
   state.canvasW = manifest.canvas.width;
   state.canvasH = manifest.canvas.height;
@@ -1774,6 +1767,7 @@ export function build(manifest, images, options = {}) {
   state.variantSets = manifest.variant_sets || {};
   state.variantSelections = {};
   state.variantFades = {};
+  state.activeExpression = null;
   state.clipMasks = [];
   for (const constraint of (manifest.constraints || [])) {
     if (constraint.kind !== "clip_mask") continue;
@@ -2330,29 +2324,15 @@ function bodySwayInfluence(part) {
 }
 
 export function scheduleBlink(now) {
-  const cfg = state.manifest.motion.blink;
-  const [lo, hi] = cfg.interval_s;
-  state.blinkTimer = now + (lo + Math.random() * (hi - lo)) * 1000;
+  return rigController.scheduleBlink(now);
 }
 
 export function startBlink(now, sides) {
-  const cfg = state.manifest.motion.blink;
-  state.blinkPhase = {
-    start: now, sides,
-    close: cfg.close_s * 1000, hold: cfg.hold_s * 1000, open: cfg.open_s * 1000,
-  };
+  return rigController.startBlink(now, sides);
 }
 
 export function blinkAmount(now) {
-  const ph = state.blinkPhase;
-  if (!ph) return { l: 0, r: 0 };
-  const dt = now - ph.start;
-  let a;
-  if (dt < ph.close) a = dt / ph.close;
-  else if (dt < ph.close + ph.hold) a = 1;
-  else if (dt < ph.close + ph.hold + ph.open) a = 1 - (dt - ph.close - ph.hold) / ph.open;
-  else { state.blinkPhase = null; return { l: 0, r: 0 }; }
-  return { l: ph.sides.includes("l") ? a : 0, r: ph.sides.includes("r") ? a : 0 };
+  return rigController.blinkAmount(now);
 }
 
 /** How opaque a part is this frame. Only the expression pack moves this: with
@@ -2498,41 +2478,6 @@ export function drawHairZonesOverlay() {
   }
 }
 
-const EDIT_SESSION_CONTROL_IDS = [
-  "autoIdle", "bodySway", "chestInertia", "doBlink", "doBreathe", "doTalk",
-  "useArt", "gazeX", "gazeY", "mouthOpen", "breathAmp", "turnX", "turnY",
-  "tilt", "shell", "r2EditMode",
-];
-
-function editControlSnapshot() {
-  const controls = {};
-  for (const id of EDIT_SESSION_CONTROL_IDS) {
-    const element = document.getElementById(id);
-    if (!element) continue;
-    controls[id] = {
-      checked: typeof element.checked === "boolean" ? element.checked : undefined,
-      value: element.value,
-    };
-  }
-  return controls;
-}
-
-function restoreEditControls(controls = {}) {
-  for (const [id, saved] of Object.entries(controls)) {
-    const element = document.getElementById(id);
-    if (!element) continue;
-    if (typeof saved.checked === "boolean") element.checked = saved.checked;
-    if (saved.value != null) element.value = saved.value;
-  }
-}
-
-function setEditControl(id, value) {
-  const element = document.getElementById(id);
-  if (!element) return;
-  if (typeof value === "boolean") element.checked = value;
-  else element.value = String(value);
-}
-
 function editStatus(message, active) {
   const element = document.getElementById("editLifecycleStatus");
   if (!element) return;
@@ -2556,72 +2501,12 @@ function emitRestoredParameters(parameters) {
   }
 }
 
-function stableParameterDefaults() {
-  const values = {};
-  for (const descriptor of state.manifest?.parameters || []) {
-    if (!descriptor?.id) continue;
-    const fallback = Number(descriptor.default ?? 0);
-    values[descriptor.id] = Number.isFinite(fallback) ? fallback : 0;
-  }
-  return values;
-}
-
-function setStableAuthoringPose() {
-  const defaults = stableParameterDefaults();
-  state.turnX = 0;
-  state.turnY = 0;
-  state.tiltDeg = 0;
-  state.shell = 0;
-  state.mouthOpen = 0;
-  state.talkUntil = 0;
-  state.talkTarget = 0;
-  state.blink = { l: 0, r: 0 };
-  state.blinkTimer = 0;
-  state.blinkPhase = null;
-  state.gazeTargets = [0, 0];
-  state.parameters = defaults;
-  state.parameterOverrides = {};
-  state.motionQA = {
-    ...state.motionQA,
-    inertia: false,
-    inertiaOnly: false,
-    chestImpulseX: 0,
-    chestImpulseY: 0,
-    asymmetry: 1,
-    shapeGain: null,
-    side: "both",
-    poseActive: false,
-    poseQ: 0,
-    poseV: 0,
-    p3Pose: null,
-  };
-  state.bodySwayEnabled = false;
-  for (const id of ["autoIdle", "bodySway", "chestInertia", "doBlink", "doBreathe", "doTalk"])
-    setEditControl(id, false);
-  for (const [id, value] of [["turnX", 0], ["turnY", 0], ["tilt", 0], ["gazeX", 0],
-    ["gazeY", 0], ["mouthOpen", 0], ["shell", 0]]) setEditControl(id, value);
-  setEditControl("r2EditMode", true);
-  resetPhysics();
-}
-
 /** Enter the P3 stable authoring pose without destroying runtime drivers. */
 export function enterEdit() {
-  if (state.editSession?.active) return state.editSession;
-  const snapshot = {
-    controls: editControlSnapshot(),
-    turnX: state.turnX, turnY: state.turnY, tiltDeg: state.tiltDeg, shell: state.shell,
-    mouthOpen: state.mouthOpen, talkUntil: state.talkUntil, talkTarget: state.talkTarget,
-    blink: cloneJson(state.blink), blinkTimer: state.blinkTimer, blinkPhase: state.blinkPhase,
-    gazeTargets: cloneJson(state.gazeTargets), parameters: cloneJson(state.parameters),
-    parameterOverrides: cloneJson(state.parameterOverrides), motionQA: cloneJson(state.motionQA),
-    collarOverride: state.collarOverride, displayPreset: state.displayPreset,
-    r2EditMode: state.r2?.editMode,
-  };
-  state.editSession = {
-    active: true, enteredAt: performance.now(), snapshot, physicsSuspended: true,
-  };
-  setStableAuthoringPose();
+  if (rigController.editActive) return state.editSession;
+  rigController.enterEdit(performance.now());
   setR2EditMode(true);
+  resetPhysics();
   editStatus("Stable authoring pose active · Preview motion paused", true);
   emitEditState(true, "enter");
   return state.editSession;
@@ -2629,31 +2514,11 @@ export function enterEdit() {
 
 /** Leave P3 Edit, reset transient physics history, then restore Preview state. */
 export function exitEdit() {
-  const session = state.editSession;
-  if (!session?.active) return false;
-  const snapshot = session.snapshot || {};
+  if (!rigController.editActive) return false;
   resetPhysics();
   warmupPhysics(0.15, { breath: 0, angleY: 0, strandTarget: 0 });
-  state.turnX = snapshot.turnX ?? 0;
-  state.turnY = snapshot.turnY ?? 0;
-  state.tiltDeg = snapshot.tiltDeg ?? 0;
-  state.shell = snapshot.shell ?? 0;
-  state.mouthOpen = snapshot.mouthOpen ?? 0;
-  state.talkUntil = snapshot.talkUntil ?? 0;
-  state.talkTarget = snapshot.talkTarget ?? 0;
-  state.blink = cloneJson(snapshot.blink) || { l: 0, r: 0 };
-  state.blinkTimer = snapshot.blinkTimer || 0;
-  state.blinkPhase = snapshot.blinkPhase || null;
-  state.gazeTargets = cloneJson(snapshot.gazeTargets) || [];
-  state.parameters = cloneJson(snapshot.parameters) || {};
-  state.parameterOverrides = cloneJson(snapshot.parameterOverrides) || {};
-  state.motionQA = cloneJson(snapshot.motionQA) || state.motionQA;
-  state.collarOverride = snapshot.collarOverride ?? null;
-  state.displayPreset = snapshot.displayPreset || state.displayPreset;
-  restoreEditControls(snapshot.controls);
-  state.editSession = { active: false, enteredAt: session.enteredAt, snapshot: null, physicsSuspended: false };
+  const snapshot = rigController.exitEdit() || {};
   setR2EditMode(Boolean(snapshot.r2EditMode));
-  state.bodySwayEnabled = false;
   emitRestoredParameters(state.parameters);
   editStatus("Preview resumed · physics warmed up", false);
   emitEditState(false, "exit");
@@ -3561,56 +3426,15 @@ export function frame(now) {
   const t = (now - state.t0) / 1000;
   const dt = Math.min(0.1, (now - (state.lastFrame || now)) / 1000);
   state.lastFrame = now;
-  const editActive = !!state.editSession?.active;
-  const autoIdle = !editActive && !!document.getElementById("autoIdle")?.checked;
-  state.bodySwayEnabled = !editActive && !!document.getElementById("bodySway")?.checked && autoIdle;
-  if (autoIdle) {
-    // Two incommensurable periods so the loop never visibly repeats, and the
-    // turn held well inside where it starts to cost something.
-    const turn = state.manifest.motion.head_turn;
-    const limit = Math.min(turn.max_x, IDLE_TURN);
-    state.turnX = (Math.sin(t * 0.37) * 0.73 + Math.sin(t * 0.13) * 0.27) * limit;
-    state.turnY = Math.sin(t * 0.29 + 1.1) * 0.45 * Math.min(turn.max_y, IDLE_TURN);
-    state.tiltDeg = Math.sin(t * 0.23 + 0.6) * state.manifest.motion.head_tilt.max_deg;
-    updateIdleControls(now);
-  }
-
-  if (!editActive && document.getElementById("doBlink").checked) {
-    if (!state.blinkTimer) scheduleBlink(now);
-    if (!state.blinkPhase && now >= state.blinkTimer) {
-      startBlink(now, ["l", "r"]);
-      scheduleBlink(now);
-      // Occasionally blink twice in quick succession.
-      if (Math.random() < 0.2) state.blinkTimer = now + 260;
-    }
-  }
-
-  // Talk: a mouth that opens and closes on its own, only when the pack brought
-  // a mouth to open. Irregular on purpose -- an even cycle reads as chewing.
   const mouthVariant = variantSetForFeature("mouth");
-  if (!editActive && (state.art.mouth || mouthVariant) && document.getElementById("doTalk").checked) {
-    if (now >= state.talkUntil) {
-      state.talkTarget = state.talkTarget > 0.5 ? 0 : 0.55 + Math.random() * 0.45;
-      state.talkUntil = now + (state.talkTarget > 0.5 ? 90 + Math.random() * 110
-                                                      : 70 + Math.random() * 160);
-    }
-    state.mouthOpen += (state.talkTarget - state.mouthOpen) * Math.min(1, dt * 18);
-  } else {
-    state.mouthOpen = parseFloat(document.getElementById("mouthOpen").value);
-  }
-
-  const useArt = document.getElementById("useArt").checked;
-  const animatedBlink = blinkAmount(now);
-  const blink = {
-    l: state.parameterOverrides.ParamEyeLOpen != null
-      ? 1 - Number(state.parameterOverrides.ParamEyeLOpen) : animatedBlink.l,
-    r: state.parameterOverrides.ParamEyeROpen != null
-      ? 1 - Number(state.parameterOverrides.ParamEyeROpen) : animatedBlink.r,
-  };
+  const controllerFrame = rigController.tick(now, { t, dt,
+    mouthAvailable: !!state.art.mouth, mouthVariant: !!mouthVariant });
+  state.bodySwayEnabled = controllerFrame.bodySwayEnabled;
+  const { blink, breath: breathSin, useArt, turnX, turnY, mouthOpen } = controllerFrame;
   const swap = {
     l: expressionSwap(blink.l, useArt && !!state.art.l),
     r: expressionSwap(blink.r, useArt && !!state.art.r),
-    mouth: expressionSwap(state.mouthOpen, useArt && !!state.art.mouth),
+    mouth: expressionSwap(mouthOpen, useArt && !!state.art.mouth),
   };
 
   if (useArt) {
@@ -3624,15 +3448,11 @@ export function frame(now) {
     } else if (eyeVariant && blink.l === 0 && blink.r === 0) {
       applyVariantLabel("eye", "open");
     }
-    if (mouthVariant && document.getElementById("doTalk").checked) {
+    if (mouthVariant && controllerFrame.talkEnabled) {
       applyVariantLabel("mouth", state.mouthOpen >= SWAP_HI ? "open" : "closed");
     }
   }
 
-  const automaticBreath = !editActive && document.getElementById("doBreathe").checked
-    ? Math.sin(t * 2 * Math.PI / state.manifest.motion.breathing.period_s) : 0;
-  const breathSin = state.parameterOverrides.ParamBreath != null
-    ? Number(state.parameterOverrides.ParamBreath) : automaticBreath;
   // Same signal as the global breathing field, reshaped so exhale moves less
   // than inhale (design doc 9) -- this is the one scalar chest soft morph
   // rides on, it never runs on a clock of its own.
@@ -3640,17 +3460,17 @@ export function frame(now) {
 
   const motion = {
     now,
-    turnX: state.turnX, turnY: state.turnY,
-    gazeX: parseFloat(document.getElementById("gazeX").value),
-    gazeY: parseFloat(document.getElementById("gazeY").value),
+    turnX, turnY,
+    gazeX: controllerFrame.gazeX,
+    gazeY: controllerFrame.gazeY,
     tiltRad: state.tiltDeg * Math.PI / 180,
     shell: state.shell,
-    yaw: state.turnX * SHELL_MAX_YAW,
+    yaw: turnX * SHELL_MAX_YAW,
     // Negated: a positive turnY drops the face in the parallax path, and the
     // two paths have to agree on which way "down" is or the blend fights itself.
-    pitch: -state.turnY * SHELL_MAX_PITCH,
+    pitch: -turnY * SHELL_MAX_PITCH,
     blink,
-    mouthOpen: state.mouthOpen,
+    mouthOpen,
     squash: { l: swap.l.squash, r: swap.r.squash },
     swap,
     breath: breathSin,
@@ -3818,39 +3638,11 @@ export function frame(now) {
 /* ---------- controls ---------- */
 
 export function setSlider(id, value) {
-  const el = document.getElementById(id);
-  el.value = value;
-  syncSlider(id);
+  return rigController.setSlider(id, value);
 }
 
 export function syncSlider(id) {
-  const value = parseFloat(document.getElementById(id).value);
-  if (id === "turnX") { state.turnX = value; document.getElementById("turnXv").textContent = value.toFixed(2); }
-  if (id === "turnY") { state.turnY = value; document.getElementById("turnYv").textContent = value.toFixed(2); }
-  if (id === "tilt") { state.tiltDeg = value; document.getElementById("tiltv").textContent = value.toFixed(1) + "°"; }
-  if (id === "gazeX") { setParameter("ParamEyeBallX", value); document.getElementById("gazeXv").textContent = value.toFixed(2); }
-  if (id === "gazeY") { setParameter("ParamEyeBallY", value); document.getElementById("gazeYv").textContent = value.toFixed(2); }
-}
-
-// P2 parameter-panel adapter.  The runtime owns the write and mirrors only
-// the old DOM-backed fields needed by the current renderer.
-if (typeof window !== "undefined") {
-  window.addEventListener("rigstudio:setparameter", (event) => {
-    const { id, value, source = "manual" } = event.detail || {};
-    if (!id) return;
-    const numeric = setParameter(id, value);
-    if (["ParamAngleX", "ParamAngleY", "ParamAngleZ"].includes(id)) {
-      const autoIdle = document.getElementById("autoIdle");
-      if (autoIdle) autoIdle.checked = false;
-    }
-    if (id === "ParamMouthOpenY") {
-      const talk = document.getElementById("doTalk");
-      if (talk) talk.checked = false;
-    }
-    window.dispatchEvent(new CustomEvent("rigstudio:parameterchange", {
-      detail: { id, value: numeric, source },
-    }));
-  });
+  return rigController.syncSlider(id);
 }
 
 function updateQaBadge() {
@@ -3863,9 +3655,6 @@ function updateQaBadge() {
   badge.hidden = !active;
 }
 
-document.getElementById("gazeX").addEventListener("input", () => syncSlider("gazeX"));
-document.getElementById("gazeY").addEventListener("input", () => syncSlider("gazeY"));
-
 document.getElementById("r4DisplayPreset")?.addEventListener("change", (event) => {
   applyDisplayPreset(event.target.value);
 });
@@ -3876,23 +3665,10 @@ document.getElementById("r5HairLayer")?.addEventListener("change", (event) => {
   state.r5Hair.layer = event.target.value || "all";
 });
 
-document.getElementById("mouthOpen").addEventListener("input", () => {
-  document.getElementById("doTalk").checked = false;
-  state.mouthOpen = parseFloat(document.getElementById("mouthOpen").value);
-  document.getElementById("mouthOpenv").textContent = state.mouthOpen.toFixed(2);
-});
-
 document.getElementById("shell").addEventListener("input", () => {
   state.shell = parseFloat(document.getElementById("shell").value);
   document.getElementById("shellv").textContent = state.shell.toFixed(2);
 });
-
-for (const id of ["turnX", "turnY", "tilt"]) {
-  document.getElementById(id).addEventListener("input", () => {
-    document.getElementById("autoIdle").checked = false;
-    syncSlider(id);
-  });
-}
 
 document.getElementById("lidThick").addEventListener("input", () => {
   document.getElementById("lidThickv").textContent =
@@ -4119,13 +3895,6 @@ document.getElementById("r2Download")?.addEventListener("click", () => {
     : buildChestAuthoring(state.manifest, state.authoring);
   downloadR2File("deformers.json", authoring.deformers || {});
 });
-if (typeof window !== "undefined") {
-  window.addEventListener("rigstudio:modechange", (event) => {
-    const mode = event.detail?.mode;
-    if (mode === "edit") enterEdit();
-    else if (state.editSession?.active) exitEdit();
-  });
-}
 for (const id of ["showP3Cage", "showP3Heatmap", "showP3Influenced", "showP3Locks", "showP3Occluders"]) {
   document.getElementById(id).addEventListener("change", () => {
     const cage = document.getElementById("showP3Cage")?.checked;
@@ -4143,9 +3912,9 @@ document.getElementById("showChestBasis").addEventListener("change", () => {
   }
 });
 
-document.getElementById("blinkNow").addEventListener("click",
-  () => startBlink(performance.now(), ["l", "r"]));
-document.getElementById("winkL").addEventListener("click",
-  () => startBlink(performance.now(), ["l"]));
-document.getElementById("winkR").addEventListener("click",
-  () => startBlink(performance.now(), ["r"]));
+if (typeof document !== "undefined" && typeof window !== "undefined") {
+  rigController.bindDom({ document, window, onModeChange: (mode) => {
+    if (mode === "edit") enterEdit();
+    else if (rigController.editActive) exitEdit();
+  }});
+}

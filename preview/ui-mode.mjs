@@ -55,8 +55,8 @@ function move(id, target) {
 const groups = {
   preview: [
     { title: "Runtime", ids: ["autoIdle", "doBlink", "doBreathe", "breathAmp"] },
-    { title: "Expression", ids: ["packmeta", "mouthOpen"] },
-    { title: "Gaze", ids: ["gazeX", "gazeY"] },
+    { title: "Expression", ids: ["packmeta", "expressionCatalog", "audioTest", "mouthOpen"] },
+    { title: "Gaze", ids: ["gazeX", "gazeY", "followCursor", "followCursorHint"] },
     { title: "Head", ids: ["turnX", "turnY", "tilt"] },
   ],
   edit: [

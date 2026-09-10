@@ -145,6 +145,14 @@
   .parts .z { color: var(--muted); width: 22px; text-align: right; }
   .hint { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
   .meta { color: var(--muted); font-size: 12px; }
+  .expression-catalog { display: grid; gap: 8px; }
+  .expression-catalog[hidden] { display: none !important; }
+  .expression-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+  .expression-buttons button, #releaseExpression { min-height: 44px; }
+  .expression-status { color: var(--accent); min-height: 20px; }
+  .audio-test { display: grid; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(48,57,73,.7); }
+  .audio-test input[type=file] { width: 100%; color: var(--muted); }
+  .audio-test .row { flex-wrap: wrap; }
   .mode-status { color: var(--accent); font-size: 11px; }
   .mode-status[data-state="active"] { color: #9fe3b1; }
   .warn { color: #ffb454; }
@@ -462,6 +470,21 @@
 
   <h2>Expression pack</h2>
   <div class="meta" id="packmeta">no pack in this run</div>
+  <div class="expression-catalog" id="expressionCatalog" hidden>
+    <div class="expression-buttons" id="expressionButtons" aria-label="Expression catalog"></div>
+    <button id="releaseExpression" type="button">Release / Neutral</button>
+    <div class="expression-status" id="expressionStatus" aria-live="polite">Neutral</div>
+  </div>
+  <div class="audio-test" id="audioTest">
+    <label for="audioTestFile">Audio Test</label>
+    <input id="audioTestFile" type="file" accept="audio/*">
+    <div class="row">
+      <button id="audioTestPlay" type="button" disabled>Play</button>
+      <button id="audioTestStop" type="button" disabled>Stop</button>
+    </div>
+    <label class="row"><input type="checkbox" id="lipSyncEnabled"> Use external RMS lip-sync</label>
+    <div class="meta" id="audioTestStatus" aria-live="polite">Choose an audio file</div>
+  </div>
   <label class="row"><input type="checkbox" id="useArt" checked> Use expression art</label>
   <p class="hint">Off falls back to the v0.1 blink: the lash squashed onto the
      lid line. On, a recovered closed eye owns the eye while it is shut. This
@@ -474,6 +497,8 @@
     <input type="range" id="gazeX" min="-1" max="1" step="0.01" value="0"></label>
   <label>Gaze Y <span class="val" id="gazeYv">0.00</span>
     <input type="range" id="gazeY" min="-1" max="1" step="0.01" value="0"></label>
+  <label class="row"><input type="checkbox" id="followCursor"> Follow Cursor</label>
+  <p class="hint" id="followCursorHint">Move the pointer over the portrait to drive gaze and a subtle head share. Manual gaze/head sliders take priority while held.</p>
 
   <h2>Head</h2>
   <label>Turn X <span class="val" id="turnXv">0.00</span>
@@ -513,6 +538,8 @@
 <script type="module" src="./ui-mode.mjs"></script>
 <script type="module" src="./semantic-inspector.mjs"></script>
 <script type="module" src="./parameter-panel.mjs"></script>
+<script type="module" src="./expression-ui.mjs"></script>
+<script type="module" src="./audio-test-ui.mjs"></script>
 <script type="module" src="./runtime.mjs"></script>
 
 </body>
