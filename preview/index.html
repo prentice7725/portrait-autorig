@@ -78,6 +78,17 @@
   .mode-intro { padding: 10px 12px; margin: 0 0 16px; background: var(--panel-raised); border: 1px solid var(--line); border-radius: 8px; }
   .mode-intro strong { display: block; font-size: 14px; margin-bottom: 2px; }
   .mode-intro span { color: var(--muted); }
+  .inspector-summary { padding: 10px 12px; margin: 0 0 16px; background: #141a23;
+                       border: 1px solid var(--line); border-radius: 8px; }
+  .inspector-summary strong { display: block; font-size: 13px; margin-bottom: 2px; }
+  .inspector-summary span { color: var(--muted); }
+  .raw-parts-summary { border-top: 1px solid var(--line); padding-top: 10px; }
+  .raw-parts-list { max-height: 280px; overflow-y: auto; margin: 8px 0 0; padding: 0;
+                    list-style: none; border: 1px solid var(--line); border-radius: 6px; }
+  .raw-parts-list li { display: flex; justify-content: space-between; gap: 8px;
+                        padding: 7px 8px; border-bottom: 1px solid rgba(48,57,73,.7); }
+  .raw-parts-list li:last-child { border-bottom: 0; }
+  .raw-parts-list .meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .parameter-panel { margin: 0 0 20px; padding: 12px; background: #141a23;
                      border: 1px solid var(--line); border-radius: 8px; }
   .parameter-panel > h2 { margin: 0 0 12px; color: var(--fg); font-size: 14px;
@@ -134,6 +145,8 @@
   .parts .z { color: var(--muted); width: 22px; text-align: right; }
   .hint { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
   .meta { color: var(--muted); font-size: 12px; }
+  .mode-status { color: var(--accent); font-size: 11px; }
+  .mode-status[data-state="active"] { color: #9fe3b1; }
   .warn { color: #ffb454; }
   #physicsWarning { border: 1px solid #9a5a2b; background: rgba(154,90,43,.18);
                     border-radius: 6px; padding: 8px; margin-top: 8px; }
@@ -181,22 +194,22 @@
 <aside id="semanticTree" aria-label="Semantic rig objects">
   <h2>Rig objects</h2>
   <div class="tree-group">
-    <button type="button" aria-current="true">Chest</button>
+    <button type="button" data-context="chest" aria-current="true">Chest</button>
     <div class="tree-sub">Shape · Physics</div>
   </div>
   <div class="tree-group">
-    <button type="button" disabled>Face</button>
+    <button type="button" data-context="eyes" aria-current="false">Eyes</button>
     <div class="tree-sub">Eyes · Gaze · Mouth</div>
   </div>
   <div class="tree-group">
-    <button type="button" disabled>Hair</button>
+    <button type="button" data-context="hair" aria-current="false">Hair</button>
     <div class="tree-sub">Front · Back · Other</div>
   </div>
   <div class="tree-group">
-    <button type="button" disabled>Body</button>
-    <div class="tree-sub">Neck · Attachments</div>
+    <button type="button" data-context="raw" aria-current="false">Raw parts</button>
+    <div class="tree-sub">Advanced manifest inspection</div>
   </div>
-  <p class="hint">Chest authoring is available first. Additional semantic inspectors can be added without exposing raw manifest ids.</p>
+  <p class="hint">Select an object to show only its contextual inspector.</p>
 </aside>
 
 <div id="stage">
@@ -498,6 +511,7 @@
 </div>
 
 <script type="module" src="./ui-mode.mjs"></script>
+<script type="module" src="./semantic-inspector.mjs"></script>
 <script type="module" src="./parameter-panel.mjs"></script>
 <script type="module" src="./runtime.mjs"></script>
 

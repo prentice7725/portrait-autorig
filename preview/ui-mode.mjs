@@ -23,6 +23,14 @@ function intro(mode, title, description) {
   const element = document.createElement("div");
   element.className = "mode-intro";
   element.innerHTML = `<strong>${title}</strong><span>${description}</span>`;
+  if (mode === "edit") {
+    const status = document.createElement("span");
+    status.id = "editLifecycleStatus";
+    status.className = "mode-status";
+    status.setAttribute("aria-live", "polite");
+    status.textContent = "Edit pose inactive";
+    element.appendChild(status);
+  }
   modePanels[mode].appendChild(element);
 }
 
@@ -56,6 +64,7 @@ const groups = {
     { title: "Chest Physics", ids: ["r3Meta", "r3Preset", "r3ApplyPreset", "r3Frequency", "r3Damping", "r3RangeX", "r3RangeY", "r3LagX", "r3LagY", "r3MaxDisplacement", "r3Save", "r3Reset"] },
     { title: "Chest Shape", ids: ["p3Meta", "bustYMinus", "bustNeutral", "bustYPlus", "bustXMinus", "bustXPlus", "showP3Cage", "r2Meta", "r2Pose", "r2EditTarget", "r2EditMode", "r2Save", "r2Reset", "r2Download"] },
     { title: "Eyes", ids: ["lidLine", "lidThick", "winkL", "winkR", "blinkNow"] },
+    { title: "Raw Parts (Advanced)", ids: [] },
   ],
   qa: [
     { title: "Runtime QA", ids: ["profiler", "bodySway", "chestInertia", "asymmetry", "kickX", "kickY", "chestImpulseY", "stopBody", "breathOnly", "inertiaOnly", "resetMotion", "motionGraph"] },
@@ -72,6 +81,14 @@ for (const [mode, modeGroups] of Object.entries(groups)) {
   for (const group of modeGroups) {
     const section = document.createElement("section");
     section.className = "mode-group";
+    const context = {
+      Hair: "hair",
+      "Chest Physics": "chest",
+      "Chest Shape": "chest",
+      Eyes: "eyes",
+      "Raw Parts (Advanced)": "raw",
+    }[group.title];
+    if (context) section.dataset.context = context;
     const title = document.createElement("h2");
     title.textContent = group.title;
     section.appendChild(title);
@@ -101,6 +118,7 @@ for (const id of ["topRunMeta", "topPhysicsWarning", "topR4DisplayMeta", "topR4D
 
 function setMode(mode) {
   const next = modePanels[mode] ? mode : "preview";
+  const previous = document.body.dataset.mode || "preview";
   document.body.dataset.mode = next;
   for (const [name, section] of Object.entries(modePanels)) {
     section.classList.toggle("is-active", name === next);
@@ -109,7 +127,9 @@ function setMode(mode) {
     const selected = tab.dataset.mode === next;
     tab.setAttribute("aria-pressed", String(selected));
   }
-  window.dispatchEvent(new CustomEvent("rigstudio:modechange", { detail: { mode: next } }));
+  window.dispatchEvent(new CustomEvent("rigstudio:modechange", {
+    detail: { mode: next, previousMode: previous },
+  }));
 }
 
 for (const tab of document.querySelectorAll(".mode-tab")) {

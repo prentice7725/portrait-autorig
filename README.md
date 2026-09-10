@@ -354,6 +354,8 @@ node preview/check_body_kick_pipeline.mjs
 node preview/check_chest_p3_keyforms.mjs
 node preview/check_chest_p3_real_kick.mjs
 node preview/check_chest_p3_breath_isolation.mjs
+node preview/check_edit_lifecycle.mjs
+node preview/check_p4_semantic_inspector.mjs
 ```
 
 테스트 의존성에는 원본 Composer schema를 직접 검증하기 위한 `jsonschema`가 포함되어

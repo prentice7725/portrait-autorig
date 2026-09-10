@@ -342,6 +342,7 @@ export const state = {
   r2: { pose: "bust_x_neg", editTarget: "keyform", editMode: false,
         activePoint: null, dragging: false, dirty: false },
   r3: { dirty: false },
+  editSession: { active: false, enteredAt: 0, snapshot: null, physicsSuspended: false },
   t0: performance.now(),
 };
 
@@ -1622,6 +1623,7 @@ export function build(manifest, images, options = {}) {
   state.r2 = { pose: "bust_x_neg", editTarget: "keyform", editMode: false,
     activePoint: null, dragging: false, dirty: false };
   state.r3 = { dirty: false };
+  state.editSession = { active: false, enteredAt: 0, snapshot: null, physicsSuspended: false };
   state.r5Hair = { layer: "all" };
   const p3SpecForPhysics = manifest.motion?.upper_torso_parametric_deformer;
   const p3ParametricActive = p3SpecForPhysics?.enabled !== false
@@ -1938,6 +1940,14 @@ export function stepPhysicsFixed(count = 1, inputs = {}) {
 
 export function advancePhysics(now, inputs) {
   if (!state.physicsDrivers) return {};
+  // P3 stable Edit Pose: physics drivers remain instantiated so the resolved
+  // rig contract is unchanged, but their time-evolving output is frozen while
+  // an authoring pose is being directly manipulated.
+  if (state.editSession?.active) {
+    state.physicsAccumulator = 0;
+    state.physicsLastNow = now;
+    return state.physicsOutputs;
+  }
   const previousNow = state.physicsLastNow;
   const elapsed = previousNow == null ? 0 : Math.max(0, (now - previousNow) / 1000);
   state.physicsAccumulator += Math.max(0, Math.min(0.1, elapsed));
@@ -2486,6 +2496,168 @@ export function drawHairZonesOverlay() {
       ctx.beginPath(); ctx.arc(tip[0], tip[1], 5, 0, Math.PI * 2); ctx.fill();
     }
   }
+}
+
+const EDIT_SESSION_CONTROL_IDS = [
+  "autoIdle", "bodySway", "chestInertia", "doBlink", "doBreathe", "doTalk",
+  "useArt", "gazeX", "gazeY", "mouthOpen", "breathAmp", "turnX", "turnY",
+  "tilt", "shell", "r2EditMode",
+];
+
+function editControlSnapshot() {
+  const controls = {};
+  for (const id of EDIT_SESSION_CONTROL_IDS) {
+    const element = document.getElementById(id);
+    if (!element) continue;
+    controls[id] = {
+      checked: typeof element.checked === "boolean" ? element.checked : undefined,
+      value: element.value,
+    };
+  }
+  return controls;
+}
+
+function restoreEditControls(controls = {}) {
+  for (const [id, saved] of Object.entries(controls)) {
+    const element = document.getElementById(id);
+    if (!element) continue;
+    if (typeof saved.checked === "boolean") element.checked = saved.checked;
+    if (saved.value != null) element.value = saved.value;
+  }
+}
+
+function setEditControl(id, value) {
+  const element = document.getElementById(id);
+  if (!element) return;
+  if (typeof value === "boolean") element.checked = value;
+  else element.value = String(value);
+}
+
+function editStatus(message, active) {
+  const element = document.getElementById("editLifecycleStatus");
+  if (!element) return;
+  element.textContent = message;
+  element.dataset.state = active ? "active" : "inactive";
+}
+
+function emitEditState(active, reason) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("rigstudio:editstatechange", {
+    detail: { active, reason },
+  }));
+}
+
+function emitRestoredParameters(parameters) {
+  if (typeof window === "undefined") return;
+  for (const [id, value] of Object.entries(parameters || {})) {
+    window.dispatchEvent(new CustomEvent("rigstudio:parameterchange", {
+      detail: { id, value: Number(value), source: "edit-restore" },
+    }));
+  }
+}
+
+function stableParameterDefaults() {
+  const values = {};
+  for (const descriptor of state.manifest?.parameters || []) {
+    if (!descriptor?.id) continue;
+    const fallback = Number(descriptor.default ?? 0);
+    values[descriptor.id] = Number.isFinite(fallback) ? fallback : 0;
+  }
+  return values;
+}
+
+function setStableAuthoringPose() {
+  const defaults = stableParameterDefaults();
+  state.turnX = 0;
+  state.turnY = 0;
+  state.tiltDeg = 0;
+  state.shell = 0;
+  state.mouthOpen = 0;
+  state.talkUntil = 0;
+  state.talkTarget = 0;
+  state.blink = { l: 0, r: 0 };
+  state.blinkTimer = 0;
+  state.blinkPhase = null;
+  state.gazeTargets = [0, 0];
+  state.parameters = defaults;
+  state.parameterOverrides = {};
+  state.motionQA = {
+    ...state.motionQA,
+    inertia: false,
+    inertiaOnly: false,
+    chestImpulseX: 0,
+    chestImpulseY: 0,
+    asymmetry: 1,
+    shapeGain: null,
+    side: "both",
+    poseActive: false,
+    poseQ: 0,
+    poseV: 0,
+    p3Pose: null,
+  };
+  state.bodySwayEnabled = false;
+  for (const id of ["autoIdle", "bodySway", "chestInertia", "doBlink", "doBreathe", "doTalk"])
+    setEditControl(id, false);
+  for (const [id, value] of [["turnX", 0], ["turnY", 0], ["tilt", 0], ["gazeX", 0],
+    ["gazeY", 0], ["mouthOpen", 0], ["shell", 0]]) setEditControl(id, value);
+  setEditControl("r2EditMode", true);
+  resetPhysics();
+}
+
+/** Enter the P3 stable authoring pose without destroying runtime drivers. */
+export function enterEdit() {
+  if (state.editSession?.active) return state.editSession;
+  const snapshot = {
+    controls: editControlSnapshot(),
+    turnX: state.turnX, turnY: state.turnY, tiltDeg: state.tiltDeg, shell: state.shell,
+    mouthOpen: state.mouthOpen, talkUntil: state.talkUntil, talkTarget: state.talkTarget,
+    blink: cloneJson(state.blink), blinkTimer: state.blinkTimer, blinkPhase: state.blinkPhase,
+    gazeTargets: cloneJson(state.gazeTargets), parameters: cloneJson(state.parameters),
+    parameterOverrides: cloneJson(state.parameterOverrides), motionQA: cloneJson(state.motionQA),
+    collarOverride: state.collarOverride, displayPreset: state.displayPreset,
+    r2EditMode: state.r2?.editMode,
+  };
+  state.editSession = {
+    active: true, enteredAt: performance.now(), snapshot, physicsSuspended: true,
+  };
+  setStableAuthoringPose();
+  setR2EditMode(true);
+  editStatus("Stable authoring pose active · Preview motion paused", true);
+  emitEditState(true, "enter");
+  return state.editSession;
+}
+
+/** Leave P3 Edit, reset transient physics history, then restore Preview state. */
+export function exitEdit() {
+  const session = state.editSession;
+  if (!session?.active) return false;
+  const snapshot = session.snapshot || {};
+  resetPhysics();
+  warmupPhysics(0.15, { breath: 0, angleY: 0, strandTarget: 0 });
+  state.turnX = snapshot.turnX ?? 0;
+  state.turnY = snapshot.turnY ?? 0;
+  state.tiltDeg = snapshot.tiltDeg ?? 0;
+  state.shell = snapshot.shell ?? 0;
+  state.mouthOpen = snapshot.mouthOpen ?? 0;
+  state.talkUntil = snapshot.talkUntil ?? 0;
+  state.talkTarget = snapshot.talkTarget ?? 0;
+  state.blink = cloneJson(snapshot.blink) || { l: 0, r: 0 };
+  state.blinkTimer = snapshot.blinkTimer || 0;
+  state.blinkPhase = snapshot.blinkPhase || null;
+  state.gazeTargets = cloneJson(snapshot.gazeTargets) || [];
+  state.parameters = cloneJson(snapshot.parameters) || {};
+  state.parameterOverrides = cloneJson(snapshot.parameterOverrides) || {};
+  state.motionQA = cloneJson(snapshot.motionQA) || state.motionQA;
+  state.collarOverride = snapshot.collarOverride ?? null;
+  state.displayPreset = snapshot.displayPreset || state.displayPreset;
+  restoreEditControls(snapshot.controls);
+  state.editSession = { active: false, enteredAt: session.enteredAt, snapshot: null, physicsSuspended: false };
+  setR2EditMode(Boolean(snapshot.r2EditMode));
+  state.bodySwayEnabled = false;
+  emitRestoredParameters(state.parameters);
+  editStatus("Preview resumed · physics warmed up", false);
+  emitEditState(false, "exit");
+  return true;
 }
 
 function r2ChestPart() {
@@ -3389,8 +3561,9 @@ export function frame(now) {
   const t = (now - state.t0) / 1000;
   const dt = Math.min(0.1, (now - (state.lastFrame || now)) / 1000);
   state.lastFrame = now;
-  const autoIdle = !!document.getElementById("autoIdle")?.checked;
-  state.bodySwayEnabled = !!document.getElementById("bodySway")?.checked && autoIdle;
+  const editActive = !!state.editSession?.active;
+  const autoIdle = !editActive && !!document.getElementById("autoIdle")?.checked;
+  state.bodySwayEnabled = !editActive && !!document.getElementById("bodySway")?.checked && autoIdle;
   if (autoIdle) {
     // Two incommensurable periods so the loop never visibly repeats, and the
     // turn held well inside where it starts to cost something.
@@ -3402,7 +3575,7 @@ export function frame(now) {
     updateIdleControls(now);
   }
 
-  if (document.getElementById("doBlink").checked) {
+  if (!editActive && document.getElementById("doBlink").checked) {
     if (!state.blinkTimer) scheduleBlink(now);
     if (!state.blinkPhase && now >= state.blinkTimer) {
       startBlink(now, ["l", "r"]);
@@ -3415,7 +3588,7 @@ export function frame(now) {
   // Talk: a mouth that opens and closes on its own, only when the pack brought
   // a mouth to open. Irregular on purpose -- an even cycle reads as chewing.
   const mouthVariant = variantSetForFeature("mouth");
-  if ((state.art.mouth || mouthVariant) && document.getElementById("doTalk").checked) {
+  if (!editActive && (state.art.mouth || mouthVariant) && document.getElementById("doTalk").checked) {
     if (now >= state.talkUntil) {
       state.talkTarget = state.talkTarget > 0.5 ? 0 : 0.55 + Math.random() * 0.45;
       state.talkUntil = now + (state.talkTarget > 0.5 ? 90 + Math.random() * 110
@@ -3456,7 +3629,7 @@ export function frame(now) {
     }
   }
 
-  const automaticBreath = document.getElementById("doBreathe").checked
+  const automaticBreath = !editActive && document.getElementById("doBreathe").checked
     ? Math.sin(t * 2 * Math.PI / state.manifest.motion.breathing.period_s) : 0;
   const breathSin = state.parameterOverrides.ParamBreath != null
     ? Number(state.parameterOverrides.ParamBreath) : automaticBreath;
@@ -3946,6 +4119,13 @@ document.getElementById("r2Download")?.addEventListener("click", () => {
     : buildChestAuthoring(state.manifest, state.authoring);
   downloadR2File("deformers.json", authoring.deformers || {});
 });
+if (typeof window !== "undefined") {
+  window.addEventListener("rigstudio:modechange", (event) => {
+    const mode = event.detail?.mode;
+    if (mode === "edit") enterEdit();
+    else if (state.editSession?.active) exitEdit();
+  });
+}
 for (const id of ["showP3Cage", "showP3Heatmap", "showP3Influenced", "showP3Locks", "showP3Occluders"]) {
   document.getElementById(id).addEventListener("change", () => {
     const cage = document.getElementById("showP3Cage")?.checked;
