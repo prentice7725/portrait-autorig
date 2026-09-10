@@ -242,7 +242,7 @@ Rig Studio에서 calibration을 저장할 때 활성화됩니다. 기존 hint가
 호환성을 위해 기존 generated seed와 runtime manifest를 유지하지만, 수정 결과는
 Composer가 아니라 `authoring/`에 저장됩니다.
 
-Preview는 `AutoRig Preview P3.0`와 physics model을 Run 패널에 표시하며, physics
+Preview는 `AutoRig Preview P6.3`와 physics model을 Run 패널에 표시하며, physics
 block이 없는 구형 Rig Bundle은 `PHYSICS NOT ACTIVE` 경고를 냅니다. GUI가
 여는 preview server는 no-cache headers를 사용해 현재 checkout의
 `preview/index.html`/`runtime.mjs`/`physics.mjs` 조합을 실행합니다.
@@ -354,6 +354,11 @@ node preview/check_body_kick_pipeline.mjs
 node preview/check_chest_p3_keyforms.mjs
 node preview/check_chest_p3_real_kick.mjs
 node preview/check_chest_p3_breath_isolation.mjs
+node preview/check_edit_lifecycle.mjs
+node preview/check_p4_semantic_inspector.mjs
+node preview/check_rig_controller.mjs
+node preview/check_expression_lifecycle.mjs
+node preview/check_lipsync.mjs
 ```
 
 테스트 의존성에는 원본 Composer schema를 직접 검증하기 위한 `jsonschema`가 포함되어

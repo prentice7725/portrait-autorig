@@ -7,7 +7,7 @@ const modeModule = await readFile(new URL("./ui-mode.mjs", here), "utf8");
 
 assert.match(html, /<header id="topbar">[\s\S]*data-mode="preview"[\s\S]*data-mode="edit"[\s\S]*data-mode="qa"/);
 assert.match(html, /<aside id="semanticTree"/);
-assert.match(html, /<script type="module" src="\.\/ui-mode\.mjs"><\/script>\s*<script type="module" src="\.\/parameter-panel\.mjs"><\/script>\s*<script type="module" src="\.\/runtime\.mjs"><\/script>/);
+assert.match(html, /<script type="module" src="\.\/ui-mode\.mjs"><\/script>\s*<script type="module" src="\.\/semantic-inspector\.mjs"><\/script>\s*<script type="module" src="\.\/parameter-panel\.mjs"><\/script>\s*<script type="module" src="\.\/expression-ui\.mjs"><\/script>\s*<script type="module" src="\.\/audio-test-ui\.mjs"><\/script>\s*<script type="module" src="\.\/runtime\.mjs"><\/script>/);
 assert.match(modeModule, /section\.id = `\$\{mode\}Panel`/);
 assert.match(modeModule, /"autoIdle"/);
 assert.match(modeModule, /"r2Save"/);
