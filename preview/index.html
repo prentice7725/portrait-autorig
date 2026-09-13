@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -156,6 +156,14 @@
   .mode-status { color: var(--accent); font-size: 11px; }
   .mode-status[data-state="active"] { color: #9fe3b1; }
   .warn { color: #ffb454; }
+  .qa-active-badge { color: #10131a; background: #ffb454; border-radius: 999px;
+                    padding: 3px 9px; font-size: 11px; font-weight: 800;
+                    letter-spacing: .05em; white-space: nowrap; }
+  .project-actions { display: flex; align-items: center; gap: 6px; }
+  .project-actions button { min-height: 34px; padding: 6px 9px; }
+  .project-actions button:disabled { opacity: .45; cursor: default; }
+  #projectDirty[data-state="dirty"] { color: #ffcf85; }
+  #projectDirty[data-state="clean"] { color: #9fe3b1; }
   #physicsWarning { border: 1px solid #9a5a2b; background: rgba(154,90,43,.18);
                     border-radius: 6px; padding: 8px; margin-top: 8px; }
   #err { color: #ff8080; white-space: pre-wrap; }
@@ -181,18 +189,25 @@
     <span id="topProject">No project loaded</span>
   </div>
   <nav aria-label="Rig Studio mode">
-    <button class="mode-tab" type="button" data-mode="preview" aria-pressed="true">Preview</button>
-    <button class="mode-tab" type="button" data-mode="edit" aria-pressed="false">Edit</button>
-    <button class="mode-tab" type="button" data-mode="qa" aria-pressed="false">QA</button>
+    <button class="mode-tab" type="button" data-mode="preview" aria-pressed="true">미리보기</button>
+    <button class="mode-tab" type="button" data-mode="edit" aria-pressed="false">편집</button>
+    <button class="mode-tab" type="button" data-mode="qa" aria-pressed="false">검증</button>
   </nav>
   <div id="topStatus">
     <div class="meta" id="topRunMeta">No rig loaded</div>
     <div class="meta" id="topPhysicsWarning" hidden></div>
-    <label>Size
+    <div class="qa-active-badge" id="qaActiveBadge" aria-live="polite" aria-hidden="true" hidden>QA ACTIVE</div>
+    <div class="meta" id="projectDirty" data-state="clean" aria-live="polite">저장됨</div>
+    <div class="project-actions" aria-label="Project history">
+      <button id="saveProject" type="button">프로젝트 저장</button>
+      <button id="undoProject" type="button" disabled>실행 취소</button>
+      <button id="redoProject" type="button" disabled>다시 실행</button>
+    </div>
+    <label>크기
       <select id="topR4DisplayPreset" aria-label="Game preview display preset">
         <option value="full">100%</option>
-        <option value="game_portrait">Game portrait</option>
-        <option value="desk_portrait">Desk portrait</option>
+        <option value="game_portrait">게임 세로형</option>
+        <option value="desk_portrait">데스크 세로형</option>
       </select>
     </label>
     <div class="meta" id="topR4DisplayMeta">Preview size: not loaded</div>
@@ -200,24 +215,24 @@
 </header>
 
 <aside id="semanticTree" aria-label="Semantic rig objects">
-  <h2>Rig objects</h2>
+  <h2>리그 오브젝트</h2>
   <div class="tree-group">
-    <button type="button" data-context="chest" aria-current="true">Chest</button>
-    <div class="tree-sub">Shape · Physics</div>
+    <button type="button" data-context="chest" aria-current="true">가슴</button>
+    <div class="tree-sub">형태 · 물리</div>
   </div>
   <div class="tree-group">
-    <button type="button" data-context="eyes" aria-current="false">Eyes</button>
-    <div class="tree-sub">Eyes · Gaze · Mouth</div>
+    <button type="button" data-context="eyes" aria-current="false">눈</button>
+    <div class="tree-sub">눈 · 시선 · 입</div>
   </div>
   <div class="tree-group">
-    <button type="button" data-context="hair" aria-current="false">Hair</button>
-    <div class="tree-sub">Front · Back · Other</div>
+    <button type="button" data-context="hair" aria-current="false">헤어</button>
+    <div class="tree-sub">앞 · 뒤 · 기타</div>
   </div>
   <div class="tree-group">
-    <button type="button" data-context="raw" aria-current="false">Raw parts</button>
-    <div class="tree-sub">Advanced manifest inspection</div>
+    <button type="button" data-context="raw" aria-current="false">원본 파츠</button>
+    <div class="tree-sub">고급 manifest 검사</div>
   </div>
-  <p class="hint">Select an object to show only its contextual inspector.</p>
+  <p class="hint">오브젝트를 선택하면 해당 inspector만 표시됩니다.</p>
 </aside>
 
 <div id="stage">
@@ -230,25 +245,25 @@
     <p>Pick a run directory containing <code>*_rig_manifest.json</code> and
        <code>rig/images/</code>, or drop the folder here.</p>
     <div class="row" style="justify-content:center">
-      <button id="pick">Choose run folder</button>
-      <button id="pickProject">Open Rig Project</button>
+      <button id="pick">Run 폴더 선택</button>
+      <button id="pickProject">Rig Project 열기</button>
     </div>
     <p id="err"></p>
   </div>
 </div>
 
 <div id="panel">
-  <h2>Run</h2>
+  <h2>실행</h2>
   <div class="meta" id="runmeta">no run loaded</div>
   <div id="physicsWarning" class="warn" hidden></div>
-  <div class="meta" id="profiler">profiler waiting</div>
+  <div class="meta" id="profiler">프로파일러 대기 중</div>
 
-  <h2>Preview Size (R4)</h2>
-  <label>Display preset
-    <select id="r4DisplayPreset" aria-label="Game preview display preset">
+  <h2>프리뷰 크기 (R4)</h2>
+  <label>표시 프리셋
+    <select id="r4DisplayPreset" aria-label="게임 프리뷰 표시 크기">
       <option value="full">100%</option>
-      <option value="game_portrait">Game portrait</option>
-      <option value="desk_portrait">Desk portrait</option>
+      <option value="game_portrait">게임 세로형</option>
+      <option value="desk_portrait">데스크 세로형</option>
     </select>
   </label>
   <div class="meta" id="r4DisplayMeta">Preview size: not loaded</div>
@@ -256,35 +271,36 @@
      Letterboxing preserves the rig aspect ratio; scroll the stage for a larger
      desk target. This is a display-only QA mode and does not alter the manifest.</p>
 
-  <h2>Hair Zones (R5)</h2>
+  <h2>헤어 영역 (R5)</h2>
   <div class="meta" id="r5HairMeta">Hair detection: not available</div>
-  <label class="row"><input type="checkbox" id="showR5HairZones"> Show detected zones</label>
-  <label class="row"><input type="checkbox" id="showR5HairRoots"> Show root / tip</label>
-  <label>Layer
+  <label class="row"><input type="checkbox" id="showR5HairZones"> 감지 영역 표시</label>
+  <label class="row"><input type="checkbox" id="showR5HairRoots"> 루트 / 끝점 표시</label>
+  <label>레이어
     <select id="r5HairLayer" aria-label="R5 hair layer">
-      <option value="all">All supported hair layers</option>
+      <option value="all">지원되는 모든 헤어 레이어</option>
     </select>
   </label>
   <p class="hint">R5 detects only <code>front hair</code>, <code>back hair</code>,
      and <code>hair</code>. Zones are inspection data; chain and keyform editing
      remains R6.</p>
 
-  <h2>Idle</h2>
-  <label class="row"><input type="checkbox" id="autoIdle"> Auto idle motion</label>
-  <label class="row"><input type="checkbox" id="bodySway" checked> Body sway</label>
-  <label class="row"><input type="checkbox" id="chestInertia" checked> Chest inertia</label>
-  <label>L/R asymmetry <span class="val" id="asymmetryv">1.00</span>
+  <h2>대기 동작</h2>
+  <label class="row"><input type="checkbox" id="autoIdle"> 자동 대기 동작</label>
+  <label class="row"><input type="checkbox" id="bodySway" checked> 몸 흔들림</label>
+  <label class="row"><input type="checkbox" id="chestInertia" checked> 가슴 관성</label>
+  <label>좌/우 비대칭 <span class="val" id="asymmetryv">1.00</span>
     <input type="range" id="asymmetry" min="0" max="1" step="0.01" value="1"></label>
   <div class="row">
-    <button id="kickX">Body Kick X</button>
-    <button id="kickY">Body Kick Y</button>
-    <button id="chestImpulseY">Chest Impulse Y</button>
-    <button id="stopBody">Stop Body</button>
+    <button id="kickX">몸 충격 X</button>
+    <button id="kickY">몸 충격 Y</button>
+    <button id="chestImpulseY">가슴 충격 Y</button>
+    <button id="stopBody">몸 정지</button>
   </div>
   <div class="row">
-    <button id="breathOnly">Breath Only</button>
-    <button id="inertiaOnly">Inertia Only</button>
-    <button id="resetMotion">Reset Motion</button>
+    <button id="breathOnly">호흡만</button>
+    <button id="inertiaOnly">관성만</button>
+    <button id="resetMotion">동작 초기화</button>
+    <button id="resetQa">QA 초기화</button>
   </div>
   <canvas id="motionGraph" width="360" height="100" aria-label="Body and chest motion graph"></canvas>
   <p class="hint">Off by default: the page opens on the rest pose, so what you
@@ -294,17 +310,17 @@
      labels are sampled at 10Hz so the animation does not pay a DOM write per
      frame. The graph shows body Y and independent chest L/R response over the
      last five seconds; QA buttons never modify the manifest.</p>
-  <h2>Chest Soft Morph</h2>
+  <h2>가슴 Soft Morph</h2>
   <div class="meta" id="softMeta">not available in this run <span id="qaBadge" class="warn" hidden>QA OVERRIDE</span></div>
   <div class="meta" id="chestCalibration">Chest response: no probe</div>
   <div class="row">
-    <button id="chest1px">Chest 1px</button>
-    <button id="chest2px">Chest 2px</button>
-    <button id="chest4px">Chest 4px</button>
+    <button id="chest1px">가슴 1px</button>
+    <button id="chest2px">가슴 2px</button>
+    <button id="chest4px">가슴 4px</button>
   </div>
-  <h2>Chest Physics Calibration (R3)</h2>
+  <h2>가슴 물리 보정 (R3)</h2>
   <div class="meta" id="r3Meta">R3 calibration: no physics driver</div>
-  <label>Preset
+  <label>프리셋
     <select id="r3Preset" aria-label="Chest physics preset">
       <option value="soft">Soft</option>
       <option value="firm">Firm</option>
@@ -312,36 +328,36 @@
     </select>
   </label>
   <div class="row">
-    <button id="r3ApplyPreset">Apply Preset</button>
-    <button id="r3Save">Save Calibration</button>
-    <button id="r3Reset">Reset Physics to Auto</button>
+    <button id="r3ApplyPreset">프리셋 적용</button>
+    <button id="r3Save">보정 저장</button>
+    <button id="r3Reset">물리를 Auto로 초기화</button>
   </div>
-  <label>Natural frequency <span class="val" id="r3Frequencyv">1.80 Hz</span>
+  <label>고유 진동수 <span class="val" id="r3Frequencyv">1.80 Hz</span>
     <input type="range" id="r3Frequency" min="0.5" max="4" step="0.01" value="1.8"></label>
-  <label>Damping ratio <span class="val" id="r3Dampingv">0.75</span>
+  <label>감쇠비 <span class="val" id="r3Dampingv">0.75</span>
     <input type="range" id="r3Damping" min="0" max="2" step="0.01" value="0.75"></label>
-  <label>Range X <span class="val" id="r3RangeXv">6.00px</span>
+  <label>범위 X <span class="val" id="r3RangeXv">6.00px</span>
     <input type="range" id="r3RangeX" min="0.1" max="64" step="0.1" value="6"></label>
-  <label>Range Y <span class="val" id="r3RangeYv">6.00px</span>
+  <label>범위 Y <span class="val" id="r3RangeYv">6.00px</span>
     <input type="range" id="r3RangeY" min="0.1" max="64" step="0.1" value="6"></label>
-  <label>Lag X <span class="val" id="r3LagXv">0.00s</span>
+  <label>지연 X <span class="val" id="r3LagXv">0.00s</span>
     <input type="range" id="r3LagX" min="0" max="5" step="0.01" value="0"></label>
-  <label>Lag Y <span class="val" id="r3LagYv">1.40s</span>
+  <label>지연 Y <span class="val" id="r3LagYv">1.40s</span>
     <input type="range" id="r3LagY" min="0" max="5" step="0.01" value="1.4"></label>
-  <label>Max displacement <span class="val" id="r3MaxDisplacementv">16.00px</span>
+  <label>최대 변위 <span class="val" id="r3MaxDisplacementv">16.00px</span>
     <input type="range" id="r3MaxDisplacement" min="0.1" max="64" step="0.1" value="16"></label>
   <p class="hint">R3 changes timing and physical response only. Body Kick X/Y
      and Auto idle above are live probes; BustX/Y shape authoring remains in
      R2. Save Calibration writes <code>authoring/physics.json</code> and the
      range correction separately from the generated base.</p>
-  <label class="row"><input type="checkbox" id="doSoftMorph"> Chest Soft Morph</label>
-  <label>Strength <span class="val" id="softStrengthv">0.00</span>
+  <label class="row"><input type="checkbox" id="doSoftMorph"> 가슴 Soft Morph</label>
+  <label>강도 <span class="val" id="softStrengthv">0.00</span>
     <input type="range" id="softStrength" min="0" max="1" step="0.01" value="0"></label>
-  <label>Horizontal <span class="val" id="softHorizv">0.0px</span>
+  <label>가로 <span class="val" id="softHorizv">0.0px</span>
     <input type="range" id="softHoriz" min="0" max="24" step="0.1" value="0"></label>
-  <label>Vertical <span class="val" id="softVertv">0.0px</span>
+  <label>세로 <span class="val" id="softVertv">0.0px</span>
     <input type="range" id="softVert" min="0" max="12" step="0.1" value="0"></label>
-  <label class="row"><input type="checkbox" id="softRegion"> Show region</label>
+  <label class="row"><input type="checkbox" id="softRegion"> 영역 표시</label>
   <p class="hint">Local two-lobe volume response confined to <code>topwear</code>,
      layered on top of breathing rather than replacing it -- turning this off
      leaves breathing exactly as it was. Disabled and unchecked when this
@@ -349,37 +365,37 @@
      The extended slider range is for hard-morph QA; production manifests keep
      their authored amplitude.</p>
 
-  <h2>Chest Shape QA (P2.5.1)</h2>
-  <div class="meta" id="chestBasisMeta">basis: n/a
+  <h2>가슴 형태 QA (P2.5.1)</h2>
+  <div class="meta" id="chestBasisMeta">basis: 없음
     <span id="shapeQaBadge" class="warn" hidden>QA OVERRIDE</span></div>
   <div class="row">
-    <button id="poseQPlus4">Shape q +4</button>
-    <button id="poseQMinus4">Shape q -4</button>
-    <button id="poseVPlus12">Shape v +12</button>
-    <button id="poseVMinus12">Shape v -12</button>
+    <button id="poseQPlus4">형태 q +4</button>
+    <button id="poseQMinus4">형태 q -4</button>
+    <button id="poseVPlus12">형태 v +12</button>
+    <button id="poseVMinus12">형태 v -12</button>
   </div>
   <div class="row">
-    <button id="sideBoth">Both</button>
-    <button id="sideLeft">Left only</button>
-    <button id="sideRight">Right only</button>
+    <button id="sideBoth">양쪽</button>
+    <button id="sideLeft">왼쪽만</button>
+    <button id="sideRight">오른쪽만</button>
   </div>
-  <label>Volume <span class="val" id="gainVolumev">x1.00</span>
+  <label>볼륨 <span class="val" id="gainVolumev">x1.00</span>
     <input type="range" id="gainVolume" min="0" max="2" step="0.05" value="1"></label>
-  <label>Carrier <span class="val" id="gainCarrierv">x1.00</span>
+  <label>캐리어 <span class="val" id="gainCarrierv">x1.00</span>
     <input type="range" id="gainCarrier" min="0" max="2" step="0.05" value="1"></label>
-  <label>Sag <span class="val" id="gainSagv">x1.00</span>
+  <label>처짐 <span class="val" id="gainSagv">x1.00</span>
     <input type="range" id="gainSag" min="0" max="2" step="0.05" value="1"></label>
-  <label>Follow <span class="val" id="gainFollowv">x1.00</span>
+  <label>추종 <span class="val" id="gainFollowv">x1.00</span>
     <input type="range" id="gainFollow" min="0" max="2" step="0.05" value="1"></label>
-  <label>Shear X <span class="val" id="gainShearXv">x1.00</span>
+  <label>전단 X <span class="val" id="gainShearXv">x1.00</span>
     <input type="range" id="gainShearX" min="0" max="2" step="0.05" value="1"></label>
-  <label>Shear Y <span class="val" id="gainShearYv">x1.00</span>
+  <label>전단 Y <span class="val" id="gainShearYv">x1.00</span>
     <input type="range" id="gainShearY" min="0" max="2" step="0.05" value="1"></label>
-  <label>Compression <span class="val" id="gainCompressionv">x1.00</span>
+  <label>압축 <span class="val" id="gainCompressionv">x1.00</span>
     <input type="range" id="gainCompression" min="0" max="2" step="0.05" value="1"></label>
-  <div class="row"><button id="resetShapeQA">Reset Shape QA</button></div>
-  <label class="row"><input type="checkbox" id="showChestBasis"> Show Chest Basis</label>
-  <label>Basis
+  <div class="row"><button id="resetShapeQA">형태 QA 초기화</button></div>
+  <label class="row"><input type="checkbox" id="showChestBasis"> 가슴 basis 표시</label>
+  <label>Basis 선택
     <select id="chestBasisSelect">
       <option value="combined">Combined</option>
       <option value="carrier">Carrier</option>
@@ -398,8 +414,14 @@
      seconds -- a reference-like response arcs rather than tracking a
      straight line.</p>
 
-  <h2>Chest Parametric Warp (P3)</h2>
+  <h2>가슴 파라메트릭 변형 (P3)</h2>
   <div class="meta" id="p3Meta">P3 deformer: n/a</div>
+  <div class="meta">QA 넓은 범위 테스트</div>
+  <label>머리 회전 X <span class="val" id="qaTurnXv">0.00</span>
+    <input type="range" id="qaTurnX" min="-1.5" max="1.5" step="0.01" value="0"></label>
+  <label>머리 회전 Y <span class="val" id="qaTurnYv">0.00</span>
+    <input type="range" id="qaTurnY" min="-1.5" max="1.5" step="0.01" value="0"></label>
+  <div class="row"><button id="qaBlinkNow" type="button">눈 깜빡임 테스트</button></div>
   <div class="row">
     <button id="bustYMinus">BustY -1</button>
     <button id="bustNeutral">Bust 0</button>
@@ -409,19 +431,19 @@
     <button id="bustXMinus">BustX -1</button>
     <button id="bustXPlus">BustX +1</button>
   </div>
-  <label class="row"><input type="checkbox" id="showP3Cage"> Show Cage</label>
-  <label class="row"><input type="checkbox" id="showP3Heatmap"> Show Influence Heatmap</label>
-  <label class="row"><input type="checkbox" id="showP3Influenced"> Show Influenced Mesh</label>
-  <label class="row"><input type="checkbox" id="showP3Locks"> Show Attachment/Locks</label>
-  <label class="row"><input type="checkbox" id="showP3Occluders"> Show Occluders</label>
+  <label class="row"><input type="checkbox" id="showP3Cage"> cage 표시</label>
+  <label class="row"><input type="checkbox" id="showP3Heatmap"> 영향 heatmap 표시</label>
+  <label class="row"><input type="checkbox" id="showP3Influenced"> 영향 mesh 표시</label>
+  <label class="row"><input type="checkbox" id="showP3Locks"> attachment / lock 표시</label>
+  <label class="row"><input type="checkbox" id="showP3Occluders"> occluder 표시</label>
   <p class="hint">P3 separates physics from shape: these pose buttons bypass
      physics and inspect the generated continuous cage keyforms directly.
      Bust 0 must be exact rest; Body Kick tests the same keyforms through the
      runtime parameter bridge.</p>
 
-  <h2>Chest Authoring (R2)</h2>
+  <h2>가슴 Authoring (R2)</h2>
   <div class="meta" id="r2Meta">R2 authoring: no P3 chest deformer</div>
-  <label>Pose
+  <label>자세
     <select id="r2Pose" aria-label="Chest authoring pose">
       <option value="bust_x_neg">BustX -1</option>
       <option value="bust_x_pos">BustX +1</option>
@@ -429,20 +451,20 @@
       <option value="bust_y_pos">BustY +1</option>
     </select>
   </label>
-  <label>Edit target
+  <label>편집 대상
     <select id="r2EditTarget" aria-label="Chest authoring edit target">
-      <option value="keyform">Keyform points</option>
-      <option value="cage">Cage points</option>
-      <option value="cage_bounds">Cage bounds</option>
+      <option value="keyform">Keyform 포인트</option>
+      <option value="cage">Cage 포인트</option>
+      <option value="cage_bounds">Cage 범위</option>
     </select>
   </label>
-  <label class="row"><input type="checkbox" id="r2EditMode"> Edit mode</label>
+  <label class="row"><input type="checkbox" id="r2EditMode"> 편집 모드</label>
   <div class="row">
-    <button id="r2Save">Save Correction</button>
-    <button id="r2Reset">Reset Deformer to Auto</button>
+    <button id="r2Save">보정 저장</button>
+    <button id="r2Reset">Deformer를 Auto로 초기화</button>
   </div>
   <div class="row">
-    <button id="r2Download">Download Authoring</button>
+    <button id="r2Download">Authoring 다운로드</button>
   </div>
   <p class="hint">R2 edits the generated P3 cage/keyform shape only. Neutral is
      locked to exact rest. Drag a visible control point after enabling Edit
@@ -450,62 +472,62 @@
      separated authoring payload when the browser exposes a project folder;
      Download Authoring is the portable fallback.</p>
 
-  <label class="row"><input type="checkbox" id="doBlink" checked> Blink</label>
-  <label class="row"><input type="checkbox" id="doBreathe" checked> Breathing</label>
-  <label>Breath <span class="val" id="breathAmpv">3.0px</span>
+  <label class="row"><input type="checkbox" id="doBlink" checked> 눈 깜빡임</label>
+  <label class="row"><input type="checkbox" id="doBreathe" checked> 호흡</label>
+  <label>호흡 <span class="val" id="breathAmpv">3.0px</span>
     <input type="range" id="breathAmp" min="0" max="20" step="0.5" value="3"></label>
-  <label>Lid line <span class="val" id="lidLinev">0.85</span>
+  <label>눈꺼풀 선 <span class="val" id="lidLinev">0.85</span>
     <input type="range" id="lidLine" min="0.5" max="1" step="0.01" value="0.85"></label>
-  <label>Lid thickness <span class="val" id="lidThickv">0.18</span>
+  <label>눈꺼풀 두께 <span class="val" id="lidThickv">0.18</span>
     <input type="range" id="lidThick" min="0.02" max="0.6" step="0.01" value="0.18"></label>
   <p class="hint">A closed eye should read as one clean line. The lash layer
      holds an upper and a lower stroke: squash too far and they average into a
      grey band, too little and they stay two lines.</p>
   <div class="row">
-    <button id="winkL">Wink L</button>
-    <button id="winkR">Wink R</button>
-    <button id="blinkNow">Blink</button>
+    <button id="winkL">왼쪽 윙크</button>
+    <button id="winkR">오른쪽 윙크</button>
+    <button id="blinkNow">깜빡임</button>
   </div>
   <p class="hint">Wink buttons exercise the left/right eye split (H4).</p>
 
-  <h2>Expression pack</h2>
+  <h2>표정 pack</h2>
   <div class="meta" id="packmeta">no pack in this run</div>
   <div class="expression-catalog" id="expressionCatalog" hidden>
     <div class="expression-buttons" id="expressionButtons" aria-label="Expression catalog"></div>
-    <button id="releaseExpression" type="button">Release / Neutral</button>
+    <button id="releaseExpression" type="button">해제 / 중립</button>
     <div class="expression-status" id="expressionStatus" aria-live="polite">Neutral</div>
   </div>
   <div class="audio-test" id="audioTest">
-    <label for="audioTestFile">Audio Test</label>
+    <label for="audioTestFile">오디오 테스트</label>
     <input id="audioTestFile" type="file" accept="audio/*">
     <div class="row">
-      <button id="audioTestPlay" type="button" disabled>Play</button>
-      <button id="audioTestStop" type="button" disabled>Stop</button>
+      <button id="audioTestPlay" type="button" disabled>재생</button>
+      <button id="audioTestStop" type="button" disabled>정지</button>
     </div>
-    <label class="row"><input type="checkbox" id="lipSyncEnabled"> Use external RMS lip-sync</label>
+    <label class="row"><input type="checkbox" id="lipSyncEnabled"> 외부 RMS 립싱크 사용</label>
     <div class="meta" id="audioTestStatus" aria-live="polite">Choose an audio file</div>
   </div>
-  <label class="row"><input type="checkbox" id="useArt" checked> Use expression art</label>
+  <label class="row"><input type="checkbox" id="useArt" checked> 표정 art 사용</label>
   <p class="hint">Off falls back to the v0.1 blink: the lash squashed onto the
      lid line. On, a recovered closed eye owns the eye while it is shut. This
      is the comparison M4.1 exists to make.</p>
-  <label class="row"><input type="checkbox" id="doTalk"> Talk</label>
-  <label>Mouth open <span class="val" id="mouthOpenv">0.00</span>
+  <label class="row"><input type="checkbox" id="doTalk"> 말하기</label>
+  <label>입 열림 <span class="val" id="mouthOpenv">0.00</span>
     <input type="range" id="mouthOpen" min="0" max="1" step="0.01" value="0"></label>
 
-  <label>Gaze X <span class="val" id="gazeXv">0.00</span>
+  <label>시선 X <span class="val" id="gazeXv">0.00</span>
     <input type="range" id="gazeX" min="-1" max="1" step="0.01" value="0"></label>
-  <label>Gaze Y <span class="val" id="gazeYv">0.00</span>
+  <label>시선 Y <span class="val" id="gazeYv">0.00</span>
     <input type="range" id="gazeY" min="-1" max="1" step="0.01" value="0"></label>
-  <label class="row"><input type="checkbox" id="followCursor"> Follow Cursor</label>
+  <label class="row"><input type="checkbox" id="followCursor"> 커서 추종</label>
   <p class="hint" id="followCursorHint">Move the pointer over the portrait to drive gaze and a subtle head share. Manual gaze/head sliders take priority while held.</p>
 
-  <h2>Head</h2>
-  <label>Turn X <span class="val" id="turnXv">0.00</span>
+  <h2>머리</h2>
+  <label>회전 X <span class="val" id="turnXv">0.00</span>
     <input type="range" id="turnX" min="-1.5" max="1.5" step="0.01" value="0"></label>
-  <label>Turn Y <span class="val" id="turnYv">0.00</span>
+  <label>회전 Y <span class="val" id="turnYv">0.00</span>
     <input type="range" id="turnY" min="-1.5" max="1.5" step="0.01" value="0"></label>
-  <label>Tilt Z <span class="val" id="tiltv">0.0&deg;</span>
+  <label>기울기 Z <span class="val" id="tiltv">0.0&deg;</span>
     <input type="range" id="tilt" min="-15" max="15" step="0.1" value="0"></label>
   <p class="hint">Push past the manifest's &plusmn;2&deg; to find where
      disocclusion shows (H1). Turn off auto idle first.</p>
@@ -515,23 +537,23 @@
      (H6). At 0 the render is identical to the parallax rig, so the slider
      isolates the turn's shape from its amount.</p>
 
-  <h2>Experiments</h2>
+  <h2>실험</h2>
   <label class="row"><input type="checkbox" id="ghost"> head_remainder &rarr; body group</label>
   <p class="hint">Reproduces the Spine ghost silhouette (H2).</p>
-  <label>Neck weight
+  <label>목 가중치
     <select id="neckMode">
       <option value="gradient">gradient (manifest)</option>
       <option value="rigid">rigid 1.0</option>
       <option value="detached">detached 0.0</option>
     </select></label>
   <p class="hint">Compare against the two degenerate cases (H3).</p>
-  <label>Collar follow <span class="val" id="collarv">manifest</span>
+  <label>칼라 추종 <span class="val" id="collarv">manifest</span>
     <input type="range" id="collar" min="0.16" max="1" step="0.01" value="0.45"></label>
   <p class="hint">How much a stand collar rides with the head. Too low and the
      chin cuts into it; too high and the shoulders wobble.</p>
-  <label class="row"><input type="checkbox" id="wire"> Show mesh</label>
+  <label class="row"><input type="checkbox" id="wire"> mesh 표시</label>
 
-  <h2>Parts</h2>
+  <h2>파츠</h2>
   <div class="parts" id="parts"></div>
 </div>
 

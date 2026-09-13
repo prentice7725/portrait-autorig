@@ -21,8 +21,13 @@
 
 import { createStrandSpringDriver, createUpperTorsoSecondaryDriver } from "./physics.mjs";
 import { createRigController } from "./rig-controller.mjs";
+import { applyR3QaOverrides, createQaState, hasR3QaOverrides } from "./qa-state.mjs";
+import {
+  createAuthoringHistory, pushAuthoringHistory,
+  undoAuthoringHistory, redoAuthoringHistory,
+} from "./authoring-history.mjs";
 
-export const PREVIEW_RUNTIME_VERSION = "P6.3";
+export const PREVIEW_RUNTIME_VERSION = "P7.1";
 
 // Parallax strength as a fraction of the canvas, so the same manifest reads
 // the same at any render resolution. Near layers travel further than far ones,
@@ -344,6 +349,9 @@ export const state = {
   r2: { pose: "bust_x_neg", editTarget: "keyform", editMode: false,
         activePoint: null, dragging: false, dirty: false },
   r3: { dirty: false },
+  qa: createQaState(),
+  history: createAuthoringHistory(),
+  historyGesture: null,
   editSession: { active: false, enteredAt: 0, snapshot: null, physicsSuspended: false },
   t0: performance.now(),
 };
@@ -1615,6 +1623,9 @@ export function build(manifest, images, options = {}) {
   state.r2 = { pose: "bust_x_neg", editTarget: "keyform", editMode: false,
     activePoint: null, dragging: false, dirty: false };
   state.r3 = { dirty: false };
+  state.qa = createQaState();
+  state.history = createAuthoringHistory();
+  state.historyGesture = null;
   state.editSession = { active: false, enteredAt: 0, snapshot: null, physicsSuspended: false };
   state.r5Hair = { layer: "all" };
   const p3SpecForPhysics = manifest.motion?.upper_torso_parametric_deformer;
@@ -2149,6 +2160,9 @@ function updateProfiler(now, frameMs, activeVertices, totalVertices) {
   if (now - state.profiler.lastAt < 100) return;
   state.profiler.lastAt = now;
   state.profiler.fps = frameMs > 0 ? 1000 / frameMs : 0;
+  // Profiling numbers remain available to the runtime in every mode, but
+  // profiler DOM writes are deliberately QA-only (P7 QA isolation).
+  if (document.body?.dataset?.mode !== "qa") return;
   const el = document.getElementById("profiler");
   if (!el) return;
   const p = state.profiler;
@@ -2686,6 +2700,69 @@ function r2NearestBoundsHandle(point, bounds) {
 function r2MarkDirty() {
   state.r2.dirty = true;
   updateR2Meta();
+  updateProjectMeta();
+}
+
+function currentAuthoringDraft() {
+  return state.r2?.dirty
+    ? captureChestAuthoring(state.manifest, state.authoring)
+    : cloneJson(state.authoring || { version: 1, deformers: {}, physics: {} });
+}
+
+function authoringHistorySnapshot() {
+  return { authoring: currentAuthoringDraft(), r2Dirty: Boolean(state.r2?.dirty) };
+}
+
+function finishAuthoringHistoryGesture() {
+  const before = state.historyGesture;
+  state.historyGesture = null;
+  if (!before || !state.r2?.dirty) return;
+  recordAuthoringHistory(before, authoringHistorySnapshot());
+  updateProjectMeta();
+}
+
+function recordAuthoringHistory(before, after) {
+  if (!before || !after || JSON.stringify(before.authoring) === JSON.stringify(after.authoring)) return false;
+  return pushAuthoringHistory(state.history, before, after);
+}
+
+function applyAuthoringHistorySnapshot(snapshot) {
+  if (!snapshot) return false;
+  state.authoring = cloneJson(snapshot.authoring || snapshot);
+  state.qa = createQaState();
+  state.r2.dirty = Boolean(snapshot.r2Dirty);
+  state.r3.dirty = false;
+  refreshR3Runtime();
+  updateR2Meta();
+  updateProjectMeta();
+  return true;
+}
+
+function updateProjectMeta(message = null) {
+  const dirty = Boolean(state.r2?.dirty || state.r3?.dirty || hasR3QaOverrides(state.qa));
+  const status = document.getElementById("projectDirty");
+  if (status) {
+    status.textContent = message || (dirty ? "저장되지 않음" : "저장됨");
+    status.dataset ||= {};
+    status.dataset.state = dirty ? "dirty" : "clean";
+    status.setAttribute?.("aria-label", dirty ? "저장되지 않은 프로젝트 변경" : "프로젝트 저장됨");
+  }
+  const undo = document.getElementById("undoProject");
+  const redo = document.getElementById("redoProject");
+  if (undo) undo.disabled = !state.history?.undo?.length;
+  if (redo) redo.disabled = !state.history?.redo?.length;
+}
+
+function undoProject() {
+  const current = authoringHistorySnapshot();
+  const snapshot = undoAuthoringHistory(state.history, current);
+  if (snapshot) applyAuthoringHistorySnapshot(snapshot);
+}
+
+function redoProject() {
+  const current = authoringHistorySnapshot();
+  const snapshot = redoAuthoringHistory(state.history, current);
+  if (snapshot) applyAuthoringHistorySnapshot(snapshot);
 }
 
 function r2ApplyBounds(spec, part, handle, point) {
@@ -2721,6 +2798,7 @@ function r2PointerDown(event) {
       point, r2DisplayPoints(spec, state.r2.editTarget === "keyform"));
   }
   if (state.r2.activePoint == null) return;
+  state.historyGesture = authoringHistorySnapshot();
   state.r2.dragging = true;
   event.currentTarget.setPointerCapture?.(event.pointerId);
   event.preventDefault();
@@ -2749,6 +2827,7 @@ function r2PointerUp(event) {
   state.r2.dragging = false;
   state.r2.activePoint = null;
   event.currentTarget.releasePointerCapture?.(event.pointerId);
+  finishAuthoringHistoryGesture();
 }
 
 function updateR2Meta() {
@@ -2823,8 +2902,8 @@ function updateR3Controls() {
 }
 
 function refreshR3Runtime() {
-  let resolved = applyChestAuthoring(state.autoManifest, state.authoring);
-  resolved = applyPhysicsAuthoring(resolved, state.authoring);
+  let resolved = authoredRuntimeManifest();
+  resolved = applyR3QaOverrides(resolved, state.qa);
   state.manifest = { ...resolved, motion: motionFromDeformers(resolved) };
   const p3 = state.manifest.motion?.upper_torso_parametric_deformer;
   state.p3SeparateBreath = p3?.enabled !== false && Boolean(p3) && p3.breath_isolated !== false;
@@ -2839,12 +2918,13 @@ function setR3PhysicsField(field, value) {
   if (!driver || !Number.isFinite(Number(value))) return;
   const numeric = Number(value);
   driver[field] = numeric;
-  state.authoring ||= { version: 1, deformers: {}, physics: {} };
-  state.authoring.physics ||= {};
-  state.authoring.physics.upper_torso ||= {};
-  state.authoring.physics.upper_torso[field] = numeric;
+  state.qa ||= createQaState();
+  state.qa.r3 ||= { physics: {}, ranges: {} };
+  state.qa.r3.physics ||= {};
+  state.qa.r3.physics[field] = numeric;
   state.r3.dirty = true;
   refreshR3Runtime();
+  updateQaActiveBadge();
 }
 
 function setR3Range(axis, value) {
@@ -2854,13 +2934,13 @@ function setR3Range(axis, value) {
   if (!spec) return;
   spec.ranges_px ||= {};
   spec.ranges_px[axis] = numeric;
-  state.authoring ||= { version: 1, deformers: {}, physics: {} };
-  state.authoring.deformers ||= {};
-  const override = state.authoring.deformers.upper_torso ||= {};
-  override.range_override ||= {};
-  override.range_override[axis] = numeric;
+  state.qa ||= createQaState();
+  state.qa.r3 ||= { physics: {}, ranges: {} };
+  state.qa.r3.ranges ||= {};
+  state.qa.r3.ranges[axis] = numeric;
   state.r3.dirty = true;
   updateR3Controls();
+  updateQaActiveBadge();
 }
 
 function applyR3Preset(name) {
@@ -2871,8 +2951,9 @@ function applyR3Preset(name) {
   if (meta) meta.textContent = `R3 calibration: ${name} preset (unsaved)`;
 }
 
-function resetR3ToAuto() {
-  const authoring = cloneJson(state.authoring || { version: 1, deformers: {}, physics: {} });
+async function resetR3ToAuto() {
+  const before = authoringHistorySnapshot();
+  const authoring = cloneJson(currentAuthoringDraft());
   authoring.physics ||= {};
   delete authoring.physics.upper_torso;
   const override = authoring.deformers?.upper_torso;
@@ -2882,19 +2963,53 @@ function resetR3ToAuto() {
       delete authoring.deformers.upper_torso;
   }
   state.authoring = authoring;
+  state.qa = createQaState();
   state.r3.dirty = false;
   refreshR3Runtime();
-  persistR2Authoring("R3 chest physics reset to Auto", { preserveAuthoring: true });
+  await persistR2Authoring("R3 chest physics reset to Auto", { preserveAuthoring: true });
+  recordAuthoringHistory(before, authoringHistorySnapshot());
+  updateProjectMeta();
+}
+
+export function authoredRuntimeManifest(authoring = state.authoring) {
+  const source = state.autoManifest || state.manifest || {};
+  let resolved = applyChestAuthoring(source, authoring);
+  resolved = applyPhysicsAuthoring(resolved, authoring);
+  return { ...resolved, motion: motionFromDeformers(resolved) };
+}
+
+function commitR3QaToAuthoring(baseAuthoring = null) {
+  if (!hasR3QaOverrides(state.qa)) return false;
+  const authoring = cloneJson(baseAuthoring || currentAuthoringDraft());
+  const qa = state.qa.r3;
+  if (Object.keys(qa.physics || {}).length) {
+    authoring.physics ||= {};
+    authoring.physics.upper_torso ||= {};
+    Object.assign(authoring.physics.upper_torso, qa.physics);
+  }
+  if (Object.keys(qa.ranges || {}).length) {
+    authoring.deformers ||= {};
+    authoring.deformers.upper_torso ||= {};
+    authoring.deformers.upper_torso.range_override ||= {};
+    Object.assign(authoring.deformers.upper_torso.range_override, qa.ranges);
+  }
+  state.authoring = authoring;
+  state.qa = createQaState();
+  state.r3.dirty = false;
+  refreshR3Runtime();
+  return true;
 }
 
 async function persistR2Authoring(message = "R2 correction saved", options = {}) {
+  const draftAuthoring = currentAuthoringDraft();
+  const authoredManifest = authoredRuntimeManifest(draftAuthoring);
   const authoring = options.preserveAuthoring
     ? cloneJson(state.authoring || { version: 1, deformers: {} })
     : state.r2.dirty
-      ? captureChestAuthoring(state.manifest, state.authoring)
-      : buildChestAuthoring(state.manifest, state.authoring);
+      ? draftAuthoring
+      : buildChestAuthoring(authoredManifest, state.authoring);
   state.authoring = authoring;
-  const resolved = syncP3DeformerConfig(cloneJson(state.manifest));
+  const resolved = syncP3DeformerConfig(authoredRuntimeManifest(authoring));
   const deformersText = JSON.stringify(authoring.deformers || {}, null, 2) + "\n";
   const physicsText = JSON.stringify(authoring.physics || {}, null, 2) + "\n";
   const rangesText = JSON.stringify(authoring.parameter_ranges || {}, null, 2) + "\n";
@@ -2917,6 +3032,7 @@ async function persistR2Authoring(message = "R2 correction saved", options = {})
   state.r3.dirty = false;
   updateR2Meta();
   updateR3Controls();
+  updateProjectMeta(message);
   if (written) document.getElementById("r2Meta").textContent = message;
 }
 
@@ -3647,13 +3763,70 @@ export function syncSlider(id) {
 
 function updateQaBadge() {
   const badge = document.getElementById("qaBadge");
-  if (!badge) return;
   const active = document.getElementById("doSoftMorph")?.checked
     && (Number(document.getElementById("softStrength")?.value || 0) > 0
       || Number(document.getElementById("softHoriz")?.value || 0) > 0
       || Number(document.getElementById("softVert")?.value || 0) > 0);
-  badge.hidden = !active;
+  if (badge) badge.hidden = !active;
+  updateQaActiveBadge();
 }
+
+function isShapeQaActive() {
+  const gains = state.motionQA?.shapeGain;
+  const gainActive = gains && Object.values(gains).some((v) => Math.abs(Number(v) - 1) > 1e-6);
+  return Boolean(gainActive || state.motionQA?.poseActive
+    || state.motionQA?.p3Pose
+    || (state.motionQA?.side ?? "both") !== "both");
+}
+
+function isQaOverrideActive() {
+  const qa = state.motionQA || {};
+  const softActive = document.getElementById("doSoftMorph")?.checked
+    && (Number(document.getElementById("softStrength")?.value || 0) > 0
+      || Number(document.getElementById("softHoriz")?.value || 0) > 0
+      || Number(document.getElementById("softVert")?.value || 0) > 0);
+  const motionActive = qa.inertia === false || qa.inertiaOnly === true
+    || Math.abs(Number(qa.asymmetry ?? 1) - 1) > 1e-6
+    || Math.abs(Number(qa.chestImpulseX || 0)) > 1e-6
+    || Math.abs(Number(qa.chestImpulseY || 0)) > 1e-6;
+  const bodyPulseActive = Math.abs(Number(state.bodyPulse?.x || 0)) > 1e-6
+    || Math.abs(Number(state.bodyPulse?.y || 0)) > 1e-6
+    || Math.abs(Number(state.bodyPulse?.vx || 0)) > 1e-6
+    || Math.abs(Number(state.bodyPulse?.vy || 0)) > 1e-6;
+  return Boolean(softActive || isShapeQaActive() || motionActive || bodyPulseActive
+    || Number(state.calibrationRequested || 0) !== 0
+    || state.r3?.dirty || hasR3QaOverrides(state.qa));
+}
+
+function updateQaActiveBadge() {
+  const badge = document.getElementById("qaActiveBadge");
+  if (!badge) return;
+  const active = isQaOverrideActive();
+  badge.hidden = !active;
+  badge.setAttribute?.("aria-hidden", String(!active));
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("rigstudio:modechange", (event) => {
+    if (event.detail?.mode === "qa") state.profiler.lastAt = -Infinity;
+    updateQaActiveBadge();
+  });
+}
+
+// QA mirrors retain access to the intentionally wider regression ranges while
+// the normal Preview controls keep their host-facing placement.
+for (const [id, legacyId] of [["qaTurnX", "turnX"], ["qaTurnY", "turnY"]]) {
+  document.getElementById(id)?.addEventListener("input", (event) => {
+    const value = Number(event.target.value);
+    document.getElementById(`${id}v`).textContent = value.toFixed(2);
+    setSlider(legacyId, value);
+    updateQaActiveBadge();
+  });
+}
+document.getElementById("qaBlinkNow")?.addEventListener("click", () => {
+  document.getElementById("blinkNow")?.click();
+  updateQaActiveBadge();
+});
 
 document.getElementById("r4DisplayPreset")?.addEventListener("change", (event) => {
   applyDisplayPreset(event.target.value);
@@ -3725,29 +3898,35 @@ document.getElementById("chest4px").addEventListener("click", () => calibrateChe
 
 document.getElementById("chestInertia").addEventListener("change", (event) => {
   state.motionQA.inertia = event.target.checked;
+  updateQaActiveBadge();
 });
 document.getElementById("asymmetry").addEventListener("input", (event) => {
   state.motionQA.asymmetry = Number(event.target.value);
   document.getElementById("asymmetryv").textContent = state.motionQA.asymmetry.toFixed(2);
+  updateQaActiveBadge();
 });
-document.getElementById("kickX").addEventListener("click", () => { state.bodyPulse.vx += 36; });
-document.getElementById("kickY").addEventListener("click", () => { state.bodyPulse.vy += 48; });
+document.getElementById("kickX").addEventListener("click", () => { state.bodyPulse.vx += 36; updateQaActiveBadge(); });
+document.getElementById("kickY").addEventListener("click", () => { state.bodyPulse.vy += 48; updateQaActiveBadge(); });
 document.getElementById("chestImpulseY").addEventListener("click", () => {
   state.motionQA.chestImpulseY += 3;
+  updateQaActiveBadge();
 });
 document.getElementById("stopBody").addEventListener("click", () => {
   state.bodySwayEnabled = false;
   const toggle = document.getElementById("bodySway"); if (toggle) toggle.checked = false;
   state.bodyPulse.vx = 0; state.bodyPulse.vy = 0;
   state.motionQA.chestImpulseX = 0; state.motionQA.chestImpulseY = 0;
+  updateQaActiveBadge();
 });
 document.getElementById("breathOnly").addEventListener("click", () => {
   state.motionQA.inertia = false; state.motionQA.inertiaOnly = false;
   document.getElementById("chestInertia").checked = false;
+  updateQaActiveBadge();
 });
 document.getElementById("inertiaOnly").addEventListener("click", () => {
   state.motionQA.inertia = true; state.motionQA.inertiaOnly = true;
   document.getElementById("chestInertia").checked = true;
+  updateQaActiveBadge();
 });
 document.getElementById("resetMotion").addEventListener("click", () => {
   const shapeGain = state.motionQA?.shapeGain ?? null; // Reset Motion leaves Shape QA alone (directive #34)
@@ -3757,6 +3936,7 @@ document.getElementById("resetMotion").addEventListener("click", () => {
     p3Pose: null };
   const toggle = document.getElementById("bodySway"); if (toggle) toggle.checked = true;
   resetPhysics();
+  updateQaActiveBadge();
 });
 
 const R3_SLIDERS = [
@@ -3781,9 +3961,17 @@ for (const [id, axis] of [["r3RangeX", "x"], ["r3RangeY", "y"]]) {
 document.getElementById("r3ApplyPreset")?.addEventListener("click", () => {
   applyR3Preset(document.getElementById("r3Preset")?.value || "soft");
 });
-document.getElementById("r3Save")?.addEventListener("click", () => {
-  persistR2Authoring("R3 chest calibration saved", { preserveAuthoring: true });
-});
+async function saveProject(message = "Project saved") {
+  const before = authoringHistorySnapshot();
+  // Capture an in-memory R2 draft before committing any R3 QA overlay so the
+  // two authored buckets are saved together without either one being lost.
+  state.authoring = currentAuthoringDraft();
+  commitR3QaToAuthoring(state.authoring);
+  await persistR2Authoring(message, { preserveAuthoring: true });
+  recordAuthoringHistory(before, authoringHistorySnapshot());
+  updateProjectMeta(message);
+}
+document.getElementById("r3Save")?.addEventListener("click", () => saveProject("R3 chest calibration saved"));
 document.getElementById("r3Reset")?.addEventListener("click", resetR3ToAuto);
 
 // P2.5 directive #31-33: Chest Shape QA controls -- gain multipliers, static
@@ -3791,10 +3979,8 @@ document.getElementById("r3Reset")?.addEventListener("click", resetR3ToAuto);
 // rebuild the mesh or touch the manifest's own physics_distribution.
 function updateShapeQaBadge() {
   const badge = document.getElementById("shapeQaBadge");
-  if (!badge) return;
-  const gains = state.motionQA?.shapeGain;
-  const gainActive = gains && Object.values(gains).some((v) => Math.abs(Number(v) - 1) > 1e-6);
-  badge.hidden = !(gainActive || state.motionQA?.poseActive || (state.motionQA?.side ?? "both") !== "both");
+  if (badge) badge.hidden = !isShapeQaActive();
+  updateQaActiveBadge();
 }
 const CHEST_SHAPE_GAIN_SLIDERS = [
   ["gainCarrier", "carrier"], ["gainVolume", "volume"], ["gainSag", "sag"], ["gainFollow", "follow"],
@@ -3811,7 +3997,7 @@ for (const [id, key] of CHEST_SHAPE_GAIN_SLIDERS) {
     updateShapeQaBadge();
   });
 }
-document.getElementById("resetShapeQA").addEventListener("click", () => {
+function resetShapeQaState() {
   state.motionQA.shapeGain = null;
   state.motionQA.p3Pose = null;
   state.motionQA.poseActive = false; state.motionQA.poseQ = 0; state.motionQA.poseV = 0;
@@ -3821,7 +4007,31 @@ document.getElementById("resetShapeQA").addEventListener("click", () => {
     if (slider) { slider.value = 1; document.getElementById(`${id}v`).textContent = "x1.00"; }
   }
   updateShapeQaBadge();
-});
+}
+document.getElementById("resetShapeQA").addEventListener("click", resetShapeQaState);
+
+function resetQaOverrides() {
+  // This is deliberately runtime-only. Authored R2/R3 corrections remain
+  // intact; the next frame resolves from authored state without this overlay.
+  state.qa = createQaState();
+  state.r3.dirty = false;
+  state.motionQA = { inertia: true, inertiaOnly: false, asymmetry: 1,
+    inertiaMultiplier: 1, settleMultiplier: 1, chestImpulseX: 0, chestImpulseY: 0,
+    side: "both", shapeGain: null, poseActive: false, poseQ: 0, poseV: 0, p3Pose: null };
+  state.bodyPulse = { x: 0, y: 0, vx: 0, vy: 0 };
+  state.calibrationRequested = 0;
+  const soft = document.getElementById("doSoftMorph"); if (soft) soft.checked = false;
+  for (const [id, value, label] of [["softStrength", 0, "0.00"], ["softHoriz", 0, "0.0px"], ["softVert", 0, "0.0px"]]) {
+    const input = document.getElementById(id); if (input) input.value = value;
+    const output = document.getElementById(`${id}v`); if (output) output.textContent = label;
+  }
+  refreshR3Runtime();
+  resetPhysics();
+  resetShapeQaState();
+  updateQaBadge();
+  updateQaActiveBadge();
+}
+document.getElementById("resetQa")?.addEventListener("click", resetQaOverrides);
 document.getElementById("poseQPlus4").addEventListener("click", () => {
   state.motionQA.poseActive = true; state.motionQA.poseQ = 4; updateShapeQaBadge();
 });
@@ -3837,7 +4047,7 @@ document.getElementById("poseVMinus12").addEventListener("click", () => {
 document.getElementById("sideBoth").addEventListener("click", () => { state.motionQA.side = "both"; updateShapeQaBadge(); });
 document.getElementById("sideLeft").addEventListener("click", () => { state.motionQA.side = "left"; updateShapeQaBadge(); });
 document.getElementById("sideRight").addEventListener("click", () => { state.motionQA.side = "right"; updateShapeQaBadge(); });
-const setP3Pose = (x, y) => { state.motionQA.p3Pose = { x, y }; };
+const setP3Pose = (x, y) => { state.motionQA.p3Pose = { x, y }; updateQaActiveBadge(); };
 document.getElementById("bustYMinus").addEventListener("click", () => setP3Pose(0, -1));
 document.getElementById("bustNeutral").addEventListener("click", () => setP3Pose(0, 0));
 document.getElementById("bustYPlus").addEventListener("click", () => setP3Pose(0, 1));
@@ -3863,19 +4073,23 @@ function setR2Pose(pose) {
   state.motionQA.p3Pose = { x: vectors[pose][0], y: vectors[pose][1] };
   updateR2Meta();
 }
-function resetR2ToAuto() {
+async function resetR2ToAuto() {
   const autoSpec = p3SpecFromManifest(state.autoManifest);
   const currentSpec = r2ChestSpec();
   if (!autoSpec || !currentSpec) return;
+  const before = authoringHistorySnapshot();
+  const preserveAuthoring = currentAuthoringDraft();
   state.manifest.motion.upper_torso_parametric_deformer = cloneJson(autoSpec);
   syncP3DeformerConfig(state.manifest);
   for (const part of state.parts) if (part.chestParametric) {
     part.chestParametric = state.manifest.motion.upper_torso_parametric_deformer;
   }
-  state.authoring = clearChestAuthoring(state.authoring);
+  state.authoring = clearChestAuthoring(preserveAuthoring);
   state.r2.dirty = false;
   updateR2Meta();
-  persistR2Authoring("R2 chest reset to Auto", { preserveAuthoring: true });
+  await persistR2Authoring("R2 chest reset to Auto", { preserveAuthoring: true });
+  recordAuthoringHistory(before, authoringHistorySnapshot());
+  updateProjectMeta();
 }
 r2EditMode?.addEventListener("change", () => setR2EditMode(r2EditMode.checked));
 r2Pose?.addEventListener("change", () => setR2Pose(r2Pose.value));
@@ -3890,11 +4104,22 @@ r2Overlay?.addEventListener("pointercancel", r2PointerUp);
 document.getElementById("r2Save")?.addEventListener("click", () => persistR2Authoring());
 document.getElementById("r2Reset")?.addEventListener("click", resetR2ToAuto);
 document.getElementById("r2Download")?.addEventListener("click", () => {
-  const authoring = state.r2.dirty
-    ? captureChestAuthoring(state.manifest, state.authoring)
-    : buildChestAuthoring(state.manifest, state.authoring);
+  const draft = currentAuthoringDraft();
+  const authoring = state.r2.dirty ? draft : buildChestAuthoring(authoredRuntimeManifest(draft), state.authoring);
   downloadR2File("deformers.json", authoring.deformers || {});
 });
+document.getElementById("saveProject")?.addEventListener("click", () => saveProject());
+document.getElementById("undoProject")?.addEventListener("click", undoProject);
+document.getElementById("redoProject")?.addEventListener("click", redoProject);
+document.addEventListener("keydown", (event) => {
+  if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "z") return;
+  const target = event.target;
+  if (target?.matches?.("input, textarea, select")) return;
+  event.preventDefault();
+  if (event.shiftKey) redoProject();
+  else undoProject();
+});
+updateProjectMeta();
 for (const id of ["showP3Cage", "showP3Heatmap", "showP3Influenced", "showP3Locks", "showP3Occluders"]) {
   document.getElementById(id).addEventListener("change", () => {
     const cage = document.getElementById("showP3Cage")?.checked;
