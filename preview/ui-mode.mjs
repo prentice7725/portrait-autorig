@@ -34,9 +34,9 @@ function intro(mode, title, description) {
   modePanels[mode].appendChild(element);
 }
 
-intro("preview", "Preview", "See how this character behaves in a game-sized runtime.");
-intro("edit", "Edit", "Correct the generated base in a stable authoring pose.");
-intro("qa", "QA", "Inspect runtime, physics, geometry, and regression behavior.");
+intro("preview", "미리보기", "게임 크기 런타임에서 캐릭터 동작을 확인합니다.");
+intro("edit", "편집", "안정된 authoring pose에서 generated base를 보정합니다.");
+intro("qa", "검증", "런타임, 물리, geometry와 regression 결과를 확인합니다.");
 
 function blockFor(id) {
   const element = document.getElementById(id);
@@ -60,20 +60,20 @@ const groups = {
     { title: "Head", ids: ["turnX", "turnY", "tilt"] },
   ],
   edit: [
-    { title: "Hair", ids: ["r5HairMeta", "showR5HairZones", "showR5HairRoots", "r5HairLayer"] },
-    { title: "Chest Physics", ids: ["r3Meta", "r3Preset", "r3ApplyPreset", "r3Frequency", "r3Damping", "r3RangeX", "r3RangeY", "r3LagX", "r3LagY", "r3MaxDisplacement", "r3Save", "r3Reset"] },
-    { title: "Chest Shape", ids: ["p3Meta", "bustYMinus", "bustNeutral", "bustYPlus", "bustXMinus", "bustXPlus", "showP3Cage", "r2Meta", "r2Pose", "r2EditTarget", "r2EditMode", "r2Save", "r2Reset", "r2Download"] },
-    { title: "Eyes", ids: ["lidLine", "lidThick", "winkL", "winkR", "blinkNow"] },
-    { title: "Raw Parts (Advanced)", ids: [] },
+    { title: "Hair", label: "헤어", ids: ["r5HairMeta", "showR5HairZones", "showR5HairRoots", "r5HairLayer"] },
+    { title: "Chest Physics", label: "가슴 물리", ids: ["r3Meta", "r3Preset", "r3ApplyPreset", "r3Frequency", "r3Damping", "r3RangeX", "r3RangeY", "r3LagX", "r3LagY", "r3MaxDisplacement", "r3Save", "r3Reset"] },
+    { title: "Chest Shape", label: "가슴 형태", ids: ["bustYMinus", "bustNeutral", "bustYPlus", "bustXMinus", "bustXPlus", "showP3Cage", "r2Meta", "r2Pose", "r2EditTarget", "r2EditMode", "r2Save", "r2Reset", "r2Download"] },
+    { title: "Eyes", label: "눈", ids: ["lidLine", "lidThick", "winkL", "winkR", "blinkNow"] },
+    { title: "Raw Parts (Advanced)", label: "원본 파츠 (고급)", ids: [] },
   ],
   qa: [
-    { title: "Runtime QA", ids: ["profiler", "bodySway", "chestInertia", "asymmetry", "kickX", "kickY", "chestImpulseY", "stopBody", "breathOnly", "inertiaOnly", "resetMotion", "motionGraph"] },
-    { title: "Chest Diagnostics", ids: ["softMeta", "chestCalibration", "chest1px", "chest2px", "chest4px", "doSoftMorph", "softStrength", "softHoriz", "softVert", "softRegion"] },
-    { title: "Chest Basis", ids: ["chestBasisMeta", "poseQPlus4", "poseQMinus4", "poseVPlus12", "poseVMinus12", "sideBoth", "sideLeft", "sideRight", "gainVolume", "gainCarrier", "gainSag", "gainFollow", "gainShearX", "gainShearY", "gainCompression", "resetShapeQA", "showChestBasis", "chestBasisSelect", "chestTrajectory"] },
-    { title: "Parametric Warp Diagnostics", ids: ["showP3Heatmap", "showP3Influenced", "showP3Locks", "showP3Occluders"] },
-    { title: "Expression Diagnostics", ids: ["useArt", "doTalk"] },
-    { title: "Experiments", ids: ["shell", "ghost", "neckMode", "collar", "wire"] },
-    { title: "Parts / Manifest", ids: ["parts"] },
+    { title: "Runtime QA", label: "런타임 QA", ids: ["profiler", "bodySway", "chestInertia", "asymmetry", "kickX", "kickY", "chestImpulseY", "stopBody", "breathOnly", "inertiaOnly", "resetMotion", "resetQa", "motionGraph"] },
+    { title: "Chest Diagnostics", label: "가슴 진단", ids: ["softMeta", "chestCalibration", "chest1px", "chest2px", "chest4px", "doSoftMorph", "softStrength", "softHoriz", "softVert", "softRegion"] },
+    { title: "Chest Basis", label: "가슴 basis", ids: ["chestBasisMeta", "poseQPlus4", "poseQMinus4", "poseVPlus12", "poseVMinus12", "sideBoth", "sideLeft", "sideRight", "gainVolume", "gainCarrier", "gainSag", "gainFollow", "gainShearX", "gainShearY", "gainCompression", "resetShapeQA", "showChestBasis", "chestBasisSelect", "chestTrajectory"] },
+    { title: "Parametric Warp Diagnostics", label: "파라메트릭 변형 진단", ids: ["p3Meta", "qaTurnX", "qaTurnY", "qaBlinkNow", "showP3Heatmap", "showP3Influenced", "showP3Locks", "showP3Occluders"] },
+    { title: "Expression Diagnostics", label: "표정 진단", ids: ["useArt", "doTalk"] },
+    { title: "Experiments", label: "실험", ids: ["shell", "ghost", "neckMode", "collar", "wire"] },
+    { title: "Parts / Manifest", label: "파츠 / Manifest", ids: ["parts"] },
   ],
 };
 
@@ -90,7 +90,7 @@ for (const [mode, modeGroups] of Object.entries(groups)) {
     }[group.title];
     if (context) section.dataset.context = context;
     const title = document.createElement("h2");
-    title.textContent = group.title;
+    title.textContent = group.label || group.title;
     section.appendChild(title);
     modePanels[mode].appendChild(section);
     for (const id of group.ids) move(id, section);
