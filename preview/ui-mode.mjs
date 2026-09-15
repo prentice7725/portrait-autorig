@@ -63,6 +63,7 @@ const groups = {
     { title: "Hair", label: "헤어", ids: ["r5HairMeta", "showR5HairZones", "showR5HairRoots", "r5HairLayer"] },
     { title: "Chest Physics", label: "가슴 물리", ids: ["r3Meta", "r3Preset", "r3ApplyPreset", "r3Frequency", "r3Damping", "r3RangeX", "r3RangeY", "r3LagX", "r3LagY", "r3MaxDisplacement", "r3Save", "r3Reset"] },
     { title: "Chest Shape", label: "가슴 형태", ids: ["bustYMinus", "bustNeutral", "bustYPlus", "bustXMinus", "bustXPlus", "showP3Cage", "r2Meta", "r2Pose", "r2EditTarget", "r2EditMode", "r2Save", "r2Reset", "r2Download"] },
+    { title: "Face Mouth", label: "입 형태", ids: ["r6MouthMeta", "r6MouthForm", "r6MouthFrown", "r6MouthNeutral", "r6MouthSmile", "r6MouthKeyform", "r6MouthCorner", "r6MouthCenter", "r6MouthHorizontal", "r6MouthFaceGain", "r6MouthSave", "r6MouthReset"] },
     { title: "Eyes", label: "눈", ids: ["lidLine", "lidThick", "winkL", "winkR", "blinkNow"] },
     { title: "Raw Parts (Advanced)", label: "원본 파츠 (고급)", ids: [] },
   ],
@@ -71,6 +72,7 @@ const groups = {
     { title: "Chest Diagnostics", label: "가슴 진단", ids: ["softMeta", "chestCalibration", "chest1px", "chest2px", "chest4px", "doSoftMorph", "softStrength", "softHoriz", "softVert", "softRegion"] },
     { title: "Chest Basis", label: "가슴 basis", ids: ["chestBasisMeta", "poseQPlus4", "poseQMinus4", "poseVPlus12", "poseVMinus12", "sideBoth", "sideLeft", "sideRight", "gainVolume", "gainCarrier", "gainSag", "gainFollow", "gainShearX", "gainShearY", "gainCompression", "resetShapeQA", "showChestBasis", "chestBasisSelect", "chestTrajectory"] },
     { title: "Parametric Warp Diagnostics", label: "파라메트릭 변형 진단", ids: ["p3Meta", "qaTurnX", "qaTurnY", "qaBlinkNow", "showP3Heatmap", "showP3Influenced", "showP3Locks", "showP3Occluders"] },
+    { title: "Mouth Form QA", label: "입 형태 QA", ids: ["r6MouthQaMeta", "r6QaFrownFull", "r6QaFrownHalf", "r6QaNeutral", "r6QaSmileHalf", "r6QaSmileFull", "r6QaSmileOpen", "r6QaFrownOpen"] },
     { title: "Expression Diagnostics", label: "표정 진단", ids: ["useArt", "doTalk"] },
     { title: "Experiments", label: "실험", ids: ["shell", "ghost", "neckMode", "collar", "wire"] },
     { title: "Parts / Manifest", label: "파츠 / Manifest", ids: ["parts"] },
@@ -85,6 +87,7 @@ for (const [mode, modeGroups] of Object.entries(groups)) {
       Hair: "hair",
       "Chest Physics": "chest",
       "Chest Shape": "chest",
+      "Face Mouth": "eyes",
       Eyes: "eyes",
       "Raw Parts (Advanced)": "raw",
     }[group.title];

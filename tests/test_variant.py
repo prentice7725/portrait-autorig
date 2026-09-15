@@ -220,10 +220,31 @@ class VariantBindingTests(unittest.TestCase):
         ref = composite_layers({**layers, "mouth": members["a"]}, (CANVAS, CANVAS), order=RIG_Z_ORDER)
         manifest, _ = build_rig(
             layers, frame_size=(CANVAS, CANVAS), rest_reference=ref,
-            variant_sets=variants, expression_presets={"annoyed": {"variants": {"mouth": "b"}}},
+            variant_sets=variants, expression_presets={"annoyed": {
+                "parameters": {"ParamMouthForm": 0.72},
+                "variants": {"mouth": "b"},
+            }},
             variant_layers=members, instance_to_tag={"a": "mouth", "b": "mouth"},
         )
+        self.assertEqual(manifest["expression_presets"]["annoyed"]["parameters"],
+                         {"ParamMouthForm": 0.72})
         self.assertEqual(manifest["expression_presets"]["annoyed"]["variants"], {"mouth": "b"})
+
+    def test_parameter_only_expression_preset_compiles_without_variant_art(self):
+        manifest, _ = build_rig(
+            base_layers(), frame_size=(CANVAS, CANVAS),
+            expression_presets={"smile": {"parameters": {"ParamMouthForm": 0.72}}},
+        )
+        self.assertEqual(manifest["expression_presets"],
+                         {"smile": {"parameters": {"ParamMouthForm": 0.72}}})
+
+    def test_expression_preset_requires_non_empty_parameters_or_variants(self):
+        with self.assertRaises(ValueError):
+            build_rig(base_layers(), frame_size=(CANVAS, CANVAS),
+                      expression_presets={"empty": {}})
+        with self.assertRaises(ValueError):
+            build_rig(base_layers(), frame_size=(CANVAS, CANVAS),
+                      expression_presets={"unknown": {"parameters": {"ParamNope": 1}}})
 
     def test_no_variant_set_is_disabled_capability(self):
         manifest, _ = build_rig(base_layers(), frame_size=(CANVAS, CANVAS))

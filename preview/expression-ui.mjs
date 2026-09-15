@@ -9,6 +9,12 @@
 
 export const EXPRESSION_UI_VERSION = "P6.2";
 
+export function hasExpressionPayload(preset) {
+  return !!(preset && typeof preset === "object" && !Array.isArray(preset)
+    && ((preset.parameters && typeof preset.parameters === "object" && !Array.isArray(preset.parameters))
+      || (preset.variants && typeof preset.variants === "object" && !Array.isArray(preset.variants))));
+}
+
 function labelFor(id, preset) {
   const metadata = preset?.metadata || {};
   return String(metadata.label || metadata.name || preset?.label || id)
@@ -20,8 +26,7 @@ export function expressionCatalog(manifest) {
   const presets = manifest?.expression_presets;
   if (!presets || typeof presets !== "object" || Array.isArray(presets)) return [];
   return Object.entries(presets)
-    .filter(([, preset]) => preset && typeof preset === "object"
-      && preset.variants && typeof preset.variants === "object")
+    .filter(([, preset]) => hasExpressionPayload(preset))
     .map(([id, preset]) => ({
       id: String(id), label: labelFor(id, preset),
       description: preset.metadata?.description || preset.description || "",

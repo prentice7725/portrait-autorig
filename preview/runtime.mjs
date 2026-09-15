@@ -216,6 +216,7 @@ export const PHASE_DEFORMER_HANDLERS = {
     }
   },
   local_soft_field(deformer, context) { registerDeformerOperation(deformer, context); },
+  mouth_form(deformer, context) { registerDeformerOperation(deformer, context); },
   jaw_open(deformer, context) { registerDeformerOperation(deformer, context); },
   chest_parametric_deformer(deformer, context) { registerDeformerOperation(deformer, context); },
   strand_spring(deformer, context) { registerDeformerOperation(deformer, context); },
@@ -336,6 +337,7 @@ export const state = {
   variantFades: {},
   activeExpression: null,
   parameters: {},
+  parameterOwners: {},
   parameterOverrides: {},
   gazeTargets: [],
   eyeOpening: { l: null, r: null },
@@ -347,7 +349,8 @@ export const state = {
   displayPreset: "full",
   r5Hair: { layer: "all" },
   r2: { pose: "bust_x_neg", editTarget: "keyform", editMode: false,
-        activePoint: null, dragging: false, dirty: false },
+         activePoint: null, dragging: false, dirty: false },
+  r6Mouth: { keyform: "+1", dirty: false, qaLabel: "neutral" },
   r3: { dirty: false },
   qa: createQaState(),
   history: createAuthoringHistory(),
@@ -364,6 +367,7 @@ export const rigController = createRigController({ runtimeState: state });
 export const R2_CHEST_POSES = ["neutral", "bust_x_neg", "bust_x_pos", "bust_y_neg", "bust_y_pos"];
 export const R2_CHEST_EDIT_POSES = ["bust_x_neg", "bust_x_pos", "bust_y_neg", "bust_y_pos"];
 export const R2_CHEST_DEFORMER_ID = "upper_torso";
+export const R6_MOUTH_FORM_DEFORMER_ID = "mouth_form";
 
 export const R4_DISPLAY_PRESETS = Object.freeze({
   full: { label: "100%", width: null, height: null },
@@ -568,10 +572,76 @@ export function clearChestAuthoring(sourceAuthoring = null) {
   return authoring;
 }
 
+function mouthFormSpecFromManifest(manifest) {
+  return manifest?.motion?.mouth_form || null;
+}
+
+/** Apply R6-D's mouth keyform correction without changing generated geometry. */
+export function applyMouthFormAuthoring(manifest, authoring) {
+  const resolved = cloneJson(manifest);
+  const spec = mouthFormSpecFromManifest(resolved);
+  const override = authoring?.deformers?.[R6_MOUTH_FORM_DEFORMER_ID];
+  if (!spec || !override || typeof override !== "object") return resolved;
+  if (override.keyform_overrides && typeof override.keyform_overrides === "object") {
+    const keyforms = Object.fromEntries(
+      Object.entries(override.keyform_overrides).filter(([key]) => key === "-1" || key === "+1"),
+    );
+    deepMergeObject(spec.keyforms || (spec.keyforms = {}), keyforms);
+  }
+  if (override.face_corrective && typeof override.face_corrective === "object")
+    deepMergeObject(spec.face_corrective || (spec.face_corrective = {}), override.face_corrective);
+  if (override.control_points && typeof override.control_points === "object")
+    deepMergeObject(spec.control_points || (spec.control_points = {}), override.control_points);
+  for (const deformer of resolved.deformers || []) {
+    if (deformer.kind === R6_MOUTH_FORM_DEFORMER_ID) deformer.config = cloneJson(spec);
+  }
+  return resolved;
+}
+
+function mouthFormAuthoringOverride(manifest, sourceAuthoring) {
+  const spec = mouthFormSpecFromManifest(manifest);
+  if (!spec) return null;
+  const existing = cloneJson(sourceAuthoring?.deformers?.[R6_MOUTH_FORM_DEFORMER_ID] || {});
+  return {
+    target_tags: cloneJson(spec.target_tags || ["mouth", "face"]),
+    ...existing,
+  };
+}
+
+export function buildMouthFormAuthoring(manifest, sourceAuthoring = null) {
+  const override = mouthFormAuthoringOverride(manifest, sourceAuthoring);
+  if (!override) return cloneJson(sourceAuthoring || { version: 1, deformers: {} });
+  const authoring = cloneJson(sourceAuthoring || { version: 1, deformers: {} });
+  authoring.version = Number(authoring.version || 1);
+  authoring.deformers ||= {};
+  authoring.deformers[R6_MOUTH_FORM_DEFORMER_ID] = override;
+  return authoring;
+}
+
+/** Capture only R6 mouth keyforms/corrective values into authoring ownership. */
+export function captureMouthFormAuthoring(manifest, sourceAuthoring = null) {
+  const authoring = buildMouthFormAuthoring(manifest, sourceAuthoring);
+  const spec = mouthFormSpecFromManifest(manifest);
+  const override = authoring.deformers?.[R6_MOUTH_FORM_DEFORMER_ID];
+  if (!spec || !override) return authoring;
+  override.keyform_overrides = cloneJson(spec.keyforms || {});
+  delete override.keyform_overrides.neutral;
+  if (spec.face_corrective) override.face_corrective = cloneJson(spec.face_corrective);
+  if (spec.control_points) override.control_points = cloneJson(spec.control_points);
+  return authoring;
+}
+
+export function clearMouthFormAuthoring(sourceAuthoring = null) {
+  const authoring = cloneJson(sourceAuthoring || { version: 1, deformers: {} });
+  authoring.deformers ||= {};
+  delete authoring.deformers[R6_MOUTH_FORM_DEFORMER_ID];
+  return authoring;
+}
+
 /** Set a manifest parameter from a host or a test harness.  Values are
  * clamped to the immutable parameter descriptor range when one is present. */
-export function setParameter(id, value) {
-  return rigController.setParameter(id, value);
+export function setParameter(id, value, source = "manual") {
+  return rigController.setParameter(id, value, source);
 }
 
 function parameterValue(id, motion = {}) {
@@ -652,16 +722,37 @@ export function applyVariantSet(setId, memberId, options = {}) {
 /** Apply all selections as one validated transaction. */
 export function applyExpressionPreset(presetId, options = {}) {
   const preset = state.manifest && (state.manifest.expression_presets || {})[presetId];
-  if (!preset || !preset.variants) throw new Error(`unknown ExpressionPreset: ${presetId}`);
-  const selections = Object.entries(preset.variants);
+  const hasParameters = preset?.parameters && typeof preset.parameters === "object"
+    && !Array.isArray(preset.parameters);
+  const hasVariants = preset?.variants && typeof preset.variants === "object"
+    && !Array.isArray(preset.variants);
+  if (!preset || (!hasParameters && !hasVariants)) throw new Error(`unknown ExpressionPreset: ${presetId}`);
+  const parameterEntries = hasParameters ? Object.entries(preset.parameters) : [];
+  for (const [id, value] of parameterEntries) {
+    const descriptor = (state.manifest.parameters || []).find((item) => item?.id === id);
+    const numeric = Number(value);
+    if (!descriptor || !Number.isFinite(numeric)
+        || numeric < Number(descriptor.min) || numeric > Number(descriptor.max)) {
+      throw new Error(`ExpressionPreset ${presetId} selects invalid parameter ${id}`);
+    }
+  }
+  const selections = hasVariants ? Object.entries(preset.variants) : [];
   for (const [setId, memberId] of selections) {
     const spec = (state.manifest.variant_sets || {})[setId];
     if (!spec || !spec.members.includes(memberId)) {
       throw new Error(`ExpressionPreset ${presetId} selects invalid member ${setId}/${memberId}`);
     }
   }
+  const appliedParameters = {};
+  for (const [id, value] of parameterEntries)
+    appliedParameters[id] = setParameter(id, value, "expression");
   const result = [];
   for (const [setId, memberId] of selections) result.push(applyVariantSet(setId, memberId, options));
+  // Preserve the historical array return for variant callers while exposing
+  // parameter application to the newer host/controller seam.
+  Object.defineProperty(result, "parameters", {
+    value: appliedParameters, enumerable: false, configurable: true,
+  });
   return result;
 }
 
@@ -1554,6 +1645,9 @@ export function motionFromDeformers(manifest) {
   const jaw = (byKind.jaw_open || [])[0];
   if (jaw) motion.jaw_open = jaw.config || {};
 
+  const mouthForm = (byKind.mouth_form || [])[0];
+  if (mouthForm) motion.mouth_form = mouthForm.config || {};
+
   return motion;
 }
 
@@ -1600,7 +1694,8 @@ export function build(manifest, images, options = {}) {
   state.autoManifest = cloneJson(options.autoManifest || manifest);
   state.authoring = cloneJson(options.authoring || null);
   manifest = applyPhysicsAuthoring(
-    applyChestAuthoring(state.autoManifest, state.authoring), state.authoring);
+    applyMouthFormAuthoring(
+      applyChestAuthoring(state.autoManifest, state.authoring), state.authoring), state.authoring);
   manifest = { ...manifest, motion: motionFromDeformers(manifest) };
   state.manifest = manifest;
   state.parameters = {};
@@ -1622,6 +1717,7 @@ export function build(manifest, images, options = {}) {
   state.calibrationRequested = 0;
   state.r2 = { pose: "bust_x_neg", editTarget: "keyform", editMode: false,
     activePoint: null, dragging: false, dirty: false };
+  state.r6Mouth = { keyform: "+1", dirty: false, qaLabel: "neutral" };
   state.r3 = { dirty: false };
   state.qa = createQaState();
   state.history = createAuthoringHistory();
@@ -2704,13 +2800,16 @@ function r2MarkDirty() {
 }
 
 function currentAuthoringDraft() {
-  return state.r2?.dirty
+  let authoring = state.r2?.dirty
     ? captureChestAuthoring(state.manifest, state.authoring)
     : cloneJson(state.authoring || { version: 1, deformers: {}, physics: {} });
+  if (state.r6Mouth?.dirty) authoring = captureMouthFormAuthoring(state.manifest, authoring);
+  return authoring;
 }
 
 function authoringHistorySnapshot() {
-  return { authoring: currentAuthoringDraft(), r2Dirty: Boolean(state.r2?.dirty) };
+  return { authoring: currentAuthoringDraft(), r2Dirty: Boolean(state.r2?.dirty),
+    r6MouthDirty: Boolean(state.r6Mouth?.dirty) };
 }
 
 function finishAuthoringHistoryGesture() {
@@ -2731,6 +2830,7 @@ function applyAuthoringHistorySnapshot(snapshot) {
   state.authoring = cloneJson(snapshot.authoring || snapshot);
   state.qa = createQaState();
   state.r2.dirty = Boolean(snapshot.r2Dirty);
+  state.r6Mouth.dirty = Boolean(snapshot.r6MouthDirty);
   state.r3.dirty = false;
   refreshR3Runtime();
   updateR2Meta();
@@ -2838,6 +2938,122 @@ function updateR2Meta() {
   const source = state.authoring?.deformers?.[R2_CHEST_DEFORMER_ID];
   const status = state.r2?.dirty ? "unsaved correction" : source ? "authored override" : "Auto";
   el.textContent = `R2 authoring: ${status} · ${spec.cage?.cols || "?"}×${spec.cage?.rows || "?"} cage`;
+}
+
+function mouthFormSpec() { return mouthFormSpecFromManifest(state.manifest); }
+
+function mouthFormFieldNames(keyform = state.r6Mouth?.keyform || "+1") {
+  return keyform === "-1"
+    ? { corner: "corner_drop_ratio", center: "center_drop_ratio", horizontal: "corner_inward_ratio" }
+    : { corner: "corner_lift_ratio", center: "center_lift_ratio", horizontal: "corner_outward_ratio" };
+}
+
+function syncMouthFormDeformerConfig(manifest) {
+  const spec = mouthFormSpecFromManifest(manifest);
+  if (!spec) return manifest;
+  for (const deformer of manifest.deformers || []) {
+    if (deformer.kind === R6_MOUTH_FORM_DEFORMER_ID) deformer.config = cloneJson(spec);
+  }
+  return manifest;
+}
+
+function updateR6MouthControls() {
+  const spec = mouthFormSpec();
+  const meta = document.getElementById("r6MouthMeta");
+  const qaMeta = document.getElementById("r6MouthQaMeta");
+  const form = document.getElementById("r6MouthForm");
+  const keyform = document.getElementById("r6MouthKeyform");
+  if (!spec || spec.enabled === false) {
+    if (meta) meta.textContent = "R6 mouth form: unavailable";
+    if (qaMeta) qaMeta.textContent = "R6 QA: unavailable";
+    if (form) form.disabled = true;
+    return;
+  }
+  if (form) {
+    const descriptor = (state.manifest.parameters || []).find((item) => item?.id === "ParamMouthForm");
+    if (descriptor) {
+      form.min = String(descriptor.min); form.max = String(descriptor.max);
+      form.step = String(descriptor.step || 0.01);
+    }
+    form.disabled = false;
+    form.value = String(state.parameters.ParamMouthForm ?? 0);
+  }
+  const selected = keyform?.value === "-1" ? "-1" : "+1";
+  const values = spec.keyforms?.[selected] || {};
+  const fields = mouthFormFieldNames(selected);
+  const controls = {
+    r6MouthCorner: values[fields.corner],
+    r6MouthCenter: values[fields.center],
+    r6MouthHorizontal: values[fields.horizontal],
+    r6MouthFaceGain: values.face_gain,
+  };
+  for (const [id, value] of Object.entries(controls)) {
+    const input = document.getElementById(id);
+    const output = document.getElementById(`${id}v`);
+    const numeric = Number(value || 0);
+    if (input) input.value = String(numeric);
+    if (output) output.textContent = numeric.toFixed(2);
+  }
+  const source = state.authoring?.deformers?.[R6_MOUTH_FORM_DEFORMER_ID];
+  const status = state.r6Mouth.dirty ? "unsaved override" : source ? "authored override" : "Auto";
+  if (meta) meta.textContent = `R6 mouth form: ${status} · ${selected === "+1" ? "Smile" : "Frown"} keyform`;
+  if (qaMeta) qaMeta.textContent = `R6 QA: ${state.r6Mouth.qaLabel || "neutral"} · authoring unchanged`;
+}
+
+function setMouthFormKeyformField(field, value) {
+  const spec = mouthFormSpec();
+  if (!spec) return;
+  const selected = document.getElementById("r6MouthKeyform")?.value === "-1" ? "-1" : "+1";
+  const names = mouthFormFieldNames(selected);
+  const key = field === "face_gain" ? field : names[field];
+  if (!key) return;
+  spec.keyforms ||= {};
+  spec.keyforms[selected] ||= {};
+  spec.keyforms[selected][key] = Math.max(0, Number(value) || 0);
+  syncMouthFormDeformerConfig(state.manifest);
+  state.r6Mouth.dirty = true;
+  updateR6MouthControls();
+  updateProjectMeta();
+}
+
+function setMouthPreview(value) {
+  setParameter("ParamMouthForm", value, "manual");
+  updateR6MouthControls();
+}
+
+function applyR6MouthQaPreset(label, form, mouthOpen = 0) {
+  setParameter("ParamMouthForm", form, "manual");
+  setParameter("ParamMouthOpenY", mouthOpen, "manual");
+  state.r6Mouth.qaLabel = label;
+  const meta = document.getElementById("r6MouthQaMeta");
+  if (meta) meta.textContent = `R6 QA: ${label} · authoring unchanged`;
+  updateR6MouthControls();
+}
+
+async function saveMouthFormAuthoring() {
+  const before = authoringHistorySnapshot();
+  state.authoring = currentAuthoringDraft();
+  state.r6Mouth.dirty = false;
+  await persistR2Authoring("R6 mouth form override saved", { preserveAuthoring: true });
+  recordAuthoringHistory(before, authoringHistorySnapshot());
+  updateR6MouthControls();
+  updateProjectMeta();
+}
+
+async function resetMouthFormToAuto() {
+  const autoSpec = mouthFormSpecFromManifest(state.autoManifest);
+  if (!autoSpec || !mouthFormSpec()) return;
+  const before = authoringHistorySnapshot();
+  const existing = currentAuthoringDraft();
+  state.manifest.motion.mouth_form = cloneJson(autoSpec);
+  syncMouthFormDeformerConfig(state.manifest);
+  state.authoring = clearMouthFormAuthoring(existing);
+  state.r6Mouth.dirty = false;
+  setParameter("ParamMouthForm", 0, "manual");
+  await persistR2Authoring("R6 mouth form reset to Auto", { preserveAuthoring: true });
+  recordAuthoringHistory(before, authoringHistorySnapshot());
+  updateR6MouthControls();
+  updateProjectMeta();
 }
 
 function syncP3DeformerConfig(manifest) {
@@ -2974,6 +3190,7 @@ async function resetR3ToAuto() {
 export function authoredRuntimeManifest(authoring = state.authoring) {
   const source = state.autoManifest || state.manifest || {};
   let resolved = applyChestAuthoring(source, authoring);
+  resolved = applyMouthFormAuthoring(resolved, authoring);
   resolved = applyPhysicsAuthoring(resolved, authoring);
   return { ...resolved, motion: motionFromDeformers(resolved) };
 }
@@ -3005,7 +3222,7 @@ async function persistR2Authoring(message = "R2 correction saved", options = {})
   const authoredManifest = authoredRuntimeManifest(draftAuthoring);
   const authoring = options.preserveAuthoring
     ? cloneJson(state.authoring || { version: 1, deformers: {} })
-    : state.r2.dirty
+    : (state.r2.dirty || state.r6Mouth.dirty)
       ? draftAuthoring
       : buildChestAuthoring(authoredManifest, state.authoring);
   state.authoring = authoring;
@@ -3029,6 +3246,7 @@ async function persistR2Authoring(message = "R2 correction saved", options = {})
   }
   if (!written) downloadR2File("authoring.json", authoring);
   state.r2.dirty = false;
+  state.r6Mouth.dirty = false;
   state.r3.dirty = false;
   updateR2Meta();
   updateR3Controls();
@@ -3111,6 +3329,71 @@ function chestParametricDelta(part, vertexIndex, motion, operation) {
   if (params.y < 0) addPose(out, "bust_y_neg", -params.y);
   else addPose(out, "bust_y_pos", params.y);
   return [out[0] * influence, out[1] * influence];
+}
+
+/** R6-A layer-free expression geometry. The generated mouth_form field is
+ * normalized from this character's own mouth/face boxes; the runtime only
+ * evaluates its endpoint keyforms and local face falloff. */
+export function mouthFormDelta(part, x, y, motion, operation) {
+  const spec = operation?.config || motion?.mouth_form;
+  if (!spec?.enabled || Number(spec.version) !== 1) return [0, 0];
+  const targets = operation?.targets?.tags || spec.target_tags || ["mouth", "face"];
+  if (!targets.includes(part?.spec?.tag)) return [0, 0];
+  const raw = parameterValue("ParamMouthForm", motion);
+  const amount = Math.max(-1, Math.min(1, Number(raw) || 0));
+  if (amount === 0) return [0, 0];
+  const box = spec.mouth_box || [];
+  const mx1 = Number(box[0]), my1 = Number(box[1]);
+  const mx2 = Number(box[2]), my2 = Number(box[3]);
+  if (![mx1, my1, mx2, my2].every(Number.isFinite) || !(mx2 > mx1) || !(my2 > my1)) {
+    return [0, 0];
+  }
+  const centerX = (mx1 + mx2) * 0.5;
+  const centerY = (my1 + my2) * 0.5;
+  const halfWidth = Math.max(1e-6, (mx2 - mx1) * 0.5);
+  const height = Math.max(1e-6, my2 - my1);
+  const sidePosition = Math.max(-1, Math.min(1, (x - centerX) / halfWidth));
+  const corner = smoothstep(0.15, 1, Math.abs(sidePosition));
+  const center = 1 - corner;
+  const keyform = spec.keyforms?.[amount < 0 ? "-1" : "+1"] || {};
+  const strength = Math.abs(amount);
+  let dx = 0, dy = 0;
+  if (["mouth", "mouth_open", "mouth_closed"].includes(part.spec.tag)) {
+    if (amount > 0) {
+      dx = Math.sign(sidePosition) * halfWidth
+        * Number(keyform.corner_outward_ratio || 0) * corner * strength;
+      dy = -height * (Number(keyform.corner_lift_ratio || 0) * corner
+        + Number(keyform.center_lift_ratio || 0) * center) * strength;
+    } else {
+      dx = -Math.sign(sidePosition) * halfWidth
+        * Number(keyform.corner_inward_ratio || 0) * corner * strength;
+      dy = height * (Number(keyform.corner_drop_ratio || 0) * corner
+        + Number(keyform.center_drop_ratio || 0) * center) * strength;
+    }
+    return [dx, dy];
+  }
+
+  if (part.spec.tag !== "face") return [0, 0];
+  const corrective = spec.face_corrective || {};
+  const faceCenter = corrective.center || [centerX, centerY];
+  const radiusX = Math.max(1e-6, Number(corrective.radius_x));
+  const radiusY = Math.max(1e-6, Number(corrective.radius_y));
+  const fx = Number(faceCenter[0]), fy = Number(faceCenter[1]);
+  if (![fx, fy, radiusX, radiusY].every(Number.isFinite)) return [0, 0];
+  const falloffX = 1 - smoothstep(0, 1, Math.abs(x - fx) / radiusX);
+  const falloffY = 1 - smoothstep(0, 1, Math.abs(y - fy) / radiusY);
+  const faceCorner = smoothstep(0.15, 1, Math.min(1, Math.abs(x - fx) / radiusX));
+  const influence = falloffX * falloffY * Number(keyform.face_gain ?? corrective.gain ?? 0);
+  if (amount > 0) {
+    dx = Math.sign(x - fx) * radiusX * Number(keyform.face_outward_ratio || 0)
+      * faceCorner * influence * strength;
+    dy = -height * Number(keyform.face_lift_ratio || 0) * influence * strength;
+  } else {
+    dx = -Math.sign(x - fx) * radiusX * Number(keyform.face_inward_ratio || 0)
+      * faceCorner * influence * strength;
+    dy = height * Number(keyform.face_drop_ratio || 0) * influence * strength;
+  }
+  return [dx, dy];
 }
 
 /** R5 face-motion correction: lower-face/jaw follow the mouth-open parameter.
@@ -3221,6 +3504,11 @@ export function deform(part, now, motion) {
         }
         case "jaw_open": {
           const delta = jawOpenDelta(part, x, y, motion, operation);
+          x += delta[0]; y += delta[1];
+          break;
+        }
+        case "mouth_form": {
+          const delta = mouthFormDelta(part, x, y, motion, operation);
           x += delta[0]; y += delta[1];
           break;
         }
@@ -4105,9 +4393,39 @@ document.getElementById("r2Save")?.addEventListener("click", () => persistR2Auth
 document.getElementById("r2Reset")?.addEventListener("click", resetR2ToAuto);
 document.getElementById("r2Download")?.addEventListener("click", () => {
   const draft = currentAuthoringDraft();
-  const authoring = state.r2.dirty ? draft : buildChestAuthoring(authoredRuntimeManifest(draft), state.authoring);
+  const authoring = (state.r2.dirty || state.r6Mouth.dirty)
+    ? draft : buildChestAuthoring(authoredRuntimeManifest(draft), state.authoring);
   downloadR2File("deformers.json", authoring.deformers || {});
 });
+const r6MouthForm = document.getElementById("r6MouthForm");
+const r6MouthKeyform = document.getElementById("r6MouthKeyform");
+r6MouthForm?.addEventListener("input", (event) => {
+  setParameter("ParamMouthForm", Number(event.target.value), "manual");
+  updateR6MouthControls();
+});
+for (const [id, field] of [["r6MouthCorner", "corner"], ["r6MouthCenter", "center"],
+  ["r6MouthHorizontal", "horizontal"], ["r6MouthFaceGain", "face_gain"]]) {
+  document.getElementById(id)?.addEventListener("input", (event) => {
+    setMouthFormKeyformField(field, event.target.value);
+  });
+}
+r6MouthKeyform?.addEventListener("change", updateR6MouthControls);
+document.getElementById("r6MouthFrown")?.addEventListener("click", () => setMouthPreview(-1));
+document.getElementById("r6MouthNeutral")?.addEventListener("click", () => setMouthPreview(0));
+document.getElementById("r6MouthSmile")?.addEventListener("click", () => setMouthPreview(1));
+document.getElementById("r6MouthSave")?.addEventListener("click", saveMouthFormAuthoring);
+document.getElementById("r6MouthReset")?.addEventListener("click", resetMouthFormToAuto);
+for (const [id, label, form, mouthOpen] of [
+  ["r6QaFrownFull", "Frown -1", -1, 0], ["r6QaFrownHalf", "Frown -0.5", -0.5, 0],
+  ["r6QaNeutral", "Neutral", 0, 0], ["r6QaSmileHalf", "Smile +0.5", 0.5, 0],
+  ["r6QaSmileFull", "Smile +1", 1, 0], ["r6QaSmileOpen", "Smile + MouthOpen", 1, 1],
+  ["r6QaFrownOpen", "Frown + MouthOpen", -1, 1],
+]) document.getElementById(id)?.addEventListener("click", () =>
+  applyR6MouthQaPreset(label, form, mouthOpen));
+if (typeof window !== "undefined") {
+  window.addEventListener("rigstudio:manifestready", updateR6MouthControls);
+  window.addEventListener("rigstudio:manifestclear", updateR6MouthControls);
+}
 document.getElementById("saveProject")?.addEventListener("click", () => saveProject());
 document.getElementById("undoProject")?.addEventListener("click", undoProject);
 document.getElementById("redoProject")?.addEventListener("click", redoProject);
@@ -4120,6 +4438,7 @@ document.addEventListener("keydown", (event) => {
   else undoProject();
 });
 updateProjectMeta();
+updateR6MouthControls();
 for (const id of ["showP3Cage", "showP3Heatmap", "showP3Influenced", "showP3Locks", "showP3Occluders"]) {
   document.getElementById(id).addEventListener("change", () => {
     const cage = document.getElementById("showP3Cage")?.checked;

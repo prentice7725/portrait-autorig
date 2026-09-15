@@ -15,6 +15,18 @@ export const CURSOR_FOLLOW_VERSION = "P6.1";
 export const EXPRESSION_LIFECYCLE_VERSION = "P6.2";
 export const LIPSYNC_VERSION = "P6.3";
 export const MANUAL_RELEASE_GRACE_MS = 350;
+export const EXPRESSION_OWNERSHIP_VERSION = "R6-C.1";
+
+const PARAMETER_SOURCE_PRIORITY = Object.freeze({
+  base: 0,
+  "auto-idle": 10,
+  cursor: 20,
+  expression: 30,
+  host: 40,
+  scripted: 40,
+  manual: 50,
+  edit: 60,
+});
 
 const CURSOR_HEAD_SHARE = Object.freeze({ x: 0.20, y: 0.15 });
 
@@ -48,7 +60,18 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
   let lipSyncRms = 0;
   const manualClaims = new Map();
   const manualGraceUntil = new Map();
+  const expressionParameterClaims = new Map();
   const controls = new Map();
+
+  function normalizeParameterSource(source) {
+    const normalized = String(source || "manual").toLowerCase().replace(/[ _]+/g, "-");
+    return Object.prototype.hasOwnProperty.call(PARAMETER_SOURCE_PRIORITY, normalized)
+      ? normalized : "manual";
+  }
+
+  function parameterSourcePriority(source) {
+    return PARAMETER_SOURCE_PRIORITY[normalizeParameterSource(source)] ?? PARAMETER_SOURCE_PRIORITY.manual;
+  }
 
   function ownershipKey(id) {
     if (["gazeX", "gazeY", "ParamEyeBallX", "ParamEyeBallY"].includes(id)) return "gaze";
@@ -126,7 +149,8 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
     if (!presets || typeof presets !== "object" || Array.isArray(presets)) return [];
     return Object.entries(presets)
       .filter(([, preset]) => preset && typeof preset === "object"
-        && preset.variants && typeof preset.variants === "object")
+        && ((preset.parameters && typeof preset.parameters === "object" && !Array.isArray(preset.parameters))
+          || (preset.variants && typeof preset.variants === "object" && !Array.isArray(preset.variants))))
       .map(([id, preset]) => ({ id, ...preset }))
       .sort((a, b) => {
         const orderA = Number(a.metadata?.order ?? a.order ?? Number.MAX_SAFE_INTEGER);
@@ -140,16 +164,33 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
   function setExpression(id) {
     const entry = expressionCatalog().find((preset) => preset.id === String(id));
     if (!entry) throw new Error(`unknown ExpressionPreset: ${id}`);
+    // A new expression starts from the previous owner's state. This makes
+    // switching expressions deterministic and prevents stale expression
+    // values from becoming the baseline for the next preset.
+    if (activeExpression != null) releaseExpression({ notify: false });
     activeExpression = entry.id;
     onExpressionChange?.(activeExpression);
     dispatch("rigstudio:expressionchange", { id: activeExpression, source: "manual" });
     return activeExpression;
   }
 
-  function releaseExpression() {
+  function restoreExpressionParameters() {
+    const owners = runtimeState.parameterOwners || {};
+    for (const [id, claim] of expressionParameterClaims) {
+      if (owners[id] !== "expression") continue;
+      writeParameterValue(id, claim.value);
+      if (claim.owner && claim.owner !== "base") owners[id] = claim.owner;
+      else delete owners[id];
+    }
+    expressionParameterClaims.clear();
+    runtimeState.parameterOwners = owners;
+  }
+
+  function releaseExpression({ notify = true } = {}) {
     activeExpression = null;
+    restoreExpressionParameters();
     onExpressionChange?.(null);
-    dispatch("rigstudio:expressionchange", { id: null, source: "release" });
+    if (notify) dispatch("rigstudio:expressionchange", { id: null, source: "release" });
     return null;
   }
 
@@ -216,6 +257,8 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
     runtimeState.lipSyncRms = 0;
     manualClaims.clear();
     manualGraceUntil.clear();
+    expressionParameterClaims.clear();
+    runtimeState.parameterOwners = {};
   }
 
   function reset() {
@@ -232,18 +275,12 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
     runtimeState.lipSyncRms = 0;
     manualClaims.clear();
     manualGraceUntil.clear();
+    expressionParameterClaims.clear();
+    runtimeState.parameterOwners = {};
     controls.clear();
   }
 
-  function setParameter(id, value, source = "manual") {
-    if (source === "manual") {
-      const clock = typeof performance !== "undefined" && Number.isFinite(performance.now?.())
-        ? performance.now() : lastNow;
-      noteManualActivity(id, clock);
-    }
-    const descriptor = (currentManifest()?.parameters || []).find((item) => item?.id === id);
-    let numeric = numberOr(value, numberOr(descriptor?.default, 0));
-    if (descriptor) numeric = Math.max(descriptor.min, Math.min(descriptor.max, numeric));
+  function writeParameterValue(id, numeric) {
     runtimeState.parameters ||= {};
     runtimeState.parameterOverrides ||= {};
     runtimeState.parameters[id] = numeric;
@@ -261,6 +298,38 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
     }[id];
     if (legacyId) writeControl(legacyId, numeric);
     return numeric;
+  }
+
+  function setParameter(id, value, source = "manual") {
+    const sourceName = normalizeParameterSource(source);
+    if (sourceName === "manual") {
+      const clock = typeof performance !== "undefined" && Number.isFinite(performance.now?.())
+        ? performance.now() : lastNow;
+      noteManualActivity(id, clock);
+    }
+    const descriptor = (currentManifest()?.parameters || []).find((item) => item?.id === id);
+    let numeric = numberOr(value, numberOr(descriptor?.default, 0));
+    if (descriptor) numeric = Math.max(descriptor.min, Math.min(descriptor.max, numeric));
+    runtimeState.parameters ||= {};
+    runtimeState.parameterOwners ||= {};
+    const currentOwner = runtimeState.parameterOwners[id] || "base";
+    const incomingPriority = parameterSourcePriority(sourceName);
+    const currentPriority = parameterSourcePriority(currentOwner);
+    if (sourceName === "expression") {
+      if (currentOwner !== "expression" && incomingPriority < currentPriority)
+        return numberOr(runtimeState.parameters[id], numeric);
+      if (!expressionParameterClaims.has(id)) {
+        expressionParameterClaims.set(id, {
+          value: numberOr(runtimeState.parameters[id], numberOr(descriptor?.default)),
+          owner: currentOwner,
+        });
+      }
+      runtimeState.parameterOwners[id] = "expression";
+    } else if (sourceName !== "base" && incomingPriority >= currentPriority) {
+      if (currentOwner === "expression") expressionParameterClaims.delete(id);
+      runtimeState.parameterOwners[id] = sourceName;
+    }
+    return writeParameterValue(id, numeric);
   }
 
   function parameterValue(id, motion = {}) {
@@ -443,6 +512,7 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
       blink: clone(runtimeState.blink), blinkTimer: runtimeState.blinkTimer,
       blinkPhase: clone(runtimeState.blinkPhase), gazeTargets: clone(runtimeState.gazeTargets),
       parameters: clone(runtimeState.parameters), parameterOverrides: clone(runtimeState.parameterOverrides),
+      parameterOwners: clone(runtimeState.parameterOwners),
       motionQA: clone(runtimeState.motionQA), collarOverride: runtimeState.collarOverride,
       displayPreset: runtimeState.displayPreset, r2EditMode: runtimeState.r2?.editMode,
       lipSyncEnabled, lipSyncRms,
@@ -488,6 +558,7 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
     runtimeState.gazeTargets = clone(snapshot.gazeTargets) || [];
     runtimeState.parameters = clone(snapshot.parameters) || {};
     runtimeState.parameterOverrides = clone(snapshot.parameterOverrides) || {};
+    runtimeState.parameterOwners = clone(snapshot.parameterOwners) || {};
     runtimeState.motionQA = clone(snapshot.motionQA) || runtimeState.motionQA;
     runtimeState.collarOverride = snapshot.collarOverride ?? null;
     runtimeState.displayPreset = snapshot.displayPreset || runtimeState.displayPreset;

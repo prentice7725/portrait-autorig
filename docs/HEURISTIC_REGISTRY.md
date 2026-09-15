@@ -59,6 +59,9 @@ must not silently become defaults.
 | P3 automatic keyforms | EXPERIMENTAL | Compile-time `BustX/BustY` +/- keyforms provide shape; physics only supplies normalized parameters. Profile ranges start at 6px and require A002 corpus tuning | `check_chest_p3_keyforms.mjs`, `check_chest_p3_real_kick.mjs` |
 | P3 migration selection | ACTIVE | P3 manifest block wins over P2.5 on its target; absent P3 keeps the P2.x runtime path and does not migrate old manifests at load | `check_chest_p3_keyforms.mjs`, legacy P2 regressions |
 | P3 breath isolation | ACTIVE | When P3 is present, torso breathing is consumed by ParamBreath/global volume only; the ParamBustY spring receives body/pose-relative input | `check_chest_p3_breath_isolation.mjs` |
+| `mouth_form` endpoint geometry | EXPERIMENTAL | geometry-derived Smile/Frown corner lift/drop and outward/inward ratios are recorded in the generated manifest; no character-specific pixel constant is used | `tests/test_mouth_form.py`, `check_mouth_form.mjs` |
+| `mouth_form` face corrective | EXPERIMENTAL | a small mouth-centered falloff is applied only to the face mesh; its radii are derived from the mouth/face boxes and its gain is explicit in the manifest | `tests/test_mouth_form.py`, `check_mouth_form.mjs` |
+| `mouth_form` corrective ordering | ACTIVE | `mouth_form` runs before `jaw_open` in the corrective phase; missing `mouth_form` leaves legacy manifests unchanged | `tests/test_mouth_form.py`, `check_deformation.mjs` |
 
 ## Status vocabulary
 

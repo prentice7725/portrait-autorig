@@ -12,8 +12,8 @@ const CONTEXTS = Object.freeze({
     description: "Author the generated chest shape and calibrate its physics.",
   },
   eyes: {
-    label: "Eyes",
-    description: "Inspect eyelid geometry and trigger a one-shot blink or wink.",
+    label: "Eyes & Mouth",
+    description: "Inspect eyelid geometry and author the layer-free mouth form.",
   },
   hair: {
     label: "Hair",

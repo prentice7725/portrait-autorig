@@ -26,7 +26,7 @@ from .manifest import (
 from .mesh import contour_mesh_spec, mesh_spec, motion_aware_mesh_spec
 from .strand_topology import build_strand_specs
 from .constraints import boundary_stitch_spec, compile_clip_masks
-from .face_motion import build_jaw_open_spec
+from .face_motion import build_jaw_open_spec, build_mouth_form_spec
 from .hair_detection import HAIR_SEMANTIC_TAGS, detect_hair_zones
 from .physics import validate_physics_spec
 from .semantic import SEMANTIC_Z_ORDER
@@ -1434,11 +1434,23 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
                     part["visible"] = member in active_members
                 part["variant_set"] = set_id
     else:
-        compiled_variants, compiled_presets, variant_deformers, variant_report = {}, {}, [], {
-            "status": "disabled", "warnings": [], "errors": []
-        }
+        # Parameter-only ExpressionPresets do not need Composer variant art.
+        # Compile them through the same validator, but keep the variant
+        # capability disabled because no visual VariantSet exists.
+        if expression_presets:
+            compiled_variants, compiled_presets, variant_deformers, variant_report = compile_variant_bindings(
+                {}, expression_presets, {}, {}
+            )
+            variant_report["status"] = "disabled"
+        else:
+            compiled_variants, compiled_presets, variant_deformers, variant_report = {}, {}, [], {
+                "status": "disabled", "warnings": [], "errors": []
+            }
 
     motion_payload = json.loads(json.dumps(motion if motion is not None else DEFAULT_MOTION))
+    mouth_form = build_mouth_form_spec(parts)
+    if mouth_form is not None and "mouth_form" not in motion_payload:
+        motion_payload["mouth_form"] = mouth_form
     jaw_open = build_jaw_open_spec(parts)
     if jaw_open is not None:
         motion_payload["jaw_open"] = jaw_open
@@ -1612,8 +1624,9 @@ def build_rig(layer_dict: dict[str, np.ndarray], *,
         manifest["deformers"].extend(variant_deformers)
     if compiled_variants:
         manifest["variant_sets"] = compiled_variants
-        manifest["expression_presets"] = compiled_presets
         manifest["variant_bindings"] = variant_report
+    if compiled_presets:
+        manifest["expression_presets"] = compiled_presets
     return manifest, images
 
 

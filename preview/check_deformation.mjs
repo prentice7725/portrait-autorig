@@ -48,7 +48,7 @@ const { weightAt, buildMesh, deform, state, scheduleBlink, startBlink, blinkAmou
         fitShells, shellDelta, SHELL_MAX_YAW, SHELL_MAX_PITCH,
         buildSoftMorphWeights,
         expressionSwap, opacityOf, SWAP_HI, motionFromDeformers, bodySwayPosition } = Runtime;
-const { applyVariantSet, applyExpressionPreset, evaluateVisibilityPhase } = Runtime;
+const { applyVariantSet, applyExpressionPreset, releaseExpression, evaluateVisibilityPhase } = Runtime;
 const { evaluateAllPhases } = Runtime;
 const { jawOpenDelta } = Runtime;
 
@@ -581,7 +581,10 @@ console.log("\nVariantSet runtime binding (P0-F2)");
 {
   const savedManifest = state.manifest;
   const savedParts = state.parts;
+  const savedParameters = state.parameters;
+  const savedParameterOwners = state.parameterOwners;
   state.manifest = {
+    parameters: [{ id: "ParamMouthForm", min: -1, max: 1, default: 0 }],
     variant_sets: {
       mouth: {
         mode: "exclusive", default: "mouth_neutral", active: "mouth_neutral",
@@ -600,20 +603,38 @@ console.log("\nVariantSet runtime binding (P0-F2)");
         },
       },
     },
-    expression_presets: { annoyed: { variants: { mouth: "mouth_open", eyes: "eyes_annoyed" } } },
+    expression_presets: {
+      smile: { parameters: { ParamMouthForm: 0.72 } },
+      hybrid: { parameters: { ParamMouthForm: 0.25 }, variants: { mouth: "mouth_open", eyes: "eyes_annoyed" } },
+      annoyed: { variants: { mouth: "mouth_open", eyes: "eyes_annoyed" } },
+    },
     deformers: [{ kind: "sprite_swap", phase: "visibility" }],
   };
   state.parts = ["variant_mouth_neutral", "variant_mouth_open", "variant_eyes_open", "variant_eyes_annoyed"]
     .map((name) => ({ spec: { name }, visible: true }));
   applyVariantSet("mouth", "mouth_open");
   check("exclusive swap shows exactly one member", state.parts[0].visible === false && state.parts[1].visible === true);
+  state.parameters = {};
+  state.parameterOwners = {};
+  const parameterOnly = applyExpressionPreset("smile");
+  check("parameter-only ExpressionPreset applies its pose",
+        parameterOnly.length === 0 && state.parameters.ParamMouthForm === 0.72);
+  const hybrid = applyExpressionPreset("hybrid");
+  check("hybrid ExpressionPreset applies parameters and variants",
+        hybrid.length === 2 && state.parameters.ParamMouthForm === 0.25
+        && state.parts[1].visible && state.parts[3].visible && !state.parts[2].visible);
   applyExpressionPreset("annoyed");
   check("ExpressionPreset applies multiple sets together",
         state.parts[1].visible && state.parts[3].visible && !state.parts[2].visible);
+  releaseExpression();
+  check("runtime expression release restores the previous parameter owner/value",
+        state.parameters.ParamMouthForm === 0 && !state.parameterOwners.ParamMouthForm);
   check("visibility phase returns sprite swap entries",
         evaluateVisibilityPhase(0).length === 1);
   state.manifest = savedManifest;
   state.parts = savedParts;
+  state.parameters = savedParameters;
+  state.parameterOwners = savedParameterOwners;
 }
 
 console.log("\ntilt about the neck pivot");
