@@ -441,8 +441,10 @@ class BuildRigTests(unittest.TestCase):
         deformer_kinds = {d["kind"] for d in manifest["deformers"]}
         self.assertEqual(deformer_kinds,
                          {"parallax_turn", "shell_turn", "weighted_rotation",
-                          "continuous_field", "body_sway", "eye_fold", "gaze", "jaw_open"})
+                          "continuous_field", "body_sway", "eye_fold", "gaze",
+                          "mouth_form", "jaw_open"})
         self.assertEqual(manifest["motion"]["jaw_open"]["target_tag"], "face")
+        self.assertEqual(manifest["deformers"][-2]["kind"], "mouth_form")
         self.assertEqual(manifest["deformers"][-1]["kind"], "jaw_open")
 
     def test_every_part_carries_a_frozen_mesh_topology_hash(self):

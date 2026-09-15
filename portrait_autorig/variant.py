@@ -10,9 +10,11 @@ semantic/part mapping.
 from __future__ import annotations
 
 import re
+import math
 from typing import Any, Mapping
 
 from .manifest import DEFORMER_SPRITE_SWAP, PHASE_VISIBILITY
+from .parameters import standard_parameter_registry
 
 DISCRETE = "discrete"
 CROSSFADE = "crossfade"
@@ -45,6 +47,7 @@ def compile_variant_bindings(
     expressions: Mapping[str, Any] | None,
     instance_to_tag: Mapping[str, str],
     part_names: Mapping[str, str],
+    parameter_registry: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     """Return ``(sets, presets, deformers, report)`` for a Composer bundle.
 
@@ -118,18 +121,62 @@ def compile_variant_bindings(
                 "code": "variant_active_differs_from_default",
                 "variant_set": str(set_id), "active": str(active), "default": str(default),
             })
+    descriptors = {
+        str(item["id"]): (float(item["min"]), float(item["max"]))
+        for item in (parameter_registry or standard_parameter_registry())
+        if isinstance(item, Mapping) and item.get("id") is not None
+    }
     presets: dict[str, Any] = {}
     for preset_id, raw in (expressions or {}).items():
-        if not isinstance(raw, Mapping) or not isinstance(raw.get("variants"), Mapping):
-            raise ValueError(f"ExpressionPreset {preset_id!r} must contain variants")
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"ExpressionPreset {preset_id!r} must be an object")
+        raw_parameters = raw.get("parameters")
+        raw_variants = raw.get("variants")
+        if not isinstance(raw_parameters, Mapping) and not isinstance(raw_variants, Mapping):
+            raise ValueError(
+                f"ExpressionPreset {preset_id!r} must contain parameters or variants"
+            )
+        if isinstance(raw_parameters, Mapping) and not raw_parameters:
+            raw_parameters = None
+        if isinstance(raw_variants, Mapping) and not raw_variants:
+            raw_variants = None
+        if raw_parameters is None and raw_variants is None:
+            raise ValueError(
+                f"ExpressionPreset {preset_id!r} must contain non-empty parameters or variants"
+            )
+        parameters: dict[str, float] = {}
+        if raw_parameters is not None:
+            for parameter_id, value in raw_parameters.items():
+                parameter_id = str(parameter_id)
+                if parameter_id not in descriptors:
+                    raise ValueError(
+                        f"ExpressionPreset {preset_id!r} selects unknown parameter {parameter_id!r}"
+                    )
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                    raise ValueError(
+                        f"ExpressionPreset {preset_id!r} has non-finite value for {parameter_id!r}"
+                    )
+                minimum, maximum = descriptors[parameter_id]
+                if not minimum <= float(value) <= maximum:
+                    raise ValueError(
+                        f"ExpressionPreset {preset_id!r} value for {parameter_id!r} "
+                        f"is outside [{minimum}, {maximum}]"
+                    )
+                parameters[parameter_id] = float(value)
         selections: dict[str, str] = {}
-        for set_id, member in raw["variants"].items():
-            set_id = str(set_id); member = str(member)
-            spec = compiled.get(set_id)
-            if spec is None or member not in spec["members"]:
-                raise ValueError(f"ExpressionPreset {preset_id!r} selects invalid member {member!r} for {set_id!r}")
-            selections[set_id] = member
-        presets[str(preset_id)] = {"variants": selections}
+        if raw_variants is not None:
+            for set_id, member in raw_variants.items():
+                set_id = str(set_id); member = str(member)
+                spec = compiled.get(set_id)
+                if spec is None or member not in spec["members"]:
+                    raise ValueError(f"ExpressionPreset {preset_id!r} selects invalid member {member!r} for {set_id!r}")
+                selections[set_id] = member
+        preset: dict[str, Any] = {}
+        if parameters:
+            preset["parameters"] = parameters
+        if selections:
+            preset["variants"] = selections
+        presets[str(preset_id)] = preset
         if raw.get("metadata"):
             presets[str(preset_id)]["metadata"] = dict(raw["metadata"])
     if compiled:

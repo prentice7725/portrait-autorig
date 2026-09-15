@@ -50,6 +50,51 @@ function smoothstep(edge0, edge1, x) {
   return t * t * (3 - 2 * t);
 }
 
+function mouthFormDelta(part, x, y, motion, operation) {
+  const spec = operation?.config || motion?.mouth_form;
+  if (!spec?.enabled || Number(spec.version) !== 1) return [0, 0];
+  const targets = operation?.targets?.tags || spec.target_tags || ["mouth", "face"];
+  if (!targets.includes(part?.tag || part?.spec?.tag)) return [0, 0];
+  const amount = Math.max(-1, Math.min(1, Number(motion.parameters?.ParamMouthForm) || 0));
+  if (amount === 0) return [0, 0];
+  const box = spec.mouth_box || [];
+  const mx1 = Number(box[0]), my1 = Number(box[1]), mx2 = Number(box[2]), my2 = Number(box[3]);
+  if (![mx1, my1, mx2, my2].every(Number.isFinite) || !(mx2 > mx1) || !(my2 > my1)) return [0, 0];
+  const centerX = (mx1 + mx2) * 0.5, centerY = (my1 + my2) * 0.5;
+  const halfWidth = Math.max(1e-6, (mx2 - mx1) * 0.5), height = Math.max(1e-6, my2 - my1);
+  const tag = part.tag || part.spec?.tag;
+  const pos = Math.max(-1, Math.min(1, (x - centerX) / halfWidth));
+  const corner = smoothstep(0.15, 1, Math.abs(pos)), center = 1 - corner;
+  const keyform = spec.keyforms?.[amount < 0 ? "-1" : "+1"] || {};
+  const strength = Math.abs(amount);
+  if (["mouth", "mouth_open", "mouth_closed"].includes(tag)) {
+    if (amount > 0) return [
+      Math.sign(pos) * halfWidth * Number(keyform.corner_outward_ratio || 0) * corner * strength,
+      -height * (Number(keyform.corner_lift_ratio || 0) * corner + Number(keyform.center_lift_ratio || 0) * center) * strength,
+    ];
+    return [
+      -Math.sign(pos) * halfWidth * Number(keyform.corner_inward_ratio || 0) * corner * strength,
+      height * (Number(keyform.corner_drop_ratio || 0) * corner + Number(keyform.center_drop_ratio || 0) * center) * strength,
+    ];
+  }
+  if (tag !== "face") return [0, 0];
+  const corrective = spec.face_corrective || {}, fc = corrective.center || [centerX, centerY];
+  const rx = Math.max(1e-6, Number(corrective.radius_x)), ry = Math.max(1e-6, Number(corrective.radius_y));
+  const fx = Number(fc[0]), fy = Number(fc[1]);
+  if (![fx, fy, rx, ry].every(Number.isFinite)) return [0, 0];
+  const falloffX = 1 - smoothstep(0, 1, Math.abs(x - fx) / rx);
+  const falloffY = 1 - smoothstep(0, 1, Math.abs(y - fy) / ry);
+  const faceCorner = smoothstep(0.15, 1, Math.min(1, Math.abs(x - fx) / rx));
+  const influence = falloffX * falloffY * Number(keyform.face_gain ?? corrective.gain ?? 0);
+  return amount > 0 ? [
+    Math.sign(x - fx) * rx * Number(keyform.face_outward_ratio || 0) * faceCorner * influence * strength,
+    -height * Number(keyform.face_lift_ratio || 0) * influence * strength,
+  ] : [
+    -Math.sign(x - fx) * rx * Number(keyform.face_inward_ratio || 0) * faceCorner * influence * strength,
+    height * Number(keyform.face_drop_ratio || 0) * influence * strength,
+  ];
+}
+
 /**
  * P2.5 (directive #61): an independently-written re-derivation of the
  * runtime.mjs basis fields (#53-59), computed on the fly from raw lobe
@@ -248,6 +293,11 @@ export function deformReference(part, motion, operations) {
             const delta = chestParametricDelta(part, i, motion, config);
             x += delta[0]; y += delta[1];
           }
+          break;
+        }
+        case "mouth_form": {
+          const delta = mouthFormDelta(part, x, y, motion, operation);
+          x += delta[0]; y += delta[1];
           break;
         }
         case "local_soft_field": {

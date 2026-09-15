@@ -441,6 +441,22 @@
      Bust 0 must be exact rest; Body Kick tests the same keyforms through the
      runtime parameter bridge.</p>
 
+  <h2>입 형태 QA (R6)</h2>
+  <div class="meta" id="r6MouthQaMeta">R6 QA: neutral</div>
+  <div class="row" aria-label="Mouth form QA presets">
+    <button id="r6QaFrownFull" type="button">Frown -1</button>
+    <button id="r6QaFrownHalf" type="button">Frown -0.5</button>
+    <button id="r6QaNeutral" type="button">Neutral</button>
+    <button id="r6QaSmileHalf" type="button">Smile +0.5</button>
+    <button id="r6QaSmileFull" type="button">Smile +1</button>
+  </div>
+  <div class="row" aria-label="Mouth open composition QA">
+    <button id="r6QaSmileOpen" type="button">Smile + MouthOpen</button>
+    <button id="r6QaFrownOpen" type="button">Frown + MouthOpen</button>
+  </div>
+  <p class="hint">QA preset은 authoring state에 저장되지 않습니다. Neutral exact rest,
+     triangle safety, lip stretch, face seam과 mouth-open composition을 확인합니다.</p>
+
   <h2>가슴 Authoring (R2)</h2>
   <div class="meta" id="r2Meta">R2 authoring: no P3 chest deformer</div>
   <label>자세
@@ -471,6 +487,42 @@
      mode. Physics values remain untouched. Save Correction writes the
      separated authoring payload when the browser exposes a project folder;
      Download Authoring is the portable fallback.</p>
+
+  <h2>입 형태 Authoring (R6)</h2>
+  <div class="meta" id="r6MouthMeta">R6 mouth form: unavailable</div>
+  <label>입 형태 <span class="val" id="r6MouthFormv">0.00</span>
+    <input type="range" id="r6MouthForm" min="-1" max="1" step="0.01" value="0"
+      aria-label="Mouth form, frown to smile"></label>
+  <div class="row" id="r6MouthPreviewButtons" aria-label="Mouth form preview">
+    <button id="r6MouthFrown" type="button">Frown -1</button>
+    <button id="r6MouthNeutral" type="button">Neutral</button>
+    <button id="r6MouthSmile" type="button">Smile +1</button>
+  </div>
+  <label>키폼 보정 대상
+    <select id="r6MouthKeyform" aria-label="Mouth keyform authoring target">
+      <option value="-1">Frown -1</option>
+      <option value="+1" selected>Smile +1</option>
+    </select>
+  </label>
+  <label>코너 변위 <span class="val" id="r6MouthCornerv">0.00</span>
+    <input type="range" id="r6MouthCorner" min="0" max="0.8" step="0.01" value="0"
+      aria-label="Mouth corner keyform displacement"></label>
+  <label>중앙 변위 <span class="val" id="r6MouthCenterv">0.00</span>
+    <input type="range" id="r6MouthCenter" min="0" max="0.4" step="0.01" value="0"
+      aria-label="Mouth center keyform displacement"></label>
+  <label>가로 변위 <span class="val" id="r6MouthHorizontalv">0.00</span>
+    <input type="range" id="r6MouthHorizontal" min="0" max="0.5" step="0.01" value="0"
+      aria-label="Mouth corner horizontal keyform displacement"></label>
+  <label>얼굴 보정 <span class="val" id="r6MouthFaceGainv">0.00</span>
+    <input type="range" id="r6MouthFaceGain" min="0" max="1" step="0.01" value="0"
+      aria-label="Mouth face corrective gain"></label>
+  <div class="row">
+    <button id="r6MouthSave" type="button">입 형태 보정 저장</button>
+    <button id="r6MouthReset" type="button">입 형태 Auto 초기화</button>
+  </div>
+  <p class="hint">R6는 기존 mouth mesh와 face corrective를 ParamMouthForm으로
+     조정합니다. Neutral은 exact rest이며, Frown/Smile 키폼만 authoring override로
+     저장됩니다. 물리와 Composer variant 계약은 변경하지 않습니다.</p>
 
   <label class="row"><input type="checkbox" id="doBlink" checked> 눈 깜빡임</label>
   <label class="row"><input type="checkbox" id="doBreathe" checked> 호흡</label>
