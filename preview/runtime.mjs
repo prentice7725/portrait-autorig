@@ -1689,6 +1689,7 @@ function createPhysicsDrivers(manifest, p3ParametricActive = false) {
 }
 
 export function build(manifest, images, options = {}) {
+  state.persistenceDirty = false;
   const canvas = document.getElementById("gl");
   const overlayCanvas = document.getElementById("regionOverlay");
   state.autoManifest = cloneJson(options.autoManifest || manifest);
@@ -2827,6 +2828,7 @@ function recordAuthoringHistory(before, after) {
 
 function applyAuthoringHistorySnapshot(snapshot) {
   if (!snapshot) return false;
+  state.persistenceDirty = true;
   state.authoring = cloneJson(snapshot.authoring || snapshot);
   state.qa = createQaState();
   state.r2.dirty = Boolean(snapshot.r2Dirty);
@@ -2839,7 +2841,7 @@ function applyAuthoringHistorySnapshot(snapshot) {
 }
 
 function updateProjectMeta(message = null) {
-  const dirty = Boolean(state.r2?.dirty || state.r3?.dirty || hasR3QaOverrides(state.qa));
+  const dirty = Boolean(state.persistenceDirty || state.r2?.dirty || state.r3?.dirty || state.r6Mouth?.dirty);
   const status = document.getElementById("projectDirty");
   if (status) {
     status.textContent = message || (dirty ? "저장되지 않음" : "저장됨");
@@ -3031,13 +3033,7 @@ function applyR6MouthQaPreset(label, form, mouthOpen = 0) {
 }
 
 async function saveMouthFormAuthoring() {
-  const before = authoringHistorySnapshot();
-  state.authoring = currentAuthoringDraft();
-  state.r6Mouth.dirty = false;
-  await persistR2Authoring("R6 mouth form override saved", { preserveAuthoring: true });
-  recordAuthoringHistory(before, authoringHistorySnapshot());
-  updateR6MouthControls();
-  updateProjectMeta();
+  return saveProject("R6 mouth form override saved");
 }
 
 async function resetMouthFormToAuto() {
@@ -3065,8 +3061,7 @@ function syncP3DeformerConfig(manifest) {
   return manifest;
 }
 
-async function writeR2File(relativePath, text) {
-  const handle = state.projectDirectoryHandle;
+async function writeR2File(relativePath, text, handle = state.projectDirectoryHandle) {
   if (!handle) return false;
   const pieces = relativePath.split("/");
   const filename = pieces.pop();
@@ -3141,6 +3136,7 @@ function setR3PhysicsField(field, value) {
   state.r3.dirty = true;
   refreshR3Runtime();
   updateQaActiveBadge();
+  updateProjectMeta();
 }
 
 function setR3Range(axis, value) {
@@ -3157,6 +3153,7 @@ function setR3Range(axis, value) {
   state.r3.dirty = true;
   updateR3Controls();
   updateQaActiveBadge();
+  updateProjectMeta();
 }
 
 function applyR3Preset(name) {
@@ -3217,7 +3214,9 @@ function commitR3QaToAuthoring(baseAuthoring = null) {
   return true;
 }
 
-async function persistR2Authoring(message = "R2 correction saved", options = {}) {
+export async function persistR2Authoring(message = "R2 correction saved", options = {}) {
+  if (state.saveInProgress) return false;
+  state.persistenceDirty = true;
   const draftAuthoring = currentAuthoringDraft();
   const authoredManifest = authoredRuntimeManifest(draftAuthoring);
   const authoring = options.preserveAuthoring
@@ -3231,27 +3230,51 @@ async function persistR2Authoring(message = "R2 correction saved", options = {})
   const physicsText = JSON.stringify(authoring.physics || {}, null, 2) + "\n";
   const rangesText = JSON.stringify(authoring.parameter_ranges || {}, null, 2) + "\n";
   const meta = { version: Number(authoring.version || 1), source_revision: authoring.source_revision || "" };
-  let written = false;
+  const revisionOf = () => JSON.stringify({
+    authoring: currentAuthoringDraft(), r3Dirty: state.r3.dirty,
+    calibration: state.r3.dirty ? state.qa.r3 : null,
+  });
+  const revision = revisionOf();
+  const directory = state.projectDirectoryHandle;
+  const project = state.autoManifest;
+  if (!directory) {
+    downloadR2File("authoring.json", authoring);
+    updateProjectMeta("다운로드됨 · 프로젝트 폴더에는 저장되지 않음");
+    return false;
+  }
+  state.saveInProgress = true;
+  updateProjectMeta("저장 중…");
   try {
-    if (state.projectDirectoryHandle) {
-      await writeR2File("authoring/deformers.json", deformersText);
-      await writeR2File("authoring/physics.json", physicsText);
-      await writeR2File("authoring/parameter_ranges.json", rangesText);
-      await writeR2File("authoring/meta.json", JSON.stringify(meta, null, 2) + "\n");
-      await writeR2File("portrait_rig_manifest.json", JSON.stringify(resolved, null, 2) + "\n");
-      written = true;
-    }
+    await writeR2File("authoring/deformers.json", deformersText, directory);
+    await writeR2File("authoring/physics.json", physicsText, directory);
+    await writeR2File("authoring/parameter_ranges.json", rangesText, directory);
+    await writeR2File("authoring/meta.json", JSON.stringify(meta, null, 2) + "\n", directory);
+    await writeR2File("portrait_rig_manifest.json", JSON.stringify(resolved, null, 2) + "\n", directory);
   } catch (error) {
     document.getElementById("r2Meta").textContent = "R2 save failed: " + error.message;
+    updateProjectMeta("저장 실패 · 변경 내용 유지됨");
+    return false;
+  } finally {
+    state.saveInProgress = false;
   }
-  if (!written) downloadR2File("authoring.json", authoring);
+  if (state.autoManifest !== project || state.projectDirectoryHandle !== directory) {
+    updateProjectMeta();
+    return false;
+  }
+  if (revisionOf() !== revision) {
+    updateProjectMeta("저장 중 새 변경 발생 · 다시 저장 필요");
+    return false;
+  }
+  state.persistenceDirty = false;
   state.r2.dirty = false;
   state.r6Mouth.dirty = false;
   state.r3.dirty = false;
   updateR2Meta();
   updateR3Controls();
   updateProjectMeta(message);
-  if (written) document.getElementById("r2Meta").textContent = message;
+  document.getElementById("r2Meta").textContent = message;
+  updateR6MouthControls();
+  return true;
 }
 
 export function chestParametricValues(motion, spec) {
@@ -4250,14 +4273,16 @@ document.getElementById("r3ApplyPreset")?.addEventListener("click", () => {
   applyR3Preset(document.getElementById("r3Preset")?.value || "soft");
 });
 async function saveProject(message = "Project saved") {
+  if (state.saveInProgress) return false;
   const before = authoringHistorySnapshot();
   // Capture an in-memory R2 draft before committing any R3 QA overlay so the
   // two authored buckets are saved together without either one being lost.
   state.authoring = currentAuthoringDraft();
-  commitR3QaToAuthoring(state.authoring);
-  await persistR2Authoring(message, { preserveAuthoring: true });
+  // QA-only probes are not authored calibration changes.
+  if (state.r3.dirty) commitR3QaToAuthoring(state.authoring);
+  const saved = await persistR2Authoring(message, { preserveAuthoring: true });
   recordAuthoringHistory(before, authoringHistorySnapshot());
-  updateProjectMeta(message);
+  return saved;
 }
 document.getElementById("r3Save")?.addEventListener("click", () => saveProject("R3 chest calibration saved"));
 document.getElementById("r3Reset")?.addEventListener("click", resetR3ToAuto);
@@ -4389,7 +4414,7 @@ r2Overlay?.addEventListener("pointerdown", r2PointerDown);
 r2Overlay?.addEventListener("pointermove", r2PointerMove);
 r2Overlay?.addEventListener("pointerup", r2PointerUp);
 r2Overlay?.addEventListener("pointercancel", r2PointerUp);
-document.getElementById("r2Save")?.addEventListener("click", () => persistR2Authoring());
+document.getElementById("r2Save")?.addEventListener("click", () => saveProject());
 document.getElementById("r2Reset")?.addEventListener("click", resetR2ToAuto);
 document.getElementById("r2Download")?.addEventListener("click", () => {
   const draft = currentAuthoringDraft();
@@ -4430,6 +4455,11 @@ document.getElementById("saveProject")?.addEventListener("click", () => saveProj
 document.getElementById("undoProject")?.addEventListener("click", undoProject);
 document.getElementById("redoProject")?.addEventListener("click", redoProject);
 document.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+    event.preventDefault();
+    saveProject();
+    return;
+  }
   if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "z") return;
   const target = event.target;
   if (target?.matches?.("input, textarea, select")) return;
