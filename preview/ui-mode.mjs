@@ -87,7 +87,7 @@ for (const [mode, modeGroups] of Object.entries(groups)) {
       Hair: "hair",
       "Chest Physics": "chest",
       "Chest Shape": "chest",
-      "Face Mouth": "eyes",
+      "Face Mouth": "mouth",
       Eyes: "eyes",
       "Raw Parts (Advanced)": "raw",
     }[group.title];

@@ -12,8 +12,12 @@ const CONTEXTS = Object.freeze({
     description: "Author the generated chest shape and calibrate its physics.",
   },
   eyes: {
-    label: "Eyes & Mouth",
-    description: "Inspect eyelid geometry and author the layer-free mouth form.",
+    label: "Eyes",
+    description: "Inspect eyelid geometry and gaze.",
+  },
+  mouth: {
+    label: "Mouth",
+    description: "Author the layer-free mouth form and its keyforms.",
   },
   hair: {
     label: "Hair",
@@ -33,6 +37,52 @@ const groups = [...(editPanel?.querySelectorAll(".mode-group[data-context]") || 
 const rawGroup = groups.find((group) => group.dataset.context === "raw");
 let selectedContext = "chest";
 let rawSummary = null;
+let partTree = null;
+
+// Preserve producer semantics: never infer anatomical sides from image positions.
+export function manifestPartEntries(manifest) {
+  return (Array.isArray(manifest?.parts) ? manifest.parts : []).map((part, index) => ({
+    index, name: String(part.name || "unnamed part"), tag: String(part.tag || "untyped"),
+  }));
+}
+
+export function manifestContextCapabilities(manifest) {
+  const entries = manifestPartEntries(manifest);
+  return {
+    chest: Boolean(manifest?.motion?.upper_torso_parametric_deformer) || entries.some(entry => /^(upper_torso|torso|chest|bust|topwear)$/.test(entry.tag)),
+    eyes: entries.some(entry => /^(eye($|_)|eyewhite|eyelid|iris|lash)/.test(entry.tag)),
+    mouth: Boolean(manifest?.motion?.mouth_form?.enabled),
+    hair: entries.some(entry => /hair/.test(entry.tag)),
+    raw: true,
+  };
+}
+
+function renderPartTree(manifest) {
+  partTree?.remove();
+  if (!tree) return;
+  partTree = document.createElement("div");
+  partTree.className = "tree-group";
+  const heading = document.createElement("h2");
+  heading.textContent = "실제 이미지 부위";
+  partTree.appendChild(heading);
+  for (const entry of manifestPartEntries(manifest)) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = `${entry.name} · ${entry.tag}`;
+    button.addEventListener("click", () => {
+      setContext("raw");
+      if (summary) summary.textContent = `${entry.name} · ${entry.tag} — 읽기 전용. 전신 팔다리 관절/IK 리깅은 아직 지원하지 않습니다.`;
+    });
+    partTree.appendChild(button);
+  }
+  tree.appendChild(partTree);
+  const supported = manifestContextCapabilities(manifest);
+  for (const button of buttons) {
+    button.disabled = !supported[button.dataset.context];
+    button.title = button.disabled ? "이 프로젝트에서 편집 가능한 기능이 없습니다" : "";
+  }
+  if (!supported[selectedContext]) setContext("raw");
+}
 
 function createInspectorSummary() {
   if (!editPanel || !editIntro) return null;
@@ -108,8 +158,12 @@ for (const button of buttons) {
 if (typeof window !== "undefined") {
   window.addEventListener("rigstudio:manifestready", (event) => {
     renderRawSummary(event.detail?.manifest || null);
+    renderPartTree(event.detail?.manifest || null);
   });
-  window.addEventListener("rigstudio:manifestclear", () => renderRawSummary(null));
+  window.addEventListener("rigstudio:manifestclear", () => {
+    renderRawSummary(null);
+    renderPartTree(null);
+  });
 }
 
 renderRawSummary(null);

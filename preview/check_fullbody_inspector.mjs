@@ -1,0 +1,18 @@
+import assert from "node:assert/strict";
+globalThis.document = { getElementById() { return null; } };
+const { CONTEXTS, manifestPartEntries, manifestContextCapabilities } = await import("./semantic-inspector.mjs");
+assert.equal(CONTEXTS.eyes.label, "Eyes");
+assert.equal(CONTEXTS.mouth.label, "Mouth");
+assert.deepEqual(manifestPartEntries(null), []);
+const single = { canvas: { width: 200, height: 800 }, parts: [{ name: "fullbody", tag: "unclassified" }] };
+const before = JSON.stringify(single);
+assert.deepEqual(manifestPartEntries(single), [{ index: 0, name: "fullbody", tag: "unclassified" }]);
+assert.deepEqual(manifestContextCapabilities(single), { chest: false, eyes: false, mouth: false, hair: false, raw: true });
+assert.equal(JSON.stringify(single), before);
+const split = { parts: [{ name: "L", tag: "arm_left" }, { name: "R", tag: "leg_right" }, { name: "brow", tag: "eyebrow" }] };
+assert.equal(manifestPartEntries(split).length, 3);
+assert.equal(manifestPartEntries(split)[0].tag, "arm_left");
+assert.equal(manifestContextCapabilities(split).eyes, false);
+assert.equal(manifestContextCapabilities({ parts: [{ tag: "eye_left" }], motion: { mouth_form: { enabled: true } } }).eyes, true);
+assert.equal(manifestContextCapabilities({ motion: { mouth_form: { enabled: true } } }).mouth, true);
+console.log("fullbody inspector checks passed");
