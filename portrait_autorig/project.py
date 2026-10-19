@@ -313,49 +313,94 @@ def _binding_candidates(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
     for part in manifest.get("parts", []):
         if not isinstance(part, Mapping):
             continue
+        mesh = part.get("mesh") if isinstance(part.get("mesh"), Mapping) else {}
         candidates.append({
             "source_instance_id": part.get("source_instance_id"),
             "target_instance": part.get("source_instance_id") or part.get("name"),
             "target_part": part.get("name"),
             "target_tag": part.get("tag"),
+            "target_topology_hash": part.get("topology_hash") or mesh.get("topology_hash"),
         })
     return candidates
 
 
 def resolve_binding(manifest: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
-    """Resolve an authoring target using the locked R1 priority order."""
+    """Resolve one authoring target without falling through a stale identity.
+
+    Lower-priority aliases are useful for legacy overrides that never stored a
+    stronger identity. Once an override stores a stronger identity, a miss or
+    contradiction must remain unresolved instead of rebinding by part/tag.
+    """
     candidates = _binding_candidates(manifest)
     for field_name in ("source_instance_id", "target_instance", "target_part", "target_tag"):
         value = override.get(field_name)
         if not isinstance(value, str) or not value:
             continue
         matches = [candidate for candidate in candidates if candidate.get(field_name) == value]
-        if len(matches) == 1:
-            return {"status": "BOUND", "strategy": field_name, "target": matches[0]}
         if len(matches) > 1:
             return {"status": "AMBIGUOUS", "strategy": field_name, "matches": matches}
+        if not matches:
+            return {"status": "UNRESOLVED", "strategy": field_name,
+                    "reason": f"{field_name} no longer matches a generated part",
+                    "value": value}
+        target = matches[0]
+        conflicts = {
+            key: override[key]
+            for key in ("source_instance_id", "target_instance", "target_part", "target_tag")
+            if key != field_name and isinstance(override.get(key), str)
+            and override.get(key) and target.get(key) != override.get(key)
+        }
+        if conflicts:
+            return {"status": "UNRESOLVED", "strategy": field_name,
+                    "reason": "stored binding fields identify different generated parts",
+                    "target": target, "conflicts": conflicts}
+        topology_hash = override.get("target_topology_hash")
+        if (isinstance(topology_hash, str) and topology_hash
+                and target.get("target_topology_hash") != topology_hash):
+            return {"status": "UNRESOLVED", "strategy": field_name,
+                    "reason": "target topology changed since this correction was authored",
+                    "target": target, "expected_topology_hash": topology_hash}
+        return {"status": "BOUND", "strategy": field_name, "target": target}
     return {"status": "UNRESOLVED", "reason": "no safe target binding"}
 
 
+def _matches_bound_target(value: Mapping[str, Any], target: Mapping[str, Any],
+                          strategy: str, *, deformer_target: bool = False) -> bool:
+    """Match generated data to the one part selected by ``resolve_binding``.
+
+    A generated entry with a stronger selector cannot be broadened by a tag
+    carried alongside it. We only use a part/tag selector when that was the
+    strongest selector present on the authored override.
+    """
+    instance_key, part_key, tag_key = (
+        ("instance", "part", "tag") if deformer_target
+        else ("target_instance", "target_part", "target_tag")
+    )
+    instance = value.get(instance_key)
+    if isinstance(instance, str) and instance:
+        return instance == target.get("target_instance")
+    part = value.get(part_key)
+    if isinstance(part, str) and part:
+        return strategy in {"target_part", "target_tag"} and part == target.get("target_part")
+    tag = value.get(tag_key)
+    return (strategy == "target_tag" and isinstance(tag, str) and bool(tag)
+            and tag == target.get("target_tag"))
+
+
 def _apply_deformer_override(manifest: dict[str, Any], override: Mapping[str, Any],
-                             binding: Mapping[str, Any]) -> None:
+                             binding: Mapping[str, Any]) -> int:
     target = binding.get("target") or {}
-    target_instance = target.get("target_instance")
-    target_part = target.get("target_part")
-    target_tag = target.get("target_tag")
+    strategy = str(binding.get("strategy", ""))
     motion = manifest.get("motion")
     if not isinstance(motion, dict):
-        return
+        return 0
     specs: list[dict[str, Any]] = []
     for value in motion.values():
         if isinstance(value, dict):
             specs.append(value)
     matched_specs: list[dict[str, Any]] = []
     for spec in specs:
-        spec_target = spec.get("target_instance")
-        if (target_instance and spec_target == target_instance
-                or target_part and spec.get("target_part") == target_part
-                or target_tag and spec.get("target_tag") == target_tag):
+        if _matches_bound_target(spec, target, strategy):
             matched_specs.append(spec)
             base_rest_points = _json_copy((spec.get("cage") or {}).get("rest_points"))
             for override_key, spec_key in (
@@ -387,6 +432,7 @@ def _apply_deformer_override(manifest: dict[str, Any], override: Mapping[str, An
                 else:
                     spec.setdefault("cage", {}).pop("rest_point_deltas", None)
 
+    application_count = len(matched_specs)
     for deformer in manifest.get("deformers", []):
         if not isinstance(deformer, dict):
             continue
@@ -394,21 +440,16 @@ def _apply_deformer_override(manifest: dict[str, Any], override: Mapping[str, An
         config = deformer.get("config")
         if not isinstance(config, dict):
             continue
-        if (target_instance and deformer_target.get("instance") == target_instance
-                or target_part and deformer_target.get("part") == target_part
-                or target_tag and deformer_target.get("tag") == target_tag):
+        if _matches_bound_target(deformer_target, target, strategy, deformer_target=True):
+            application_count += 1
             if isinstance(override.get("patch"), Mapping):
                 _deep_merge(config, override["patch"])
             if deformer.get("kind") == "chest_parametric_deformer":
                 matching_spec = next((spec for spec in matched_specs
-                                      if (not target_instance
-                                          or spec.get("target_instance") == target_instance)
-                                      and (not target_part
-                                           or spec.get("target_part") == target_part)
-                                      and (not target_tag
-                                           or spec.get("target_tag") == target_tag)), None)
+                                      if _matches_bound_target(spec, target, strategy)), None)
                 if matching_spec is not None:
                     deformer["config"] = _json_copy(matching_spec)
+    return application_count
 
 
 def resolve_rig(generated_manifest: Mapping[str, Any],
@@ -423,9 +464,10 @@ def resolve_rig(generated_manifest: Mapping[str, Any],
             report_entries[str(deformer_id)] = {"status": "UNRESOLVED", "reason": "override must be an object"}
             continue
         binding = resolve_binding(resolved, override)
-        report_entries[str(deformer_id)] = binding
         if binding.get("status") == "BOUND":
-            _apply_deformer_override(resolved, override, binding)
+            applied = _apply_deformer_override(resolved, override, binding)
+            binding["application_status"] = "APPLIED" if applied else "NO_GENERATED_TARGET"
+        report_entries[str(deformer_id)] = binding
 
     if authoring_data.get("physics") and isinstance(authoring_data.get("physics"), Mapping):
         if not isinstance(resolved.get("physics"), dict):
@@ -460,10 +502,16 @@ def resolve_rig(generated_manifest: Mapping[str, Any],
                 target = {"target_part": deformer_id, "target_tag": deformer_id}
                 binding = resolve_binding(resolved, target)
                 if binding.get("status") == "BOUND":
-                    _apply_deformer_override(resolved, entry, binding)
+                    applied = _apply_deformer_override(resolved, entry, binding)
+                    binding["application_status"] = "APPLIED" if applied else "NO_GENERATED_TARGET"
+                report_entries[f"{bucket_name}:{deformer_id}"] = binding
 
-    statuses = {item.get("status") for item in report_entries.values()}
-    overall = "MATCH" if not statuses or statuses == {"BOUND"} else "REVIEW_REQUIRED"
+    review_required = any(
+        item.get("status") != "BOUND"
+        or item.get("application_status") != "APPLIED"
+        for item in report_entries.values()
+    )
+    overall = "REVIEW_REQUIRED" if review_required else "MATCH"
     return resolved, {"status": overall, "bindings": report_entries}
 
 
@@ -492,13 +540,35 @@ def _chest_binding(project: RigProject) -> dict[str, Any]:
     if spec is None:
         raise ValueError("R2 chest authoring requires a P3 parametric chest deformer")
     binding = {}
-    for key in ("target_instance", "target_part", "target_tag"):
+    for key in ("source_instance_id", "target_instance", "target_part", "target_tag",
+                "target_topology_hash"):
         value = spec.get(key)
         if isinstance(value, str) and value:
             binding[key] = value
     if not binding:
         raise ValueError("P3 chest deformer has no stable authoring target")
     return binding
+
+
+def _refresh_chest_binding(override: dict[str, Any], binding: Mapping[str, Any]) -> None:
+    selector_keys = ("source_instance_id", "target_instance", "target_part", "target_tag")
+    conflicts = {
+        key: override[key]
+        for key in selector_keys
+        if override.get(key) and binding.get(key) and override[key] != binding[key]
+    }
+    old_topology = override.get("target_topology_hash")
+    new_topology = binding.get("target_topology_hash")
+    if conflicts:
+        raise ValueError(
+            "existing chest correction is bound to a different generated target; "
+            "reset or review it before editing"
+        )
+    if old_topology and old_topology != new_topology:
+        raise ValueError(
+            "existing chest correction uses an older topology; reset or review it before editing"
+        )
+    override.update(binding)
 
 
 def _finite_pairs(value: Any, expected: int, label: str) -> list[list[float]]:
@@ -526,7 +596,7 @@ def set_chest_cage_bounds(project: RigProject,
     if values[2] <= values[0] or values[3] <= values[1]:
         raise ValueError("chest cage bounds must have positive width and height")
     override = dict(project.authoring.setdefault("deformers", {}).get(CHEST_DEFORMER_ID) or {})
-    override.update(_chest_binding(project))
+    _refresh_chest_binding(override, _chest_binding(project))
     cage = dict(override.get("cage_override") or {})
     cage["bounds"] = values
     override["cage_override"] = cage
@@ -539,7 +609,7 @@ def set_chest_cage_points(project: RigProject,
     """Persist all 24 P3 rest cage control points as an R2 correction."""
     normalised = _finite_pairs(points, 24, "chest cage points")
     override = dict(project.authoring.setdefault("deformers", {}).get(CHEST_DEFORMER_ID) or {})
-    override.update(_chest_binding(project))
+    _refresh_chest_binding(override, _chest_binding(project))
     cage = dict(override.get("cage_override") or {})
     cage["rest_points"] = normalised
     override["cage_override"] = cage
@@ -554,7 +624,7 @@ def set_chest_keyform(project: RigProject, pose: str,
         raise ValueError(f"unsupported chest keyform: {pose!r}")
     normalised = _finite_pairs(points, 24, f"chest keyform {pose}")
     override = dict(project.authoring.setdefault("deformers", {}).get(CHEST_DEFORMER_ID) or {})
-    override.update(_chest_binding(project))
+    _refresh_chest_binding(override, _chest_binding(project))
     keyforms = dict(override.get("keyform_overrides") or {})
     keyforms[pose] = normalised
     override["keyform_overrides"] = keyforms
@@ -628,7 +698,7 @@ def set_chest_parameter_range(project: RigProject, ranges: Mapping[str, Any]) ->
     if not values:
         raise ValueError("chest parameter range requires x and/or y")
     override = dict(project.authoring.setdefault("deformers", {}).get(CHEST_DEFORMER_ID) or {})
-    override.update(_chest_binding(project))
+    _refresh_chest_binding(override, _chest_binding(project))
     current = dict(override.get("range_override") or {})
     current.update(values)
     override["range_override"] = current

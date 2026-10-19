@@ -140,6 +140,65 @@ def _dedup_points(points: np.ndarray, tol: float = 0.75) -> np.ndarray:
     return np.array(kept, dtype=np.float64).reshape(-1, 2)
 
 
+def _triangle_roi(points: np.ndarray, shape: tuple[int, int]):
+    """Return a clipped local ROI and integer polygon for triangle raster checks."""
+    height, width = shape
+    pts = np.asarray(points, dtype=np.float64).reshape(3, 2)
+    if not np.isfinite(pts).all():
+        return None
+    x0 = max(0, int(np.floor(pts[:, 0].min())))
+    y0 = max(0, int(np.floor(pts[:, 1].min())))
+    x1 = min(width - 1, int(np.ceil(pts[:, 0].max())))
+    y1 = min(height - 1, int(np.ceil(pts[:, 1].max())))
+    if x1 < x0 or y1 < y0:
+        return None
+    polygon = np.rint(pts - np.array([x0, y0])).astype(np.int32)
+    polygon[:, 0] = np.clip(polygon[:, 0], 0, x1 - x0)
+    polygon[:, 1] = np.clip(polygon[:, 1], 0, y1 - y0)
+    return (slice(y0, y1 + 1), slice(x0, x1 + 1)), polygon
+
+
+def _triangle_overlaps_mask(points: np.ndarray, mask: np.ndarray) -> bool:
+    """Whether a triangle covers any marked pixel center in a binary mask."""
+    raster = _triangle_roi(points, mask.shape)
+    if raster is None:
+        return False
+    region, polygon = raster
+    filled = np.zeros(mask[region].shape, dtype=np.uint8)
+    cv2.fillConvexPoly(filled, polygon, 1)
+    return bool(np.any((filled > 0) & (mask[region] > 0)))
+
+
+def _rasterize_triangle(mask: np.ndarray, points: np.ndarray) -> bool:
+    raster = _triangle_roi(points, mask.shape)
+    if raster is None:
+        return False
+    region, polygon = raster
+    cv2.fillConvexPoly(mask[region], polygon, 1)
+    return True
+
+
+def _interior_void_mask(source_mask: np.ndarray, dilate_px: int) -> np.ndarray:
+    """Concave gaps and holes inside the foreground convex hull."""
+    count, labels = cv2.connectedComponents(source_mask, connectivity=8)
+    void_mask = np.zeros_like(source_mask)
+    tolerance = max(1.0, float(dilate_px))
+    for component_id in range(1, count):
+        component = (labels == component_id).astype(np.uint8)
+        points = cv2.findNonZero(component)
+        if points is None or len(points) < 3:
+            continue
+        hull_mask = np.zeros_like(source_mask)
+        cv2.fillConvexPoly(hull_mask, cv2.convexHull(points), 1)
+        background = (component == 0).astype(np.uint8)
+        distance = cv2.distanceTransform(background, cv2.DIST_L2, 3)
+        # Ignore one-pixel raster noise at the silhouette, while still
+        # rejecting faces spanning a real concavity or enclosed alpha hole.
+        void_mask |= ((hull_mask > 0) & (source_mask == 0)
+                      & (distance > tolerance)).astype(np.uint8)
+    return void_mask
+
+
 def contour_mesh(alpha: np.ndarray, xyxy: tuple[int, int, int, int], *,
                  edge_points: int = DEFAULT_EDGE_POINTS,
                  interior_spacing: int = DEFAULT_INTERIOR_SPACING,
@@ -178,15 +237,44 @@ def contour_mesh(alpha: np.ndarray, xyxy: tuple[int, int, int, int], *,
     width, height = x2 - x1, y2 - y1
     if width <= 0 or height <= 0:
         return None
-    mask = (np.asarray(alpha) > alpha_threshold).astype(np.uint8)
-    if mask.shape != (height, width):
-        raise ValueError(f"alpha shape {mask.shape} does not match xyxy {width}x{height}")
+    source_mask = (np.asarray(alpha) > alpha_threshold).astype(np.uint8)
+    if source_mask.shape != (height, width):
+        raise ValueError(f"alpha shape {source_mask.shape} does not match xyxy {width}x{height}")
+    if not np.any(source_mask):
+        return None
+
+    component_count, component_labels, component_stats, _ = cv2.connectedComponentsWithStats(
+        source_mask, connectivity=8
+    )
+    component_ids = sorted(range(1, component_count),
+                           key=lambda i: int(component_stats[i, cv2.CC_STAT_AREA]), reverse=True)
+    if len(component_ids) > 1:
+        if island_policy == "reject":
+            return None
+        if island_policy == "separate":
+            vertices: list[list[float]] = []
+            triangles: list[list[int]] = []
+            for component_id in component_ids:
+                component = (component_labels == component_id).astype(np.uint8) * 255
+                piece = contour_mesh(
+                    component, xyxy, edge_points=edge_points,
+                    interior_spacing=interior_spacing, edge_padding=edge_padding,
+                    alpha_threshold=alpha_threshold, dilate_px=dilate_px,
+                    island_policy="reject")
+                if not piece:
+                    continue
+                offset = len(vertices)
+                vertices.extend(piece["vertices"])
+                triangles.extend([[a + offset, b + offset, c + offset]
+                                  for a, b, c in piece["triangles"]])
+            return {"vertices": vertices, "triangles": triangles} if triangles else None
+        if island_policy == "largest_only":
+            source_mask = (component_labels == component_ids[0]).astype(np.uint8)
+
+    mask = source_mask.copy()
     if dilate_px > 0:
         kernel = np.ones((2 * dilate_px + 1, 2 * dilate_px + 1), np.uint8)
         mask = cv2.dilate(mask, kernel)
-    if not np.any(mask):
-        return None
-
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     contours = [c for c in contours if len(c) >= 3]
     if len(contours) != 1:
@@ -237,6 +325,9 @@ def contour_mesh(alpha: np.ndarray, xyxy: tuple[int, int, int, int], *,
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
             if len(contours) != 1:
                 return None
+    # Build void constraints per source island. This preserves holes while
+    # leaving the explicitly requested connect_nearest corridor permitted.
+    void_mask = _interior_void_mask(source_mask, dilate_px)
     edge_pts = _resample_perimeter(contours[0].reshape(-1, 2).astype(np.float64), edge_points)
 
     dist = cv2.distanceTransform(mask, cv2.DIST_L2, 3)
@@ -282,12 +373,32 @@ def contour_mesh(alpha: np.ndarray, xyxy: tuple[int, int, int, int], *,
                 - (clamped[c][0] - clamped[a][0]) * (clamped[b][1] - clamped[a][1]))
         if abs(area2) < 1e-6:
             continue  # degenerate sliver
+        if _triangle_overlaps_mask(clamped[[a, b, c]], void_mask):
+            continue  # do not span a concave gap or enclosed alpha hole
         triangles.append([a, b, c])
 
     if not triangles:
         return None
-    vertices = [[round(float(px + x1), 2), round(float(py + y1), 2)] for px, py in all_pts]
-    return {"vertices": vertices, "triangles": triangles}
+    vertices = [[round(float(px + x1), 2), round(float(py + y1), 2)] for px, py in clamped]
+    accepted: list[list[int]] = []
+    for triangle in triangles:
+        points = np.array([[vertices[i][0] - x1, vertices[i][1] - y1] for i in triangle],
+                          dtype=np.float64)
+        area2 = ((points[1, 0] - points[0, 0]) * (points[2, 1] - points[0, 1])
+                 - (points[2, 0] - points[0, 0]) * (points[1, 1] - points[0, 1]))
+        if abs(area2) < 1e-6 or _triangle_overlaps_mask(points, void_mask):
+            continue  # rounding must not introduce degenerate or bridging faces
+        accepted.append(triangle)
+    if not accepted:
+        return None
+    coverage = np.zeros_like(source_mask)
+    for triangle in accepted:
+        points = np.array([[vertices[i][0] - x1, vertices[i][1] - y1] for i in triangle],
+                          dtype=np.float64)
+        _rasterize_triangle(coverage, points)
+    if np.any((source_mask > 0) & (coverage == 0)):
+        return None  # the caller retains its grid fallback for incomplete contour coverage
+    return {"vertices": vertices, "triangles": accepted}
 
 
 def contour_mesh_spec(alpha: np.ndarray, xyxy: tuple[int, int, int, int], *,

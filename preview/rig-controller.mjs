@@ -169,8 +169,16 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
     // switching expressions deterministic and prevents stale expression
     // values from becoming the baseline for the next preset.
     if (activeExpression != null) releaseExpression({ notify: false });
+    // Apply first so a malformed runtime preset cannot leave the controller
+    // claiming an expression that the renderer rejected.
+    try {
+      onExpressionChange?.(entry.id);
+    } catch (error) {
+      activeExpression = null;
+      dispatch("rigstudio:expressionchange", { id: null, source: "invalid" });
+      throw error;
+    }
     activeExpression = entry.id;
-    onExpressionChange?.(activeExpression);
     dispatch("rigstudio:expressionchange", { id: activeExpression, source: "manual" });
     return activeExpression;
   }
@@ -180,6 +188,9 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
     for (const [id, claim] of expressionParameterClaims) {
       if (owners[id] !== "expression") continue;
       writeParameterValue(id, claim.value);
+      runtimeState.parameterOverrides ||= {};
+      if (claim.hadOverride) runtimeState.parameterOverrides[id] = claim.overrideValue;
+      else delete runtimeState.parameterOverrides[id];
       if (claim.owner && claim.owner !== "base") owners[id] = claim.owner;
       else delete owners[id];
     }
@@ -334,9 +345,12 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
       if (currentOwner !== "expression" && incomingPriority < currentPriority)
         return numberOr(runtimeState.parameters[id], numeric);
       if (!expressionParameterClaims.has(id)) {
+        const overrides = runtimeState.parameterOverrides || {};
         expressionParameterClaims.set(id, {
           value: numberOr(runtimeState.parameters[id], numberOr(descriptor?.default)),
           owner: currentOwner,
+          hadOverride: Object.prototype.hasOwnProperty.call(overrides, id),
+          overrideValue: overrides[id],
         });
       }
       runtimeState.parameterOwners[id] = "expression";

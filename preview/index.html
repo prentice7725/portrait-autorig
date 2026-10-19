@@ -420,7 +420,9 @@
   <p class="hint">R3 changes timing and physical response only. Body Kick X/Y
      and Auto idle above are live probes; BustX/Y shape authoring remains in
      R2. Save Calibration writes <code>authoring/physics.json</code> and the
-     range correction separately from the generated base.</p>
+     range correction separately from the generated base. Frequency is the
+     natural oscillation rate (Hz), damping ratio controls settling, lag is in
+     seconds, and range/maximum displacement are measured in reference pixels.</p>
   <label class="row"><input type="checkbox" id="doSoftMorph"> 가슴 Soft Morph</label>
   <label>강도 <span class="val" id="softStrengthv">0.00</span>
     <input type="range" id="softStrength" min="0" max="1" step="0.01" value="0"></label>

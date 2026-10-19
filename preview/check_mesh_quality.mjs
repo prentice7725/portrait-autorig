@@ -171,6 +171,87 @@ export function meshQualityReport(mesh) {
   };
 }
 
+/** Coverage of opaque source pixels by the rest mesh, plus likely gaps across
+ *  alpha holes/concavities. Mesh vertices are canvas-space; alpha is sampled in
+ *  the part's local crop, so non-integer crop scaling remains supported. */
+export function alphaCoverageReport(mesh, image, xyxy, threshold = 10) {
+  const { width, height, alpha } = image || {};
+  const [x1, y1, x2, y2] = xyxy || [];
+  if (!(width > 0 && height > 0 && x2 > x1 && y2 > y1 && alpha?.length === width * height))
+    return { available: false, reason: "invalid alpha image or part bounds" };
+  const coverage = new Uint8Array(width * height);
+  const counts = { invalidTriangles: 0, degenerateRestTriangles: 0 };
+  for (let i = 0; i + 2 < mesh.index.length; i += 3) {
+    const ids = [mesh.index[i], mesh.index[i + 1], mesh.index[i + 2]];
+    if (ids.some((id) => !Number.isInteger(id) || id < 0 || id * 2 + 1 >= mesh.rest.length)) {
+      counts.invalidTriangles++;
+      continue;
+    }
+    const points = ids.map((id) => [
+      (mesh.rest[id * 2] - x1) * width / (x2 - x1),
+      (mesh.rest[id * 2 + 1] - y1) * height / (y2 - y1),
+    ]);
+    const [a, b, c] = points;
+    const area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
+    if (!Number.isFinite(area) || Math.abs(area) < 1e-9) {
+      counts.degenerateRestTriangles++;
+      continue;
+    }
+    const minX = Math.max(0, Math.ceil(Math.min(a[0], b[0], c[0]) - 0.5));
+    const maxX = Math.min(width - 1, Math.floor(Math.max(a[0], b[0], c[0]) - 0.5));
+    const minY = Math.max(0, Math.ceil(Math.min(a[1], b[1], c[1]) - 0.5));
+    const maxY = Math.min(height - 1, Math.floor(Math.max(a[1], b[1], c[1]) - 0.5));
+    const orientation = Math.sign(area);
+    for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) {
+      const px = x + 0.5, py = y + 0.5;
+      const e0 = (b[0] - a[0]) * (py - a[1]) - (b[1] - a[1]) * (px - a[0]);
+      const e1 = (c[0] - b[0]) * (py - b[1]) - (c[1] - b[1]) * (px - b[0]);
+      const e2 = (a[0] - c[0]) * (py - c[1]) - (a[1] - c[1]) * (px - c[0]);
+      if (orientation * e0 >= -1e-8 && orientation * e1 >= -1e-8 && orientation * e2 >= -1e-8)
+        coverage[y * width + x] = 1;
+    }
+  }
+  let opaquePixels = 0, coveredOpaquePixels = 0;
+  let boundaryPixels = 0, uncoveredBoundaryPixels = 0;
+  let internalVoidPixels = 0, coveredInternalVoidPixels = 0;
+  let minX = width, minY = height, maxX = -1, maxY = -1;
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    if (alpha[y * width + x] <= threshold) continue;
+    minX = Math.min(minX, x); minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+  }
+  if (maxX < minX || maxY < minY)
+    return { available: true, opaquePixels: 0, alphaCoverage: null,
+      boundaryPixels: 0, boundaryGapRatio: null, internalVoidPixels: 0, internalVoidCoverage: null,
+      ...counts };
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const index = y * width + x, opaque = alpha[index] > threshold;
+    const covered = coverage[index] !== 0;
+    if (opaque) {
+      opaquePixels++;
+      if (covered) coveredOpaquePixels++;
+      const boundary = x === 0 || y === 0 || x === width - 1 || y === height - 1
+        || alpha[index - 1] <= threshold || alpha[index + 1] <= threshold
+        || alpha[index - width] <= threshold || alpha[index + width] <= threshold;
+      if (boundary) {
+        boundaryPixels++;
+        if (!covered) uncoveredBoundaryPixels++;
+      }
+    } else if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
+      internalVoidPixels++;
+      if (covered) coveredInternalVoidPixels++;
+    }
+  }
+  return {
+    available: true, opaquePixels,
+    alphaCoverage: coveredOpaquePixels / opaquePixels,
+    boundaryPixels, boundaryGapRatio: boundaryPixels ? uncoveredBoundaryPixels / boundaryPixels : 0,
+    internalVoidPixels,
+    internalVoidCoverage: internalVoidPixels ? coveredInternalVoidPixels / internalVoidPixels : 0,
+    ...counts,
+  };
+}
+
 /* ---------- synthetic checks ---------- */
 
 if (process.argv.length <= 2) {
@@ -239,17 +320,16 @@ if (process.argv.length <= 2) {
 
   console.log("\nend-to-end: grid vs contour on the same weight/motion");
   {
-    // Same part box and weight spec, one grid one contour, deformed by the
-    // same pose -- a sanity check that meshQualityReport runs cleanly for
-    // both backends and returns finite numbers for an ordinary turn.
+    // Same rest shape, weight spec, vertex budget, and pose: a minimal A/B
+    // baseline that keeps backend comparisons from hiding density changes.
     const weight = { mode: "constant", value: 1.0 };
-    const gridPart = { xyxy: [0, 0, 100, 100], depth: 0.5, weight, mesh: { kind: "grid", cell: 20 } };
+    const gridPart = { xyxy: [0, 0, 100, 100], depth: 0.5, weight, mesh: { kind: "grid", cell: 100 } };
     const contourPart = {
       xyxy: [0, 0, 100, 100], depth: 0.5, weight,
       mesh: {
         kind: "contour",
-        vertices: [[10, 10], [90, 10], [90, 90], [10, 90], [50, 50]],
-        triangles: [[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]],
+        vertices: [[0, 0], [100, 0], [0, 100], [100, 100]],
+        triangles: [[0, 1, 2], [1, 3, 2]],
       },
     };
     state.manifest = { anchors: {} };
@@ -340,7 +420,18 @@ const parts = manifest.parts.map((spec) => ({
   shell: !state.shells || spec.group === "body" ? null
        : HAIR_SHELL_TAGS.has(spec.tag) ? state.shells.hair : state.shells.head,
 }));
-void decodePNG; // available for a caller that wants to cross-check against real pixels
+for (const part of parts) {
+  if (!part.spec.image) {
+    part.alphaQuality = { available: false, reason: "manifest has no image path" };
+    continue;
+  }
+  try {
+    const image = decodePNG(readFileSync(join(runDir, part.spec.image)));
+    part.alphaQuality = alphaCoverageReport(part.mesh, image, part.spec.xyxy);
+  } catch (error) {
+    part.alphaQuality = { available: false, reason: error.message };
+  }
+}
 
 console.log(`mesh quality  ${manifest.canvas.width}x${manifest.canvas.height}, ${parts.length} parts`);
 console.log(`${"tag".padEnd(20)}${"kind".padEnd(9)}${"tri".padStart(6)}  ` +
@@ -348,7 +439,7 @@ console.log(`${"tag".padEnd(20)}${"kind".padEnd(9)}${"tri".padStart(6)}  ` +
 console.log(" ".repeat(35) + sweep.map(() => "inv  area[min,max]  edge[max]  uv[p95]".padStart(28)).join(""));
 
 for (const part of parts) {
-  const row = [part.spec.tag.padEnd(20), (part.spec.mesh.kind || "grid").padEnd(9),
+  const row = [part.spec.tag.padEnd(20), (part.mesh.kind || "grid").padEnd(9),
               String(part.mesh.index.length / 3).padStart(6)];
   for (const turnX of sweep) {
     const pose = { turnX, turnY: turnX * 0.3, tiltRad: 0, blink: { l: 0, r: 0 }, breath: 0,
@@ -362,4 +453,12 @@ for (const part of parts) {
              `${r.edgeStretch.max.toFixed(2)}  ${uv95}`.padStart(24));
   }
   console.log(row.join(""));
+  const quality = part.alphaQuality;
+  if (quality?.available) {
+    const percent = (value) => value == null ? "n/a" : `${(value * 100).toFixed(1)}%`;
+    console.log(`  rest alpha: coverage ${percent(quality.alphaCoverage)} · `
+      + `boundary gaps ${percent(quality.boundaryGapRatio)} · `
+      + `internal void mesh coverage ${percent(quality.internalVoidCoverage)} · `
+      + `invalid/degenerate triangles ${quality.invalidTriangles}/${quality.degenerateRestTriangles}`);
+  } else console.log(`  rest alpha: unavailable (${quality?.reason || "unknown"})`);
 }

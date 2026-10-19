@@ -177,8 +177,17 @@ def compile_variant_bindings(
         if selections:
             preset["variants"] = selections
         presets[str(preset_id)] = preset
-        if raw.get("metadata"):
-            presets[str(preset_id)]["metadata"] = dict(raw["metadata"])
+        raw_metadata = raw.get("metadata")
+        if raw_metadata is not None and not isinstance(raw_metadata, Mapping):
+            raise ValueError(f"ExpressionPreset {preset_id!r} metadata must be an object")
+        metadata = dict(raw_metadata or {})
+        # Keep labels authored beside the payload usable by older producers;
+        # the preview catalog reads these fields from metadata after compile.
+        for key in ("label", "description", "order"):
+            if key in raw and key not in metadata:
+                metadata[key] = raw[key]
+        if metadata:
+            presets[str(preset_id)]["metadata"] = metadata
     if compiled:
         # An active/default mismatch is an intentional authoring-vs-runtime
         # distinction and only a warning.  Capability degrades only when the

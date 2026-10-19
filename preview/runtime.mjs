@@ -318,6 +318,7 @@ export const state = {
   physicsOutputs: {},
   physicsAccumulator: 0,
   physicsLastNow: null,
+  physicsLastInputs: null,
   bodyMotion: { x: 0, y: 0, prevX: 0, prevY: 0, vx: 0, vy: 0,
                 prevVx: 0, prevVy: 0, ax: 0, ay: 0 },
   bodySwayEnabled: false,
@@ -327,7 +328,8 @@ export const state = {
   idleUiLast: -Infinity,
   overlayVisible: false,
   profiler: { fps: 0, physicsMs: 0, deformMs: 0, stitchMs: 0, uploadMs: 0,
-              activeVertices: 0, totalVertices: 0, backlogDropped: 0, lastAt: -Infinity },
+              activeVertices: 0, totalVertices: 0, backlogDropped: 0,
+              backlogDroppedSeconds: 0, lastAt: -Infinity },
   motionQA: { inertia: true, inertiaOnly: false, asymmetry: 1, inertiaMultiplier: 1,
               settleMultiplier: 1, chestImpulseX: 0, chestImpulseY: 0,
               side: "both", shapeGain: null, poseActive: false, poseQ: 0, poseV: 0,
@@ -458,15 +460,22 @@ export function applyChestAuthoring(manifest, authoring) {
   // weaker fallbacks.  A stale source id must not accidentally apply merely
   // because the target tag still happens to match.
   const target = {
-    source_instance_id: spec.target_instance,
+    source_instance_id: spec.source_instance_id,
     target_instance: spec.target_instance,
     target_part: spec.target_part,
     target_tag: spec.target_tag,
   };
-  let bindingField = null;
-  for (const field of ["source_instance_id", "target_instance", "target_part", "target_tag"])
-    if (override[field]) { bindingField = field; break; }
-  if (bindingField && override[bindingField] !== target[bindingField]) return resolved;
+  const bindingFields = ["source_instance_id", "target_instance", "target_part", "target_tag"];
+  const bindingField = bindingFields.find((field) => typeof override[field] === "string"
+    && override[field].length > 0);
+  if (!bindingField) return resolved;
+  // The first stored selector wins. A stale ID must not fall through to a
+  // semantic alias, and contradictory secondary fields must not be ignored.
+  if (bindingFields.some((field) => typeof override[field] === "string"
+      && override[field].length > 0 && override[field] !== target[field])) return resolved;
+  if (typeof override.target_topology_hash === "string"
+      && override.target_topology_hash
+      && override.target_topology_hash !== spec.target_topology_hash) return resolved;
   const baseRestPoints = cloneJson(spec.cage?.rest_points);
   for (const [sourceKey, targetKey] of [["cage_override", "cage"],
                                          ["keyform_overrides", "keyforms"]]) {
@@ -506,9 +515,8 @@ export function applyChestAuthoring(manifest, authoring) {
   for (const deformer of resolved.deformers || []) {
     if (deformer.kind !== "chest_parametric_deformer") continue;
     const config = deformer.config || {};
-    const sameTarget = (!spec.target_instance || !config.target_instance
-      || spec.target_instance === config.target_instance)
-      && (!spec.target_part || !config.target_part || spec.target_part === config.target_part);
+    const sameTarget = ["target_instance", "target_part", "target_tag"]
+      .every((field) => !spec[field] || config[field] === spec[field]);
     if (sameTarget) deformer.config = cloneJson(spec);
   }
   return resolved;
@@ -533,10 +541,11 @@ function chestAuthoringOverride(manifest, sourceAuthoring) {
   if (!spec) return null;
   const existing = cloneJson(sourceAuthoring?.deformers?.[R2_CHEST_DEFORMER_ID] || {});
   const binding = {
-    source_instance_id: spec.target_instance,
+    source_instance_id: spec.source_instance_id,
     target_instance: spec.target_instance,
     target_part: spec.target_part,
     target_tag: spec.target_tag,
+    target_topology_hash: spec.target_topology_hash,
   };
   for (const key of Object.keys(binding)) if (binding[key] == null) delete binding[key];
   return { ...binding, ...existing };
@@ -738,26 +747,37 @@ export function applyExpressionPreset(presetId, options = {}) {
     && !Array.isArray(preset.variants);
   if (!preset || (!hasParameters && !hasVariants)) throw new Error(`unknown ExpressionPreset: ${presetId}`);
   const parameterEntries = hasParameters ? Object.entries(preset.parameters) : [];
+  const variantEntries = hasVariants ? Object.entries(preset.variants) : [];
+  if (!parameterEntries.length && !variantEntries.length)
+    throw new Error(`ExpressionPreset ${presetId} has no parameters or variants`);
   for (const [id, value] of parameterEntries) {
     const descriptor = (state.manifest.parameters || []).find((item) => item?.id === id);
     const numeric = Number(value);
     if (!descriptor || !Number.isFinite(numeric)
+        || !Number.isFinite(Number(descriptor.min)) || !Number.isFinite(Number(descriptor.max))
         || numeric < Number(descriptor.min) || numeric > Number(descriptor.max)) {
       throw new Error(`ExpressionPreset ${presetId} selects invalid parameter ${id}`);
     }
   }
-  const selections = hasVariants ? Object.entries(preset.variants) : [];
-  for (const [setId, memberId] of selections) {
+  // Validate every visual binding before writing any parameter so a stale or
+  // incomplete donor set cannot leave a half-applied hybrid expression.
+  const partsByName = new Set(state.parts.map((part) => part?.spec?.name));
+  for (const [setId, memberId] of variantEntries) {
     const spec = (state.manifest.variant_sets || {})[setId];
-    if (!spec || !spec.members.includes(memberId)) {
+    if (!spec || !Array.isArray(spec.members) || !spec.members.includes(memberId)) {
       throw new Error(`ExpressionPreset ${presetId} selects invalid member ${setId}/${memberId}`);
+    }
+    for (const member of spec.members) {
+      const partName = spec.member_bindings?.[member]?.part;
+      if (typeof partName !== "string" || !partsByName.has(partName))
+        throw new Error(`ExpressionPreset ${presetId} selects incomplete VariantSet ${setId}`);
     }
   }
   const appliedParameters = {};
   for (const [id, value] of parameterEntries)
     appliedParameters[id] = setParameter(id, value, "expression");
   const result = [];
-  for (const [setId, memberId] of selections) result.push(applyVariantSet(setId, memberId, options));
+  for (const [setId, memberId] of variantEntries) result.push(applyVariantSet(setId, memberId, options));
   // Preserve the historical array return for variant callers while exposing
   // parameter application to the newer host/controller seam.
   Object.defineProperty(result, "parameters", {
@@ -1252,15 +1272,35 @@ function gridVertexList(part) {
  *  deduplicated) rather than grid row/col adjacency, so the debug overlay
  *  shows the real triangulation, diagonals included. */
 function contourVertexList(part) {
+  const vertices = part.mesh?.vertices, triangles = part.mesh?.triangles;
+  if (!Array.isArray(vertices) || vertices.length < 3 || vertices.length > 65536
+      || !Array.isArray(triangles) || !triangles.length) return null;
   const [x1, y1, x2, y2] = part.xyxy;
   const width = x2 - x1, height = y2 - y1;
-  const pts = part.mesh.vertices.map(([x, y]) => ({
-    x, y,
-    u: width === 0 ? 0 : (x - x1) / width,
-    v: height === 0 ? 0 : (y - y1) / height,
-  }));
+  if (!(width > 0 && height > 0)) return null;
+  const pts = [];
+  for (const vertex of vertices) {
+    if (!Array.isArray(vertex) || vertex.length < 2) return null;
+    const x = Number(vertex[0]), y = Number(vertex[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)
+        || x < x1 - 1e-3 || x > x2 + 1e-3 || y < y1 - 1e-3 || y > y2 + 1e-3)
+      return null;
+    pts.push({ x, y, u: (x - x1) / width, v: (y - y1) / height });
+  }
   const idx = [];
-  for (const [a, b, c] of part.mesh.triangles) idx.push(a, b, c);
+  const trianglesKept = [];
+  for (const triangle of triangles) {
+    if (!Array.isArray(triangle) || triangle.length !== 3
+        || triangle.some((index) => !Number.isInteger(index) || index < 0 || index >= pts.length))
+      return null;
+    const [a, b, c] = triangle;
+    const area2 = (pts[b].x - pts[a].x) * (pts[c].y - pts[a].y)
+      - (pts[c].x - pts[a].x) * (pts[b].y - pts[a].y);
+    if (Math.abs(area2) < 1e-6) continue;
+    trianglesKept.push([a, b, c]);
+    idx.push(a, b, c);
+  }
+  if (!idx.length) return null;
   const seen = new Set();
   const wire = [];
   const addEdge = (a, b) => {
@@ -1269,14 +1309,16 @@ function contourVertexList(part) {
     seen.add(key);
     wire.push(a, b);
   };
-  for (const [a, b, c] of part.mesh.triangles) { addEdge(a, b); addEdge(b, c); addEdge(c, a); }
+  for (const [a, b, c] of trianglesKept) { addEdge(a, b); addEdge(b, c); addEdge(c, a); }
   return { pts, idx, wire };
 }
 
 export function buildMesh(part) {
-  const isContour = part.mesh && part.mesh.kind === "contour"
-    && part.mesh.vertices && part.mesh.triangles;
-  const { pts, idx, wire } = isContour ? contourVertexList(part) : gridVertexList(part);
+  const contour = part.mesh?.kind === "contour" ? contourVertexList(part) : null;
+  const { pts, idx, wire } = contour || gridVertexList(part);
+  if (pts.length > 65536 || idx.some((index) => !Number.isInteger(index)
+      || index < 0 || index >= pts.length || index > 65535))
+    throw new RangeError(`mesh index exceeds the WebGL unsigned-short limit for ${part.tag || "part"}`);
 
   const rest = [], uv = [], weight = [], ramp = [];
   const spec = part.weight;
@@ -1291,6 +1333,7 @@ export function buildMesh(part) {
     ramp.push(span === 0 ? 0 : (w - spec.bottom) / span);
   }
   return {
+    kind: contour ? "contour" : "grid",
     rest: new Float32Array(rest), uv: new Float32Array(uv),
     weight: new Float32Array(weight), ramp: new Float32Array(ramp),
     live: new Float32Array(rest),
@@ -1757,6 +1800,7 @@ export function build(manifest, images, options = {}) {
   state.physicsOutputs = {};
   state.physicsAccumulator = 0;
   state.physicsLastNow = null;
+  state.physicsLastInputs = null;
   state.bodySwayEnabled = false;
   state.p3SeparateBreath = false;
   state.physicsSimTime = 0;
@@ -2047,6 +2091,7 @@ export function build(manifest, images, options = {}) {
 export function resetPhysics() {
   state.physicsAccumulator = 0;
   state.physicsLastNow = null;
+  state.physicsLastInputs = null;
   state.physicsSimTime = 0;
   state.bodyMotion = { x: 0, y: 0, prevX: 0, prevY: 0, vx: 0, vy: 0,
     prevVx: 0, prevVy: 0, ax: 0, ay: 0 };
@@ -2063,6 +2108,7 @@ export function resetPhysics() {
 
 export function warmupPhysics(seconds, inputs = {}) {
   state.physicsLastNow = null;
+  state.physicsLastInputs = null;
   state.physicsAccumulator = 0;
   state.physicsSimTime = 0;
   state.bodyMotion = { x: 0, y: 0, prevX: 0, prevY: 0, vx: 0, vy: 0,
@@ -2098,6 +2144,16 @@ export function stepPhysicsFixed(count = 1, inputs = {}) {
   return state.physicsOutputs;
 }
 
+function interpolatePhysicsInputs(previous, current, alpha) {
+  const result = { ...current };
+  if (!previous) return result;
+  for (const key of Object.keys(current || {})) {
+    const a = previous[key], b = current[key];
+    if (Number.isFinite(a) && Number.isFinite(b)) result[key] = a + (b - a) * alpha;
+  }
+  return result;
+}
+
 export function advancePhysics(now, inputs) {
   if (!state.physicsDrivers) return {};
   // Reduced Motion is an explicit Rig Studio preference, not just a CSS
@@ -2106,6 +2162,7 @@ export function advancePhysics(now, inputs) {
   if (state.reducedMotion) {
     state.physicsAccumulator = 0;
     state.physicsLastNow = now;
+    state.physicsLastInputs = { ...inputs };
     return state.physicsOutputs;
   }
   // P3 stable Edit Pose: physics drivers remain instantiated so the resolved
@@ -2114,11 +2171,15 @@ export function advancePhysics(now, inputs) {
   if (state.editSession?.active) {
     state.physicsAccumulator = 0;
     state.physicsLastNow = now;
+    state.physicsLastInputs = { ...inputs };
     return state.physicsOutputs;
   }
   const previousNow = state.physicsLastNow;
-  const elapsed = previousNow == null ? 0 : Math.max(0, (now - previousNow) / 1000);
-  state.physicsAccumulator += Math.max(0, Math.min(0.1, elapsed));
+  const previousInputs = state.physicsLastInputs;
+  const rawElapsed = previousNow == null ? 0 : Math.max(0, (now - previousNow) / 1000);
+  const elapsed = Math.min(0.1, rawElapsed);
+  let droppedSeconds = Math.max(0, rawElapsed - elapsed);
+  state.physicsAccumulator += elapsed;
   state.physicsLastNow = now;
   const hz = Number((state.manifest.physics?.config || {}).update_hz || 60);
   const tick = 1 / Math.max(1, hz);
@@ -2126,15 +2187,26 @@ export function advancePhysics(now, inputs) {
   // physics spiral. At 60Hz this still permits roughly 66ms of catch-up.
   const maxBacklog = tick * PHYSICS_MAX_CATCHUP_STEPS;
   if (state.physicsAccumulator > maxBacklog) {
-    state.profiler.backlogDropped += 1;
+    droppedSeconds += state.physicsAccumulator - maxBacklog;
     state.physicsAccumulator = maxBacklog;
   }
-  let count = 0;
-  while (state.physicsAccumulator + 1e-12 >= tick && count < PHYSICS_MAX_CATCHUP_STEPS) {
-    state.physicsAccumulator = Math.max(0, state.physicsAccumulator - tick); count++;
+  if (droppedSeconds > 0) {
+    state.profiler.backlogDropped += 1;
+    state.profiler.backlogDroppedSeconds += droppedSeconds;
   }
   const swaySpec = state.bodySwayEnabled ? (state.manifest.motion?.body_sway || {}) : { enabled: false };
-  for (let i = 0; i < count; i++) {
+  let count = 0;
+  while (state.physicsAccumulator + 1e-12 >= tick && count < PHYSICS_MAX_CATCHUP_STEPS) {
+    state.physicsAccumulator = Math.max(0, state.physicsAccumulator - tick);
+    count++;
+    // Inputs are sampled at the fixed tick's wall-time position. At 30 FPS a
+    // two-tick catch-up interpolates two samples; at 60/120 FPS the same
+    // time-based trajectory reaches the same fixed-tick values. When backlog
+    // is dropped, only the newest retained tick window is simulated.
+    const tickTime = now - state.physicsAccumulator * 1000;
+    const alpha = previousNow == null || rawElapsed <= 0 ? 1
+      : Math.max(0, Math.min(1, (tickTime - previousNow) / (rawElapsed * 1000)));
+    const tickInputs = interpolatePhysicsInputs(previousInputs, inputs, alpha);
     const body = state.bodyMotion;
     const pulse = state.bodyPulse;
     // QA body kicks are root motion pulses. The pulse is integrated here,
@@ -2155,14 +2227,15 @@ export function advancePhysics(now, inputs) {
     state.physicsSimTime += tick;
     const qa = state.motionQA;
     const inertia = qa.inertia ? qa.inertiaMultiplier : 0;
-    stepPhysicsFixed(1, { ...inputs,
-      breath: inputs.breath * (qa.inertiaOnly ? 0 : 1),
+    stepPhysicsFixed(1, { ...tickInputs,
+      breath: tickInputs.breath * (qa.inertiaOnly ? 0 : 1),
       bodyVelocityX: body.vx * inertia, bodyVelocityY: body.vy * inertia,
       bodyAccelerationX: body.ax * inertia, bodyAccelerationY: body.ay * inertia,
       impulseX: qa.chestImpulseX * inertia, impulseY: qa.chestImpulseY * inertia,
     });
     qa.chestImpulseX *= 0.82; qa.chestImpulseY *= 0.82;
   }
+  state.physicsLastInputs = { ...inputs };
   return state.physicsOutputs;
 }
 
@@ -2332,7 +2405,7 @@ function updateProfiler(now, frameMs, activeVertices, totalVertices) {
   el.textContent = `FPS ${p.fps.toFixed(0)} · physics ${p.physicsMs.toFixed(2)}ms · `
     + `deform ${p.deformMs.toFixed(2)}ms · stitch ${p.stitchMs.toFixed(2)}ms · `
     + `upload ${p.uploadMs.toFixed(2)}ms · vertices ${p.activeVertices}/${p.totalVertices}`
-    + ` · backlog drops ${p.backlogDropped}`;
+    + ` · backlog drops ${p.backlogDropped} (${p.backlogDroppedSeconds.toFixed(2)}s)`;
 }
 
 function drawMotionGraph() {
@@ -3443,7 +3516,37 @@ function updateR3Controls() {
     if (output) output.textContent = Number(value).toFixed(id === "r3Damping" ? 2 : 2);
   }
   const meta = document.getElementById("r3Meta");
-  if (meta) meta.textContent = state.r3?.dirty ? "R3 calibration: unsaved" : "R3 calibration: Auto";
+  if (meta) {
+    const autoDriver = state.autoManifest?.physics?.upper_torso_driver || {};
+    const autoProfile = autoDriver.profile || "soft";
+    const autoPreset = R3_CHEST_PRESETS[autoProfile === "firm_bounce" ? "firm"
+      : autoProfile === "springy" ? "springy" : "soft"];
+    const autoP3 = p3SpecFromManifest(state.autoManifest);
+    const autoRanges = autoP3?.ranges_px || {};
+    const currentRanges = state.manifest.motion?.upper_torso_parametric_deformer?.ranges_px || {};
+    const comparisons = [
+      ["f", Number(driver.natural_frequency_hz ?? autoPreset.natural_frequency_hz),
+        Number(autoDriver.natural_frequency_hz ?? autoPreset.natural_frequency_hz), "Hz"],
+      ["ζ", Number(driver.damping_ratio ?? autoPreset.damping_ratio),
+        Number(autoDriver.damping_ratio ?? autoPreset.damping_ratio), ""],
+      ["lagX", Number(driver.lag_seconds_x ?? 0), Number(autoDriver.lag_seconds_x ?? 0), "s"],
+      ["lagY", Number(driver.lag_seconds_y ?? 1.4), Number(autoDriver.lag_seconds_y ?? 1.4), "s"],
+      ["rangeX", Number(currentRanges.x ?? 1), Number(autoRanges.x ?? 1), "px"],
+      ["rangeY", Number(currentRanges.y ?? 1), Number(autoRanges.y ?? 1), "px"],
+      ["max", Number(driver.max_displacement_px ?? 16),
+        Number(autoDriver.max_displacement_px ?? 16), "px"],
+    ];
+    const differences = comparisons.filter(([, current, automatic]) =>
+      Number.isFinite(current) && Number.isFinite(automatic) && Math.abs(current - automatic) > 1e-6)
+      .map(([label, current, automatic, unit]) =>
+        `${label} ${(current - automatic >= 0 ? "+" : "")}${(current - automatic).toFixed(2)}${unit}`);
+    const preset = Object.entries(R3_CHEST_PRESETS).find(([, value]) =>
+      driver.profile === value.profile
+      && Math.abs(Number(driver.natural_frequency_hz) - value.natural_frequency_hz) < 1e-6
+      && Math.abs(Number(driver.damping_ratio) - value.damping_ratio) < 1e-6)?.[0];
+    const label = differences.length ? `${preset || "Custom"} · Δ Auto ${differences.join(", ")}` : "Auto";
+    meta.textContent = `R3 calibration: ${label}${state.r3?.dirty ? " · unsaved" : ""}`;
+  }
 }
 
 function refreshR3Runtime() {
@@ -3460,13 +3563,26 @@ function refreshR3Runtime() {
 
 function setR3PhysicsField(field, value) {
   const driver = r3Driver();
-  if (!driver || !Number.isFinite(Number(value))) return;
-  const numeric = Number(value);
-  driver[field] = numeric;
+  if (!driver) return;
+  let normalized;
+  if (field === "profile") {
+    if (!["soft", "firm_bounce", "springy"].includes(value)) return;
+    normalized = value;
+  } else {
+    const ranges = {
+      natural_frequency_hz: [0.5, 4], damping_ratio: [0, 2],
+      lag_seconds_x: [0, 5], lag_seconds_y: [0, 5],
+      max_displacement_px: [0.1, 64],
+    };
+    const range = ranges[field], numeric = Number(value);
+    if (!range || !Number.isFinite(numeric) || numeric < range[0] || numeric > range[1]) return;
+    normalized = numeric;
+  }
+  driver[field] = normalized;
   state.qa ||= createQaState();
   state.qa.r3 ||= { physics: {}, ranges: {} };
   state.qa.r3.physics ||= {};
-  state.qa.r3.physics[field] = numeric;
+  state.qa.r3.physics[field] = normalized;
   state.r3.dirty = true;
   refreshR3Runtime();
   updateQaActiveBadge();
@@ -3475,7 +3591,7 @@ function setR3PhysicsField(field, value) {
 
 function setR3Range(axis, value) {
   const numeric = Number(value);
-  if (!(numeric > 0) || !Number.isFinite(numeric)) return;
+  if (!(Number.isFinite(numeric) && numeric >= 0.1 && numeric <= 64)) return;
   const spec = state.manifest.motion?.upper_torso_parametric_deformer;
   if (!spec) return;
   spec.ranges_px ||= {};
@@ -3494,8 +3610,7 @@ function applyR3Preset(name) {
   const preset = R3_CHEST_PRESETS[name];
   if (!preset || !r3Driver()) return;
   for (const [field, value] of Object.entries(preset)) setR3PhysicsField(field, value);
-  const meta = document.getElementById("r3Meta");
-  if (meta) meta.textContent = `R3 calibration: ${name} preset (unsaved)`;
+  updateR3Controls();
 }
 
 async function resetR3ToAuto() {
