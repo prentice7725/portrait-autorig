@@ -16,6 +16,7 @@ export const EXPRESSION_LIFECYCLE_VERSION = "P6.2";
 export const LIPSYNC_VERSION = "P6.3";
 export const MANUAL_RELEASE_GRACE_MS = 350;
 export const EXPRESSION_OWNERSHIP_VERSION = "R6-C.1";
+export const REDUCED_MOTION_VERSION = "A11Y-1.1";
 
 const PARAMETER_SOURCE_PRIORITY = Object.freeze({
   base: 0,
@@ -217,6 +218,18 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
     return lipSyncRms;
   }
 
+  function setReducedMotion(enabled) {
+    runtimeState.reducedMotion = !!enabled;
+    if (runtimeState.reducedMotion) {
+      // A preference change must stop an in-flight animation as well as
+      // preventing the next one from being scheduled.
+      runtimeState.blinkPhase = null;
+      runtimeState.blinkTimer = 0;
+      runtimeState.bodySwayEnabled = false;
+    }
+    return runtimeState.reducedMotion;
+  }
+
   function currentManifest() {
     return manifest || runtimeState.manifest || null;
   }
@@ -259,6 +272,7 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
     manualGraceUntil.clear();
     expressionParameterClaims.clear();
     runtimeState.parameterOwners = {};
+    if (runtimeState.reducedMotion) setReducedMotion(true);
   }
 
   function reset() {
@@ -278,6 +292,7 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
     expressionParameterClaims.clear();
     runtimeState.parameterOwners = {};
     controls.clear();
+    if (runtimeState.reducedMotion) setReducedMotion(true);
   }
 
   function writeParameterValue(id, numeric) {
@@ -399,7 +414,8 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
   function tick(now, { t = 0, dt = 0, mouthAvailable = false, mouthVariant = false } = {}) {
     lastNow = numberOr(now, lastNow);
     const editActive = !!runtimeState.editSession?.active;
-    const autoIdle = !editActive && isChecked("autoIdle");
+    const reducedMotion = !!runtimeState.reducedMotion;
+    const autoIdle = !editActive && !reducedMotion && isChecked("autoIdle");
     const motion = currentManifest()?.motion || {};
     const manualHead = isManual("head", now);
     if (autoIdle && !manualHead) {
@@ -414,9 +430,9 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
       runtimeState.turnX = readValue("turnX", runtimeState.turnX);
       runtimeState.turnY = readValue("turnY", runtimeState.turnY);
     }
-    runtimeState.bodySwayEnabled = !editActive && isChecked("bodySway") && autoIdle;
+    runtimeState.bodySwayEnabled = !editActive && !reducedMotion && isChecked("bodySway") && autoIdle;
 
-    if (!editActive && isChecked("doBlink")) {
+    if (!editActive && !reducedMotion && isChecked("doBlink")) {
       if (!runtimeState.blinkTimer) scheduleBlink(now);
       if (!runtimeState.blinkPhase && now >= runtimeState.blinkTimer) {
         startBlink(now, ["l", "r"]);
@@ -426,8 +442,8 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
     }
 
     const hasMouth = mouthAvailable || mouthVariant;
-    const lipSyncActive = !editActive && lipSyncEnabled && hasMouth;
-    const talkEnabled = !editActive && !lipSyncActive && hasMouth && isChecked("doTalk");
+    const lipSyncActive = !editActive && !reducedMotion && lipSyncEnabled && hasMouth;
+    const talkEnabled = !editActive && !reducedMotion && !lipSyncActive && hasMouth && isChecked("doTalk");
     if (lipSyncActive) {
       runtimeState.mouthOpen = lipSyncRms;
       writeControl("mouthOpen", lipSyncRms);
@@ -443,7 +459,7 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
       runtimeState.mouthOpen = readValue("mouthOpen", runtimeState.mouthOpen);
     }
 
-    const cursorActive = !editActive && cursorFollowEnabled && cursorPosition.inside;
+    const cursorActive = !editActive && !reducedMotion && cursorFollowEnabled && cursorPosition.inside;
     const cursorOwnsGaze = cursorActive && !isManual("gaze", now);
     let outputTurnX = runtimeState.turnX;
     let outputTurnY = runtimeState.turnY;
@@ -457,11 +473,12 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
       l: overrides.ParamEyeLOpen != null ? 1 - numberOr(overrides.ParamEyeLOpen) : animatedBlink.l,
       r: overrides.ParamEyeROpen != null ? 1 - numberOr(overrides.ParamEyeROpen) : animatedBlink.r,
     };
-    const automaticBreath = !editActive && isChecked("doBreathe")
+    const automaticBreath = !editActive && !reducedMotion && isChecked("doBreathe")
       ? Math.sin(t * 2 * Math.PI / numberOr(motion.breathing?.period_s, 4.8)) : 0;
     const breath = overrides.ParamBreath != null ? numberOr(overrides.ParamBreath) : automaticBreath;
     return {
       editActive,
+      reducedMotion,
       autoIdle,
       bodySwayEnabled: runtimeState.bodySwayEnabled,
       turnX: outputTurnX,
@@ -685,7 +702,7 @@ export function createRigController({ runtimeState = {}, random = () => Math.ran
     beginManual, endManual, noteManualActivity, setCursorGazeEnabled, lookAt, releaseCursor,
     normalizePointer,
     expressionCatalog, setExpression, releaseExpression,
-    setLipSyncEnabled, setLipSyncRms,
+    setLipSyncEnabled, setLipSyncRms, setReducedMotion,
     get lipSyncEnabled() { return lipSyncEnabled; },
     get lipSyncRms() { return lipSyncRms; },
     get activeExpression() { return activeExpression; },

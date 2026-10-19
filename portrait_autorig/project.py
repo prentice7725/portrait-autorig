@@ -13,10 +13,14 @@ schema.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
+import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any, Mapping
 
 import numpy as np
@@ -41,6 +45,9 @@ _AUTHORING_FILES = (
     "constraints.json",
 )
 _AUTHORING_META_FILE = "meta.json"
+_GENERATION_FORMAT = "portrait-rig-project-generation"
+_GENERATION_VERSION = 1
+_GENERATION_POINTER = "project-generation.json"
 
 
 def _json_copy(value: Any) -> Any:
@@ -57,10 +64,48 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _write_json(path: Path, value: Mapping[str, Any]) -> None:
+    data = (json.dumps(value, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    _write_bytes_atomic(path, data)
+
+
+def _fsync_directory(path: Path) -> None:
+    """Best-effort directory flush; Windows does not expose this uniformly."""
+    if os.name == "nt":
+        return
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        pass
+
+
+def _write_bytes_atomic(path: Path, data: bytes) -> None:
+    """Replace one file atomically on the same filesystem and flush its data."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(value, handle, indent=2, ensure_ascii=False)
-        handle.write("\n")
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _deep_merge(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
@@ -709,61 +754,212 @@ def create_rig_project(output_dir: str | os.PathLike[str],
     return project
 
 
-def save_rig_project(project: RigProject) -> Path:
-    """Persist a project and its resolved runtime-compatible manifest."""
-    root = Path(project.root).expanduser().resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    project.root = root
-    source_revision_value = str(project.source.get("source_revision", ""))
-    project.authoring = _normalise_authoring(project.authoring, source_revision_value)
-    project.resolve()
+def _generation_payloads(project: RigProject) -> dict[str, bytes]:
+    """Build a complete immutable generation, including its runtime export."""
+    payloads: dict[str, bytes] = {}
 
-    _write_json(root / "project.json", project.project)
-    _write_json(root / "source" / "assembly_reference.json", project.source)
-    _write_json(root / "generated" / "portrait_rig_manifest.json", project.generated_manifest)
-    _write_json(root / "qa" / "status.json", {
+    def add_json(relative: str, value: Mapping[str, Any]) -> None:
+        payloads[relative] = (json.dumps(value, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+    add_json("project.json", project.project)
+    add_json("source/assembly_reference.json", project.source)
+    add_json("generated/portrait_rig_manifest.json", project.generated_manifest)
+    add_json("qa/status.json", {
         "status": project.project.get("qa", {}).get("status", "UNREVIEWED"),
         "source_revision": project.revision_report,
     })
     for filename in _AUTHORING_FILES:
         key = filename[:-5]
-        _write_json(root / "authoring" / filename, project.authoring.get(key) or {})
-    _write_json(root / "authoring" / _AUTHORING_META_FILE, {
+        add_json(f"authoring/{filename}", project.authoring.get(key) or {})
+    add_json(f"authoring/{_AUTHORING_META_FILE}", {
         "version": AUTHORING_VERSION,
         "source_revision": project.authoring.get("source_revision", ""),
     })
+    add_json("portrait_rig_manifest.json", project.resolved_manifest)
 
-    generated_image_root = root / "generated" / "rig" / "images"
-    runtime_image_root = root / "rig" / "images"
-    generated_image_root.mkdir(parents=True, exist_ok=True)
-    runtime_image_root.mkdir(parents=True, exist_ok=True)
-    # The images are the generated base; authoring corrections currently alter
-    # manifest data only, so both views can share the same immutable pixels.
     for name, image in project.generated_images.items():
-        # Existing generated image files are retained when loading a project.
-        Image.fromarray(image, mode="RGBA").save(generated_image_root / f"{name}.png")
-        Image.fromarray(image, mode="RGBA").save(runtime_image_root / f"{name}.png")
+        if not name or Path(name).name != name or name in {".", ".."}:
+            raise ValueError(f"unsafe generated image name: {name!r}")
+        buffer = io.BytesIO()
+        Image.fromarray(np.asarray(image, dtype=np.uint8), mode="RGBA").save(buffer, format="PNG")
+        encoded = buffer.getvalue()
+        payloads[f"generated/rig/images/{name}.png"] = encoded
+        payloads[f"rig/images/{name}.png"] = encoded
+    return payloads
 
-    manifest_path = root / "portrait_rig_manifest.json"
-    _write_json(manifest_path, project.resolved_manifest)
-    # Keep legacy/custom base names usable when a caller opens a project whose
-    # original manifest was not portrait_rig_manifest.json.
-    return manifest_path
+
+def _write_generation(root: Path, generation_id: str,
+                      payloads: Mapping[str, bytes]) -> tuple[Path, dict[str, Any]]:
+    generations_root = root / "project_generations"
+    generations_root.mkdir(parents=True, exist_ok=True)
+    staging = generations_root / f".staging-{generation_id}"
+    final = generations_root / generation_id
+    if final.exists():
+        raise FileExistsError(f"project generation already exists: {generation_id}")
+    staging.mkdir()
+    try:
+        files: dict[str, str] = {}
+        for relative, data in payloads.items():
+            relative_value = str(relative).replace("\\", "/")
+            relative_path = PurePosixPath(relative_value)
+            if (relative_path.is_absolute()
+                    or any(part in {"", ".", ".."} for part in relative_value.split("/"))
+                    or (len(relative_value) > 1 and relative_value[1] == ":")):
+                raise ValueError(f"unsafe generation path: {relative!r}")
+            path = staging.joinpath(*relative_path.parts)
+            _write_bytes_atomic(path, data)
+            expected_digest = hashlib.sha256(data).hexdigest()
+            if _sha256_file(path) != expected_digest:
+                raise OSError(f"project generation write verification failed: {relative}")
+            files[relative_path.as_posix()] = expected_digest
+        record = {
+            "format": _GENERATION_FORMAT,
+            "version": _GENERATION_VERSION,
+            "generation": generation_id,
+            "created_at_ns": str(time.time_ns()),
+            "files": files,
+        }
+        _write_json(staging / "complete.json", record)
+        if _read_json(staging / "complete.json") != record:
+            raise OSError("project generation completion marker verification failed")
+        os.replace(staging, final)
+        _fsync_directory(generations_root)
+        return final, record
+    except Exception:
+        import shutil
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def _validated_generation(root: Path, generation_id: Any,
+                          expected: Mapping[str, Any] | None = None) -> tuple[Path, dict[str, Any]]:
+    if (not isinstance(generation_id, str) or not generation_id
+            or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+                   for character in generation_id)):
+        raise ValueError("invalid project generation identifier")
+    generation_root = root / "project_generations" / generation_id
+    complete_path = generation_root / "complete.json"
+    if not complete_path.is_file():
+        raise ValueError(f"project generation is incomplete: {generation_id}")
+    complete = _read_json(complete_path)
+    if (complete.get("format") != _GENERATION_FORMAT
+            or int(complete.get("version", 0)) != _GENERATION_VERSION
+            or complete.get("generation") != generation_id
+            or not isinstance(complete.get("files"), dict)):
+        raise ValueError(f"invalid project generation record: {generation_id}")
+    required_files = {
+        "project.json", "source/assembly_reference.json",
+        "generated/portrait_rig_manifest.json", "authoring/meta.json",
+        "portrait_rig_manifest.json",
+    }
+    if not required_files.issubset(complete["files"]):
+        raise ValueError(f"project generation is missing required files: {generation_id}")
+    if expected is not None:
+        for key in ("format", "version", "generation", "created_at_ns", "files"):
+            if expected.get(key) != complete.get(key):
+                raise ValueError(f"project generation pointer does not match complete record: {key}")
+    for relative, expected_digest in complete["files"].items():
+        relative_value = str(relative).replace("\\", "/")
+        relative_path = PurePosixPath(relative_value)
+        if (relative_path.is_absolute() or any(part in {"", ".", ".."} for part in relative_value.split("/"))
+                or (len(relative_value) > 1 and relative_value[1] == ":")):
+            raise ValueError(f"unsafe path in project generation: {relative!r}")
+        path = generation_root.joinpath(*relative_path.parts)
+        try:
+            path.resolve().relative_to(generation_root.resolve())
+        except ValueError as error:
+            raise ValueError(f"project generation path escapes its directory: {relative!r}") from error
+        if not path.is_file() or _sha256_file(path) != expected_digest:
+            raise ValueError(f"project generation checksum mismatch: {relative}")
+    return generation_root, complete
+
+
+def _project_generation(root: Path) -> tuple[Path, dict[str, Any]] | None:
+    pointer_path = root / _GENERATION_POINTER
+    if not pointer_path.is_file():
+        return None
+    pointer = _read_json(pointer_path)
+    if (pointer.get("format") != _GENERATION_FORMAT
+            or int(pointer.get("version", 0)) != _GENERATION_VERSION):
+        raise ValueError(f"unsupported project generation contract: {pointer_path}")
+    return _validated_generation(root, pointer.get("generation"), pointer)
+
+
+def _publish_compatibility_exports(root: Path, generation_root: Path,
+                                   record: Mapping[str, Any]) -> None:
+    """Refresh legacy files individually; the runtime manifest is published last."""
+    relatives = list(record.get("files", {}))
+    relatives.sort(key=lambda name: (name == "portrait_rig_manifest.json", name))
+    for relative in relatives:
+        source = generation_root.joinpath(*PurePosixPath(relative).parts)
+        destination = root.joinpath(*PurePosixPath(relative).parts)
+        expected_digest = record["files"][relative]
+        if destination.is_file() and _sha256_file(destination) == expected_digest:
+            continue
+        _write_bytes_atomic(destination, source.read_bytes())
+
+
+def save_rig_project(project: RigProject) -> Path:
+    """Commit one checksummed generation, then refresh legacy runtime files."""
+    root = Path(project.root).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    project.root = root
+    source_revision_value = str(project.source.get("source_revision", ""))
+    project.project["source"] = {
+        **(project.project.get("source") or {}),
+        "reference": "source/assembly_reference.json",
+        "kind": project.source.get("kind", "rig"),
+        "source_id": project.source.get("source_id", root.name),
+        "source_revision": source_revision_value,
+    }
+    project.project["generated_base"] = {
+        **(project.project.get("generated_base") or {}),
+        "manifest": "generated/portrait_rig_manifest.json",
+        "images": "generated/rig/images",
+    }
+    project.project["authoring"] = {
+        **(project.project.get("authoring") or {}),
+        "root": "authoring", "meta": "authoring/meta.json", "version": AUTHORING_VERSION,
+    }
+    project.authoring = _normalise_authoring(project.authoring, source_revision_value)
+    project.resolve()
+    generation_id = f"g-{time.time_ns()}-{uuid.uuid4().hex}"
+    payloads = _generation_payloads(project)
+    generation_root, record = _write_generation(root, generation_id, payloads)
+    # This small pointer is the commit point. Every referenced file is already
+    # flushed, checksummed, and immutable before it becomes the active save.
+    _write_json(root / _GENERATION_POINTER, record)
+    try:
+        _publish_compatibility_exports(root, generation_root, record)
+    except OSError as error:
+        raise OSError(
+            f"project generation {generation_id} is committed, but its legacy runtime export "
+            f"could not be refreshed; reopening the project will retry recovery: {error}"
+        ) from error
+    return root / "portrait_rig_manifest.json"
 
 
 def load_rig_project(directory: str | os.PathLike[str]) -> RigProject:
     """Load an editable project and report source revision/binding drift."""
     root = Path(directory).expanduser().resolve()
-    project_data = _read_json(root / "project.json")
+    generation = _project_generation(root)
+    data_root = generation[0] if generation else root
+    project_data = _read_json(data_root / "project.json")
     if project_data.get("format") != RIG_PROJECT_FORMAT:
         raise ValueError(f"not a Rig Project: {root}")
     if int(project_data.get("version", 0)) != RIG_PROJECT_VERSION:
         raise ValueError(f"unsupported Rig Project version: {project_data.get('version')!r}")
-    source = _read_json(root / "source" / "assembly_reference.json")
-    generated_path = root / str((project_data.get("generated_base") or {}).get(
+    compatibility_error = None
+    if generation:
+        try:
+            _publish_compatibility_exports(root, generation[0], generation[1])
+        except OSError as error:
+            compatibility_error = str(error)
+    source = _read_json(data_root / "source" / "assembly_reference.json")
+    generated_path = data_root / str((project_data.get("generated_base") or {}).get(
         "manifest", "generated/portrait_rig_manifest.json"))
     generated = _read_json(generated_path)
-    generated_image_root = root / "generated" / "rig" / "images"
+    generated_image_root = data_root / "generated" / "rig" / "images"
     generated_images = {}
     for part in generated.get("parts", []):
         name = part.get("name") if isinstance(part, Mapping) else None
@@ -776,9 +972,9 @@ def load_rig_project(directory: str | os.PathLike[str]) -> RigProject:
     if not generated_images:
         # Projects created by an older writer may not have the generated copy
         # yet.  The legacy runtime location is a safe fallback.
-        generated_images = _load_generated_images(root, generated)
+        generated_images = _load_generated_images(data_root, generated)
     authoring = _default_authoring()
-    authoring_root = root / str((project_data.get("authoring") or {}).get("root", "authoring"))
+    authoring_root = data_root / str((project_data.get("authoring") or {}).get("root", "authoring"))
     meta_path = authoring_root / _AUTHORING_META_FILE
     if meta_path.is_file():
         meta = _read_json(meta_path)
@@ -795,6 +991,12 @@ def load_rig_project(directory: str | os.PathLike[str]) -> RigProject:
     reference_revision = str(source.get("source_revision", ""))
     authoring = _normalise_authoring(authoring, reference_revision)
     revision_report = _make_revision_report(source)
+    if generation:
+        revision_report["generation"] = generation[1].get("generation")
+        revision_report["generation_status"] = "COMMITTED"
+    if compatibility_error:
+        revision_report["compatibility_export"] = "STALE"
+        revision_report["compatibility_error"] = compatibility_error
     project = RigProject(root, project_data, source, generated, generated_images, authoring,
                          editor_state=_empty_editor_state(),
                          revision_report=revision_report)
@@ -812,7 +1014,7 @@ def open_rig(path: str | os.PathLike[str],
     manifest.  Pass ``project_dir`` to choose another editable destination.
     """
     root = Path(path).expanduser().resolve()
-    if (root / "project.json").is_file():
+    if (root / "project.json").is_file() or (root / _GENERATION_POINTER).is_file():
         return load_rig_project(root)
     manifest_path = _find_manifest(root)
     manifest = _read_json(manifest_path)
@@ -846,7 +1048,8 @@ def load_rig_source(path: str | os.PathLike[str]) -> Any:
     inspect private file names to decide what they opened.
     """
     root = Path(path).expanduser().resolve()
-    if (root / "project.json").is_file() or list(root.glob("*_rig_manifest.json")):
+    if ((root / "project.json").is_file() or (root / _GENERATION_POINTER).is_file()
+            or list(root.glob("*_rig_manifest.json"))):
         return open_rig(root)
     manifest = _read_json(root / "manifest.json")
     if manifest.get("format") == "portrait-assembly":

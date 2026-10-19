@@ -1,3 +1,5 @@
+import { isTextEntryTarget } from "./accessibility.mjs";
+
 /*
  * Rig Studio P1 shell.
  *
@@ -62,7 +64,7 @@ const groups = {
   edit: [
     { title: "Hair", label: "헤어", ids: ["r5HairMeta", "showR5HairZones", "showR5HairRoots", "r5HairLayer"] },
     { title: "Chest Physics", label: "가슴 물리", ids: ["r3Meta", "r3Preset", "r3ApplyPreset", "r3Frequency", "r3Damping", "r3RangeX", "r3RangeY", "r3LagX", "r3LagY", "r3MaxDisplacement", "r3Save", "r3Reset"] },
-    { title: "Chest Shape", label: "가슴 형태", ids: ["bustYMinus", "bustNeutral", "bustYPlus", "bustXMinus", "bustXPlus", "showP3Cage", "r2Meta", "r2Pose", "r2EditTarget", "r2EditMode", "r2Save", "r2Reset", "r2Download"] },
+    { title: "Chest Shape", label: "가슴 형태", ids: ["bustYMinus", "bustNeutral", "bustYPlus", "bustXMinus", "bustXPlus", "showP3Cage", "r2Meta", "r2Pose", "r2EditTarget", "r2EditMode", "r2PointInspector", "r2OverlayLegend", "r2Save", "r2Reset", "r2Download"] },
     { title: "Face Mouth", label: "입 형태", ids: ["r6MouthMeta", "r6MouthForm", "r6MouthFrown", "r6MouthNeutral", "r6MouthSmile", "r6MouthKeyform", "r6MouthCorner", "r6MouthCenter", "r6MouthHorizontal", "r6MouthFaceGain", "r6MouthSave", "r6MouthReset"] },
     { title: "Eyes", label: "눈", ids: ["lidLine", "lidThick", "winkL", "winkR", "blinkNow"] },
     { title: "Raw Parts (Advanced)", label: "원본 파츠 (고급)", ids: [] },
@@ -122,6 +124,7 @@ for (const id of ["topRunMeta", "topPhysicsWarning", "topR4DisplayMeta", "topR4D
 function setMode(mode) {
   const next = modePanels[mode] ? mode : "preview";
   const previous = document.body.dataset.mode || "preview";
+  const focusedPanel = document.activeElement?.closest?.(".mode-panel");
   document.body.dataset.mode = next;
   for (const [name, section] of Object.entries(modePanels)) {
     section.classList.toggle("is-active", name === next);
@@ -130,6 +133,8 @@ function setMode(mode) {
     const selected = tab.dataset.mode === next;
     tab.setAttribute("aria-pressed", String(selected));
   }
+  if (focusedPanel && !modePanels[next].contains(document.activeElement))
+    document.querySelector(`[data-mode="${next}"]`)?.focus();
   window.dispatchEvent(new CustomEvent("rigstudio:modechange", {
     detail: { mode: next, previousMode: previous },
   }));
@@ -138,6 +143,15 @@ function setMode(mode) {
 for (const tab of document.querySelectorAll(".mode-tab")) {
   tab.addEventListener("click", () => setMode(tab.dataset.mode));
 }
+
+document.addEventListener("keydown", (event) => {
+  if (event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+  if (isTextEntryTarget(event.target)) return;
+  const mode = { "1": "preview", "2": "edit", "3": "qa" }[event.key];
+  if (!mode) return;
+  event.preventDefault();
+  setMode(mode);
+});
 
 const runmeta = document.getElementById("runmeta");
 const topProject = document.getElementById("topProject");

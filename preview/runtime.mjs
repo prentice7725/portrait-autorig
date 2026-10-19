@@ -26,6 +26,11 @@ import {
   createAuthoringHistory, pushAuthoringHistory,
   undoAuthoringHistory, redoAuthoringHistory,
 } from "./authoring-history.mjs";
+import { keyboardNudge, isTextEntryTarget } from "./accessibility.mjs";
+import {
+  PROJECT_GENERATION_FORMAT, PROJECT_GENERATION_POINTER, PROJECT_GENERATION_VERSION,
+  createProjectGenerationRecord, readProjectGeneration, sha256Hex,
+} from "./project-generation.mjs";
 
 export const PREVIEW_RUNTIME_VERSION = "P7.1";
 
@@ -316,6 +321,8 @@ export const state = {
   bodyMotion: { x: 0, y: 0, prevX: 0, prevY: 0, vx: 0, vy: 0,
                 prevVx: 0, prevVy: 0, ax: 0, ay: 0 },
   bodySwayEnabled: false,
+  reducedMotion: false,
+  motionPreference: "system",
   physicsSimTime: 0,
   idleUiLast: -Infinity,
   overlayVisible: false,
@@ -349,7 +356,10 @@ export const state = {
   displayPreset: "full",
   r5Hair: { layer: "all" },
   r2: { pose: "bust_x_neg", editTarget: "keyform", editMode: false,
-         activePoint: null, dragging: false, dirty: false },
+         activePoint: null, selectedPoint: null, selectedTarget: null, selectedRevision: null,
+         keyboardGesture: null, numericGesture: null,
+         staleSelection: false,
+         dragging: false, dirty: false },
   r6Mouth: { keyform: "+1", dirty: false, qaLabel: "neutral" },
   r3: { dirty: false },
   qa: createQaState(),
@@ -972,7 +982,7 @@ document.addEventListener("drop", async (e) => {
  *  expression pack's, which live in their own block so a run without one loads
  *  exactly as it did before. */
 export function allParts(manifest) {
-  const out = manifest.parts.map((p) => [p.name, p]);
+  const out = (manifest?.parts || []).map((p) => [p.name, p]);
   const pack = (manifest.expressions || {}).parts || {};
   for (const [name, entry] of Object.entries(pack)) out.push([name, entry]);
   return out;
@@ -984,11 +994,31 @@ export function pathOf(file) {
 
 export async function loadFromFiles(files, directoryHandle = null) {
   errEl.textContent = "";
-  const projectFile = files.find((f) => /(^|\/)project\.json$/.test(pathOf(f)));
-  const generatedManifestFile = files.find((f) => /(^|\/)generated\/portrait_rig_manifest\.json$/.test(pathOf(f)));
+  const byPath = new Map(files.map((file) => [pathOf(file), file]));
+  const pointerFile = files.find((file) => new RegExp(`(^|/)${PROJECT_GENERATION_POINTER.replace(/\./g, "\\.")}$`)
+    .test(pathOf(file)));
+  let generation = null;
+  let rootPrefix = "";
+  if (pointerFile) {
+    try {
+      generation = await readProjectGeneration(files.map((file) => ({ path: pathOf(file), value: file })),
+        pathOf(pointerFile));
+      rootPrefix = generation.rootPrefix;
+    } catch (error) {
+      errEl.textContent = `Project generation could not be recovered: ${error.message}`;
+      return;
+    }
+  }
+  const generationPrefix = generation?.generationPrefix || "";
+  const exact = (prefix, relative) => byPath.get(`${prefix}${relative}`) || null;
+  let projectFile = exact(generationPrefix, "project.json")
+    || files.find((file) => /(^|\/)project\.json$/.test(pathOf(file)));
+  let generatedManifestFile = exact(generationPrefix, "generated/portrait_rig_manifest.json")
+    || files.find((file) => /(^|\/)generated\/portrait_rig_manifest\.json$/.test(pathOf(file)));
   const manifestFile = generatedManifestFile
-    || files.find((f) => /(^|\/)portrait_rig_manifest\.json$/.test(pathOf(f)))
-    || files.find((f) => /_rig_manifest\.json$/.test(pathOf(f)));
+    || exact(rootPrefix, "portrait_rig_manifest.json")
+    || files.find((file) => /(^|\/)portrait_rig_manifest\.json$/.test(pathOf(file)))
+    || files.find((file) => /_rig_manifest\.json$/.test(pathOf(file)));
   if (!manifestFile) {
     errEl.textContent = "No *_rig_manifest.json in that folder. Run A-001 with " +
                         "\"Export 2.5D rig manifest\" enabled.";
@@ -996,6 +1026,7 @@ export async function loadFromFiles(files, directoryHandle = null) {
   }
   let manifest;
   let authoring = null;
+  let compatibilityRecoveryNeeded = false;
   try {
     manifest = JSON.parse(await manifestFile.text());
     if (projectFile || generatedManifestFile) {
@@ -1007,12 +1038,14 @@ export async function loadFromFiles(files, directoryHandle = null) {
                                       ["cage_overrides", "cage_overrides.json"],
                                       ["hair_overrides", "hair_overrides.json"],
                                       ["constraints", "constraints.json"]]) {
-        const file = files.find((candidate) => pathOf(candidate).endsWith("/authoring/" + filename)
-          || pathOf(candidate) === "authoring/" + filename);
+        const file = exact(generationPrefix, `authoring/${filename}`)
+          || files.find((candidate) => pathOf(candidate).endsWith("/authoring/" + filename)
+            || pathOf(candidate) === "authoring/" + filename);
         if (file) authoring[key] = JSON.parse(await file.text());
       }
-      const metaFile = files.find((candidate) => pathOf(candidate).endsWith("/authoring/meta.json")
-        || pathOf(candidate) === "authoring/meta.json");
+      const metaFile = exact(generationPrefix, "authoring/meta.json")
+        || files.find((candidate) => pathOf(candidate).endsWith("/authoring/meta.json")
+          || pathOf(candidate) === "authoring/meta.json");
       if (metaFile) Object.assign(authoring, JSON.parse(await metaFile.text()));
     }
   } catch (e) {
@@ -1022,7 +1055,6 @@ export async function loadFromFiles(files, directoryHandle = null) {
   // Match each part's declared image path against the picked files by suffix:
   // the picker roots paths at whatever folder was chosen, which may be the run
   // directory or its parent.
-  const byPath = new Map(files.map((f) => [pathOf(f), f]));
   const find = (rel) => {
     for (const [path, file] of byPath) if (path.endsWith("/" + rel) || path === rel) return file;
     return null;
@@ -1030,7 +1062,7 @@ export async function loadFromFiles(files, directoryHandle = null) {
   const missing = [];
   const images = new Map();
   for (const [name, part] of allParts(manifest)) {
-    const file = find(part.image);
+    const file = exact(generationPrefix, part.image) || exact(rootPrefix, part.image) || find(part.image);
     if (!file) { missing.push(part.image); continue; }
     images.set(name, await createImageBitmap(file));
   }
@@ -1038,9 +1070,26 @@ export async function loadFromFiles(files, directoryHandle = null) {
     errEl.textContent = "Missing part images:\n" + missing.join("\n");
     return;
   }
-  state.projectDirectoryHandle = directoryHandle;
-  state.projectRootPath = projectFile ? pathOf(projectFile).replace(/project\.json$/, "") : "";
+  if (!rootPrefix && projectFile) rootPrefix = pathOf(projectFile).replace(/project\.json$/, "");
+  else if (!rootPrefix && generatedManifestFile)
+    rootPrefix = pathOf(generatedManifestFile).replace(/generated\/portrait_rig_manifest\.json$/, "");
+  let projectHandle = directoryHandle;
+  try { projectHandle = await projectRootHandle(directoryHandle, rootPrefix); }
+  catch (error) {
+    errEl.textContent = `Could not open project folder ${rootPrefix}: ${error.message}`;
+    return;
+  }
+  if (generation && projectHandle) {
+    try { await repairCompatibilityExports(generation, projectHandle); }
+    catch (error) { compatibilityRecoveryNeeded = true; }
+  }
+  state.projectDirectoryHandle = projectHandle;
+  state.projectRootPath = rootPrefix;
   build(manifest, images, { autoManifest: manifest, authoring });
+  if (compatibilityRecoveryNeeded) {
+    state.persistenceDirty = true;
+    updateProjectMeta("호환 manifest 복구가 필요합니다 · 다시 저장하세요");
+  }
   dropEl.classList.add("hidden");
 }
 
@@ -1692,6 +1741,9 @@ export function build(manifest, images, options = {}) {
   state.persistenceDirty = false;
   const canvas = document.getElementById("gl");
   const overlayCanvas = document.getElementById("regionOverlay");
+  const motionPreference = document.documentElement?.dataset?.reduceMotion;
+  state.motionPreference = document.documentElement?.dataset?.motionPreference || "system";
+  if (motionPreference != null) state.reducedMotion = motionPreference === "true";
   state.autoManifest = cloneJson(options.autoManifest || manifest);
   state.authoring = cloneJson(options.authoring || null);
   manifest = applyPhysicsAuthoring(
@@ -1717,7 +1769,12 @@ export function build(manifest, images, options = {}) {
   state.p3Parameters = { x: 0, y: 0 };
   state.calibrationRequested = 0;
   state.r2 = { pose: "bust_x_neg", editTarget: "keyform", editMode: false,
-    activePoint: null, dragging: false, dirty: false };
+    activePoint: null, selectedPoint: null, selectedTarget: null, selectedRevision: null,
+    keyboardGesture: null, numericGesture: null,
+    staleSelection: false,
+    dragging: false, dirty: false };
+  overlayCanvas?.classList?.remove?.("r2-editable");
+  updateR2PointInspector();
   state.r6Mouth = { keyform: "+1", dirty: false, qaLabel: "neutral" };
   state.r3 = { dirty: false };
   state.qa = createQaState();
@@ -1735,6 +1792,7 @@ export function build(manifest, images, options = {}) {
     if (descriptor && descriptor.id) state.parameters[descriptor.id] = Number(descriptor.default ?? 0);
   }
   rigController.configure(manifest, { onExpressionChange: applyExpressionSelection });
+  rigController.setReducedMotion(state.reducedMotion);
   state.phaseTrace = [];
   state.canvasW = manifest.canvas.width;
   state.canvasH = manifest.canvas.height;
@@ -2042,6 +2100,14 @@ export function stepPhysicsFixed(count = 1, inputs = {}) {
 
 export function advancePhysics(now, inputs) {
   if (!state.physicsDrivers) return {};
+  // Reduced Motion is an explicit Rig Studio preference, not just a CSS
+  // preference. Keep the driver instantiated for manifest compatibility, but
+  // do not integrate secondary motion while the preference is active.
+  if (state.reducedMotion) {
+    state.physicsAccumulator = 0;
+    state.physicsLastNow = now;
+    return state.physicsOutputs;
+  }
   // P3 stable Edit Pose: physics drivers remain instantiated so the resolved
   // rig contract is unchanged, but their time-evolving output is frozen while
   // an authoring pose is being directly manipulated.
@@ -2548,6 +2614,28 @@ function strandSpringDelta(part, vertexIndex, motion) {
   return delta;
 }
 
+function drawOverlayMarker(ctx, x, y, { shape = "circle", radius = 5, fillStyle, strokeStyle = null } = {}) {
+  if (![x, y].every(Number.isFinite)) return;
+  ctx.save();
+  if (fillStyle) ctx.fillStyle = fillStyle;
+  if (strokeStyle) ctx.strokeStyle = strokeStyle;
+  ctx.beginPath();
+  if (shape === "square") {
+    ctx.rect(x - radius, y - radius, radius * 2, radius * 2);
+  } else if (shape === "diamond") {
+    ctx.moveTo(x, y - radius); ctx.lineTo(x + radius, y);
+    ctx.lineTo(x, y + radius); ctx.lineTo(x - radius, y); ctx.closePath();
+  } else if (shape === "triangle") {
+    ctx.moveTo(x, y - radius); ctx.lineTo(x + radius, y + radius);
+    ctx.lineTo(x - radius, y + radius); ctx.closePath();
+  } else {
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+  }
+  ctx.fill();
+  if (strokeStyle) ctx.stroke();
+  ctx.restore();
+}
+
 /** R5 inspection overlay. It is intentionally drawn before the older chest
  * overlays so the latter can share the same canvas without leaving stale
  * lines when the R5 toggle changes. */
@@ -2581,10 +2669,10 @@ export function drawHairZonesOverlay() {
       if (!root || !tip || root.length !== 2 || tip.length !== 2) continue;
       ctx.strokeStyle = "rgba(255,255,255,0.65)"; ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.moveTo(root[0], root[1]); ctx.lineTo(tip[0], tip[1]); ctx.stroke();
-      ctx.fillStyle = "rgba(103,232,166,0.98)";
-      ctx.beginPath(); ctx.arc(root[0], root[1], 5, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = "rgba(255,103,126,0.98)";
-      ctx.beginPath(); ctx.arc(tip[0], tip[1], 5, 0, Math.PI * 2); ctx.fill();
+      drawOverlayMarker(ctx, root[0], root[1], { shape: "triangle", radius: 5,
+        fillStyle: "rgba(103,232,166,0.98)" });
+      drawOverlayMarker(ctx, tip[0], tip[1], { shape: "square", radius: 5,
+        fillStyle: "rgba(255,103,126,0.98)" });
     }
   }
 }
@@ -2627,11 +2715,12 @@ export function enterEdit() {
 export function exitEdit() {
   if (!rigController.editActive) return false;
   resetPhysics();
-  warmupPhysics(0.15, { breath: 0, angleY: 0, strandTarget: 0 });
+  if (!state.reducedMotion) warmupPhysics(0.15, { breath: 0, angleY: 0, strandTarget: 0 });
   const snapshot = rigController.exitEdit() || {};
   setR2EditMode(Boolean(snapshot.r2EditMode));
   emitRestoredParameters(state.parameters);
-  editStatus("Preview resumed · physics warmed up", false);
+  editStatus(state.reducedMotion ? "Preview resumed · motion reduction remains active"
+    : "Preview resumed · physics warmed up", false);
   emitEditState(false, "exit");
   return true;
 }
@@ -2708,21 +2797,34 @@ function drawChestParametricOverlay(part) {
   if (showCage) {
     ctx.strokeStyle = editMode ? "rgba(103, 232, 166, 0.95)" : "rgba(99, 220, 255, 0.9)";
     ctx.lineWidth = editMode ? 2 : 1.5;
+    ctx.setLineDash(editMode ? [7, 4] : []);
     const at = (r, c) => displayPoints[r * cols + c];
     for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
       const p = at(r, c); if (!p) continue;
       if (c + 1 < cols) { const q = at(r, c + 1); ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]); ctx.stroke(); }
       if (r + 1 < rows) { const q = at(r + 1, c); ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]); ctx.stroke(); }
-      ctx.fillStyle = editMode ? "rgba(103, 232, 166, 0.98)" : "rgba(99, 220, 255, 0.95)";
-      ctx.beginPath(); ctx.arc(p[0], p[1], editMode ? 5 : 3, 0, Math.PI * 2); ctx.fill();
+      const selected = editMode
+        && ["cage", "keyform"].includes(state.r2?.selectedTarget)
+        && state.r2.selectedPoint === r * cols + c;
+      drawOverlayMarker(ctx, p[0], p[1], {
+        shape: selected ? "square" : "circle", radius: editMode ? 5 : 3,
+        fillStyle: editMode ? "rgba(103, 232, 166, 0.98)" : "rgba(99, 220, 255, 0.95)",
+        strokeStyle: selected ? "rgba(255,255,255,0.98)" : null,
+      });
     }
+    ctx.setLineDash([]);
     if (editMode && state.r2.editTarget === "cage_bounds" && Array.isArray(cage.bounds)) {
       const [x1, y1, x2, y2] = cage.bounds.map(Number);
       ctx.strokeStyle = "rgba(255, 210, 92, 0.95)"; ctx.lineWidth = 2;
       ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
-      ctx.fillStyle = "rgba(255, 210, 92, 0.98)";
-      for (const [x, y] of [[x1, y1], [x2, y1], [x1, y2], [x2, y2]]) {
-        ctx.fillRect(x - 5, y - 5, 10, 10);
+      for (const [handle, [x, y]] of [[0, [x1, y1]], [1, [x2, y1]], [2, [x1, y2]], [3, [x2, y2]]]) {
+        drawOverlayMarker(ctx, x, y, {
+          shape: state.r2.selectedTarget === "cage_bounds" && state.r2.selectedPoint === handle
+            ? "square" : "diamond", radius: 5,
+          fillStyle: "rgba(255, 210, 92, 0.98)",
+          strokeStyle: state.r2.selectedTarget === "cage_bounds" && state.r2.selectedPoint === handle
+            ? "rgba(255,255,255,0.98)" : null,
+        });
       }
     }
   }
@@ -2746,10 +2848,10 @@ function drawChestParametricOverlay(part) {
   if (showLocks) {
     const locked = spec.binding?.locked_vertices || [];
     const rest = part.mesh.rest;
-    ctx.fillStyle = "rgba(255, 90, 90, 0.95)";
     for (let i = 0; i < rest.length / 2; i++) {
       if (!locked[i]) continue;
-      ctx.beginPath(); ctx.arc(rest[i * 2], rest[i * 2 + 1], 3, 0, Math.PI * 2); ctx.fill();
+      drawOverlayMarker(ctx, rest[i * 2], rest[i * 2 + 1], { shape: "square", radius: 3,
+        fillStyle: "rgba(255, 90, 90, 0.95)" });
     }
     ctx.strokeStyle = "rgba(255, 218, 94, 0.9)"; ctx.lineWidth = 2;
     for (let c = 0; c < cols - 1; c++) {
@@ -2794,6 +2896,19 @@ function r2NearestBoundsHandle(point, bounds) {
   return r2NearestPoint(point, handles);
 }
 
+function r2SelectionRevision(spec, part = r2ChestPart()) {
+  if (!spec || !part) return null;
+  const cage = spec.cage || {};
+  return JSON.stringify([
+    state.projectRootPath || "session", state.authoring?.source_revision || "",
+    state.autoManifest?.source_revision || state.autoManifest?.source?.revision || "",
+    part.spec?.source_instance_id || part.spec?.name || part.name || "part",
+    R2_CHEST_DEFORMER_ID, Number(cage.cols || 0), Number(cage.rows || 0),
+    spec.topology_revision || spec.binding?.topology_revision ||
+      (Array.isArray(cage.rest_points) ? cage.rest_points.length : 0),
+  ]);
+}
+
 function r2MarkDirty() {
   state.r2.dirty = true;
   updateR2Meta();
@@ -2810,15 +2925,8 @@ function currentAuthoringDraft() {
 
 function authoringHistorySnapshot() {
   return { authoring: currentAuthoringDraft(), r2Dirty: Boolean(state.r2?.dirty),
-    r6MouthDirty: Boolean(state.r6Mouth?.dirty) };
-}
-
-function finishAuthoringHistoryGesture() {
-  const before = state.historyGesture;
-  state.historyGesture = null;
-  if (!before || !state.r2?.dirty) return;
-  recordAuthoringHistory(before, authoringHistorySnapshot());
-  updateProjectMeta();
+    r6MouthDirty: Boolean(state.r6Mouth?.dirty),
+    persistenceDirty: Boolean(state.persistenceDirty) };
 }
 
 function recordAuthoringHistory(before, after) {
@@ -2826,9 +2934,9 @@ function recordAuthoringHistory(before, after) {
   return pushAuthoringHistory(state.history, before, after);
 }
 
-function applyAuthoringHistorySnapshot(snapshot) {
+function applyAuthoringHistorySnapshot(snapshot, { markDirty = true } = {}) {
   if (!snapshot) return false;
-  state.persistenceDirty = true;
+  state.persistenceDirty = markDirty ? true : Boolean(snapshot.persistenceDirty);
   state.authoring = cloneJson(snapshot.authoring || snapshot);
   state.qa = createQaState();
   state.r2.dirty = Boolean(snapshot.r2Dirty);
@@ -2840,11 +2948,35 @@ function applyAuthoringHistorySnapshot(snapshot) {
   return true;
 }
 
+function beginAuthoringGesture() {
+  if (!state.historyGesture) state.historyGesture = authoringHistorySnapshot();
+  return state.historyGesture;
+}
+
+function finishAuthoringHistoryGesture() {
+  const before = state.historyGesture;
+  state.historyGesture = null;
+  if (!before) return false;
+  const recorded = recordAuthoringHistory(before, authoringHistorySnapshot());
+  updateProjectMeta();
+  return recorded;
+}
+
+function cancelAuthoringHistoryGesture() {
+  const before = state.historyGesture;
+  state.historyGesture = null;
+  if (!before) return false;
+  applyAuthoringHistorySnapshot(before, { markDirty: false });
+  return true;
+}
+
 function updateProjectMeta(message = null) {
   const dirty = Boolean(state.persistenceDirty || state.r2?.dirty || state.r3?.dirty || state.r6Mouth?.dirty);
   const status = document.getElementById("projectDirty");
   if (status) {
-    status.textContent = message || (dirty ? "저장되지 않음" : "저장됨");
+    const displayMessage = message && !String(message).startsWith("[")
+      ? `[SAVED] ${message}` : message;
+    status.textContent = displayMessage || (dirty ? "[DIRTY] 저장되지 않음" : "[SAVED] 저장됨");
     status.dataset ||= {};
     status.dataset.state = dirty ? "dirty" : "clean";
     status.setAttribute?.("aria-label", dirty ? "저장되지 않은 프로젝트 변경" : "프로젝트 저장됨");
@@ -2856,12 +2988,16 @@ function updateProjectMeta(message = null) {
 }
 
 function undoProject() {
+  if (state.r2?.dragging || state.r2?.keyboardGesture || state.r2?.numericGesture)
+    cancelR2ActiveGesture();
   const current = authoringHistorySnapshot();
   const snapshot = undoAuthoringHistory(state.history, current);
   if (snapshot) applyAuthoringHistorySnapshot(snapshot);
 }
 
 function redoProject() {
+  if (state.r2?.dragging || state.r2?.keyboardGesture || state.r2?.numericGesture)
+    cancelR2ActiveGesture();
   const current = authoringHistorySnapshot();
   const snapshot = redoAuthoringHistory(state.history, current);
   if (snapshot) applyAuthoringHistorySnapshot(snapshot);
@@ -2886,6 +3022,168 @@ function r2ApplyBounds(spec, part, handle, point) {
   rebindR2Cage(spec, part);
 }
 
+function r2SelectedPointCoordinates() {
+  const spec = r2ChestSpec();
+  const target = state.r2?.selectedTarget || state.r2?.editTarget;
+  const index = state.r2?.selectedPoint;
+  if (!spec || index == null) return null;
+  if (state.r2.selectedRevision && state.r2.selectedRevision !== r2SelectionRevision(spec)) {
+    state.r2.selectedPoint = null;
+    state.r2.selectedTarget = null;
+    state.r2.selectedRevision = null;
+    state.r2.staleSelection = true;
+    const meta = document.getElementById("r2PointMeta");
+    if (meta) meta.textContent = "Cage 구조가 변경되었습니다. 포인트를 다시 선택하세요.";
+    return null;
+  }
+  if (target === "cage_bounds") {
+    const bounds = spec.cage?.bounds;
+    const handles = Array.isArray(bounds) && bounds.length === 4
+      ? [[bounds[0], bounds[1]], [bounds[2], bounds[1]], [bounds[0], bounds[3]], [bounds[2], bounds[3]]]
+      : [];
+    const point = handles[index];
+    return point ? { x: Number(point[0]), y: Number(point[1]) } : null;
+  }
+  const rest = spec.cage?.rest_points?.[index];
+  if (!Array.isArray(rest)) return null;
+  if (target === "keyform") {
+    const offset = r2PoseOffsets(spec)[index] || [0, 0];
+    return { x: Number(rest[0]) + Number(offset[0] || 0), y: Number(rest[1]) + Number(offset[1] || 0) };
+  }
+  return { x: Number(rest[0]), y: Number(rest[1]) };
+}
+
+function r2SetSelectedPointCoordinates(x, y) {
+  const spec = r2ChestSpec(), part = r2ChestPart();
+  const target = state.r2?.selectedTarget || state.r2?.editTarget;
+  const index = state.r2?.selectedPoint;
+  if (!spec || !part || index == null || !Number.isFinite(x) || !Number.isFinite(y)) return false;
+  const current = r2SelectedPointCoordinates();
+  if (current && current.x === x && current.y === y) return false;
+  if (target === "cage_bounds") {
+    if (!Array.isArray(spec.cage?.bounds) || index > 3) return false;
+    r2ApplyBounds(spec, part, index, { x, y });
+  } else if (target === "cage") {
+    if (!Array.isArray(spec.cage?.rest_points?.[index])) return false;
+    spec.cage.rest_points[index] = [x, y];
+  } else if (target === "keyform") {
+    const rest = spec.cage?.rest_points?.[index];
+    if (!Array.isArray(rest)) return false;
+    const keyform = spec.keyforms[state.r2.pose] ||
+      (spec.keyforms[state.r2.pose] = spec.cage.rest_points.map(() => [0, 0]));
+    keyform[index] = [x - Number(rest[0]), y - Number(rest[1])];
+  } else return false;
+  r2MarkDirty();
+  updateR2PointInspector();
+  return true;
+}
+
+function updateR2PointInspector() {
+  const inspector = document.getElementById("r2PointInspector");
+  const meta = document.getElementById("r2PointMeta");
+  const xInput = document.getElementById("r2PointX");
+  const yInput = document.getElementById("r2PointY");
+  const point = r2SelectedPointCoordinates();
+  const visible = !!state.r2?.editMode && !!point;
+  if (inspector) inspector.hidden = !visible;
+  if (!point) {
+    if (meta) meta.textContent = state.r2?.staleSelection
+      ? "Cage 구조가 변경되었습니다. 포인트를 다시 선택하세요."
+      : "포인트를 선택하세요.";
+    return;
+  }
+  const target = state.r2.selectedTarget || state.r2.editTarget;
+  const labels = { keyform: "Keyform", cage: "Cage", cage_bounds: "Cage 범위" };
+  if (meta) meta.textContent = `${labels[target] || target} 포인트 ${Number(state.r2.selectedPoint) + 1} 선택됨`;
+  if (xInput && document.activeElement !== xInput) xInput.value = Number(point.x).toFixed(3);
+  if (yInput && document.activeElement !== yInput) yInput.value = Number(point.y).toFixed(3);
+}
+
+function previewR2PointField(axis, value) {
+  if (String(value).trim() === "") return false;
+  const current = r2SelectedPointCoordinates();
+  const numeric = Number(value);
+  if (!current || !Number.isFinite(numeric)) return false;
+  const next = { ...current, [axis]: numeric };
+  if (next.x === current.x && next.y === current.y) return false;
+  beginAuthoringGesture();
+  return r2SetSelectedPointCoordinates(next.x, next.y);
+}
+
+function commitR2NumericGesture() {
+  if (!state.r2?.numericGesture) return false;
+  state.r2.numericGesture = null;
+  return finishAuthoringHistoryGesture();
+}
+
+function cancelR2NumericGesture() {
+  if (!state.r2?.numericGesture) return false;
+  state.r2.numericGesture = null;
+  const cancelled = cancelAuthoringHistoryGesture();
+  updateR2PointInspector();
+  return cancelled;
+}
+
+function finishR2KeyboardGesture(key = null) {
+  const gesture = state.r2?.keyboardGesture;
+  if (!gesture || (key && gesture.key !== key)) return false;
+  state.r2.keyboardGesture = null;
+  return finishAuthoringHistoryGesture();
+}
+
+function cancelR2KeyboardGesture() {
+  if (!state.r2?.keyboardGesture) return false;
+  state.r2.keyboardGesture = null;
+  return cancelAuthoringHistoryGesture();
+}
+
+function releaseR2PointerCapture(target = state.r2?.pointerTarget,
+                                 pointerId = state.r2?.pointerId) {
+  try {
+    if (target?.hasPointerCapture?.(pointerId)) target.releasePointerCapture(pointerId);
+  } catch { /* The browser may already have released a lost pointer capture. */ }
+}
+
+function cancelR2PointerGesture(target = state.r2?.pointerTarget,
+                                pointerId = state.r2?.pointerId) {
+  if (!state.r2?.dragging) return false;
+  releaseR2PointerCapture(target, pointerId);
+  state.r2.dragging = false;
+  state.r2.activePoint = null;
+  state.r2.pointerTarget = null;
+  state.r2.pointerId = null;
+  cancelAuthoringHistoryGesture();
+  updateR2PointInspector();
+  return true;
+}
+
+function cancelR2ActiveGesture() {
+  let cancelled = cancelR2PointerGesture();
+  cancelled = cancelR2KeyboardGesture() || cancelled;
+  cancelled = cancelR2NumericGesture() || cancelled;
+  return cancelled;
+}
+
+function nudgeR2SelectedPoint(event) {
+  if (!state.r2?.editMode || state.r2.selectedPoint == null
+      || isTextEntryTarget(event.target) || event.ctrlKey || event.metaKey
+      || event.isComposing || event.target !== r2Overlay) return false;
+  const step = Number(document.getElementById("r2NudgeStep")?.value || 1);
+  const multiplier = event.shiftKey ? 10 : event.altKey ? 0.1 : 1;
+  const delta = keyboardNudge(event.key, step, multiplier);
+  const current = r2SelectedPointCoordinates();
+  if (!delta || !current) return false;
+  if (state.r2.keyboardGesture && state.r2.keyboardGesture.key !== event.key)
+    finishR2KeyboardGesture();
+  if (!state.r2.keyboardGesture) {
+    state.r2.keyboardGesture = { key: event.key };
+    beginAuthoringGesture();
+  }
+  if (!r2SetSelectedPointCoordinates(current.x + delta[0], current.y + delta[1])) return false;
+  event.preventDefault();
+  return true;
+}
+
 function r2PointerDown(event) {
   if (!state.r2.editMode) return;
   if (state.r2.editTarget === "keyform"
@@ -2900,9 +3198,17 @@ function r2PointerDown(event) {
       point, r2DisplayPoints(spec, state.r2.editTarget === "keyform"));
   }
   if (state.r2.activePoint == null) return;
-  state.historyGesture = authoringHistorySnapshot();
+  state.r2.selectedPoint = state.r2.activePoint;
+  state.r2.selectedTarget = state.r2.editTarget;
+  state.r2.selectedRevision = r2SelectionRevision(spec, part);
+  state.r2.staleSelection = false;
+  beginAuthoringGesture();
   state.r2.dragging = true;
+  state.r2.pointerTarget = event.currentTarget;
+  state.r2.pointerId = event.pointerId;
   event.currentTarget.setPointerCapture?.(event.pointerId);
+  r2Overlay?.focus?.();
+  updateR2PointInspector();
   event.preventDefault();
 }
 
@@ -2910,6 +3216,7 @@ function r2PointerMove(event) {
   if (!state.r2.dragging) return;
   const spec = r2ChestSpec(), part = r2ChestPart();
   if (!spec) return;
+  const beforePoint = r2SelectedPointCoordinates();
   const point = r2CanvasPoint(event);
   if (state.r2.editTarget === "cage_bounds") {
     r2ApplyBounds(spec, part, state.r2.activePoint, point);
@@ -2921,15 +3228,27 @@ function r2PointerMove(event) {
       (spec.keyforms[state.r2.pose] = spec.cage.rest_points.map(() => [0, 0]));
     keyform[state.r2.activePoint] = [point.x - Number(rest[0]), point.y - Number(rest[1])];
   }
-  r2MarkDirty();
+  const afterPoint = r2SelectedPointCoordinates();
+  if (beforePoint && afterPoint && (beforePoint.x !== afterPoint.x || beforePoint.y !== afterPoint.y))
+    r2MarkDirty();
+  updateR2PointInspector();
   event.preventDefault();
 }
 
 function r2PointerUp(event) {
+  if (!state.r2.dragging) return;
   state.r2.dragging = false;
   state.r2.activePoint = null;
-  event.currentTarget.releasePointerCapture?.(event.pointerId);
+  state.r2.pointerTarget = null;
+  state.r2.pointerId = null;
+  releaseR2PointerCapture(event.currentTarget, event.pointerId);
+  updateR2PointInspector();
   finishAuthoringHistoryGesture();
+}
+
+function r2PointerCancel(event) {
+  if (!state.r2.dragging) return;
+  cancelR2PointerGesture(event.currentTarget, event.pointerId);
 }
 
 function updateR2Meta() {
@@ -3061,16 +3380,31 @@ function syncP3DeformerConfig(manifest) {
   return manifest;
 }
 
-async function writeR2File(relativePath, text, handle = state.projectDirectoryHandle) {
+async function readR2File(relativePath, handle = state.projectDirectoryHandle) {
+  if (!handle) return null;
+  const pieces = relativePath.split("/");
+  const filename = pieces.pop();
+  let directory = handle;
+  for (const piece of pieces) directory = await directory.getDirectoryHandle(piece);
+  const file = await directory.getFileHandle(filename);
+  return file.getFile();
+}
+
+async function writeR2File(relativePath, contents, handle = state.projectDirectoryHandle) {
   if (!handle) return false;
   const pieces = relativePath.split("/");
   const filename = pieces.pop();
   let directory = handle;
   for (const piece of pieces) directory = await directory.getDirectoryHandle(piece, { create: true });
   const file = await directory.getFileHandle(filename, { create: true });
-  const writable = await file.createWritable();
-  await writable.write(text);
-  await writable.close();
+  const writable = await file.createWritable({ keepExistingData: false });
+  try {
+    await writable.write(contents);
+    await writable.close();
+  } catch (error) {
+    try { await writable.abort?.(error); } catch { /* Preserve the original write error. */ }
+    throw error;
+  }
   return true;
 }
 
@@ -3214,6 +3548,103 @@ function commitR3QaToAuthoring(baseAuthoring = null) {
   return true;
 }
 
+async function optionalProjectFile(relativePath, handle) {
+  try { return await readR2File(relativePath, handle); }
+  catch (error) {
+    if (error?.name === "NotFoundError") return null;
+    throw error;
+  }
+}
+
+function safeProjectRelativePath(value) {
+  const path = String(value || "").replace(/\\/g, "/");
+  if (!path || path.startsWith("/") || /^[A-Za-z]:/.test(path)
+      || path.split("/").some((piece) => piece === ".." || piece === "." || piece === ""))
+    throw new Error(`Invalid project file path: ${path}`);
+  return path;
+}
+
+async function buildProjectGenerationFiles(authoring, resolved, directory,
+                                           baseManifest, projectRootPath = "") {
+  const files = new Map();
+  const addJson = (path, value) => files.set(path, `${JSON.stringify(value, null, 2)}\n`);
+  let sourceRevision = String(authoring.source_revision || "");
+  const projectFile = await optionalProjectFile("project.json", directory);
+  const sourceFile = await optionalProjectFile("source/assembly_reference.json", directory);
+  const qaFile = await optionalProjectFile("qa/status.json", directory);
+  let projectData = projectFile ? JSON.parse(await projectFile.text()) : {
+    format: "portrait-rig-project", version: 1,
+    id: projectRootPath.split("/").filter(Boolean).at(-1) || "rig-studio-project",
+    source: { reference: "source/assembly_reference.json", kind: "rig", source_id: "",
+      source_revision: sourceRevision },
+    generated_base: { manifest: "generated/portrait_rig_manifest.json", images: "generated/rig/images" },
+    authoring: { root: "authoring", meta: "authoring/meta.json", version: 1 },
+    qa: { status: "UNREVIEWED" },
+  };
+  let sourceData = sourceFile ? JSON.parse(await sourceFile.text()) : {
+    kind: projectData.source?.kind || "rig", path: "", source_id: projectData.source?.source_id || "",
+    source_revision: sourceRevision,
+    binding_priority: ["source_instance_id", "target_instance", "target_part", "target_tag"],
+  };
+  sourceRevision = sourceRevision || String(sourceData.source_revision || projectData.source?.source_revision || "");
+  const qaData = qaFile ? JSON.parse(await qaFile.text()) : {
+    status: projectData.qa?.status || "UNREVIEWED", source_revision: { status: "UNKNOWN" },
+  };
+  projectData = { ...projectData,
+    source: { ...(projectData.source || {}), source_revision: sourceRevision },
+    generated_base: { ...(projectData.generated_base || {}), manifest: "generated/portrait_rig_manifest.json",
+      images: "generated/rig/images" },
+    authoring: { ...(projectData.authoring || {}), root: "authoring", meta: "authoring/meta.json", version: 1 },
+  };
+  sourceData = { ...sourceData, source_revision: sourceRevision || sourceData.source_revision || "" };
+  addJson("project.json", projectData);
+  addJson("source/assembly_reference.json", sourceData);
+  addJson("generated/portrait_rig_manifest.json", baseManifest);
+  addJson("qa/status.json", qaData);
+  for (const [key, filename] of [
+    ["deformers", "deformers.json"], ["physics", "physics.json"],
+    ["parameter_ranges", "parameter_ranges.json"], ["keyform_overrides", "keyform_overrides.json"],
+    ["cage_overrides", "cage_overrides.json"], ["hair_overrides", "hair_overrides.json"],
+    ["constraints", "constraints.json"],
+  ]) addJson(`authoring/${filename}`, authoring[key] || {});
+  addJson("authoring/meta.json", { version: Number(authoring.version || 1), source_revision: sourceRevision });
+  addJson("portrait_rig_manifest.json", resolved);
+
+  const seenImages = new Set();
+  for (const [name, part] of allParts(baseManifest || {})) {
+    const imagePath = safeProjectRelativePath(part.image);
+    if (seenImages.has(imagePath)) continue;
+    seenImages.add(imagePath);
+    const imageFile = await optionalProjectFile(imagePath, directory);
+    if (!imageFile) throw new Error(`Project image is missing: ${imagePath}`);
+    const imageBytes = new Uint8Array(await imageFile.arrayBuffer());
+    files.set(imagePath, imageBytes);
+    if (!name || String(name).includes("/") || String(name).includes("\\"))
+      throw new Error(`Invalid project part name: ${name}`);
+    files.set(`generated/rig/images/${name}.png`, imageBytes);
+    if (imagePath !== `rig/images/${name}.png`) files.set(`rig/images/${name}.png`, imageBytes);
+  }
+  return files;
+}
+
+function projectRootHandle(directory, rootPrefix) {
+  if (!directory || !rootPrefix) return directory;
+  return rootPrefix.split("/").filter(Boolean).reduce((promise, piece) =>
+    promise.then((handle) => handle.getDirectoryHandle(piece)), Promise.resolve(directory));
+}
+
+async function repairCompatibilityExports(generation, directory) {
+  if (!directory) return;
+  const paths = [...generation.files.keys()].sort((a, b) =>
+    (a === "portrait_rig_manifest.json") - (b === "portrait_rig_manifest.json") || a.localeCompare(b));
+  for (const relative of paths) {
+    const committed = generation.files.get(relative);
+    const existing = await optionalProjectFile(relative, directory);
+    if (existing && await sha256Hex(existing) === generation.record.files[relative]) continue;
+    await writeR2File(relative, new Uint8Array(await committed.arrayBuffer()), directory);
+  }
+}
+
 export async function persistR2Authoring(message = "R2 correction saved", options = {}) {
   if (state.saveInProgress) return false;
   state.persistenceDirty = true;
@@ -3225,11 +3656,9 @@ export async function persistR2Authoring(message = "R2 correction saved", option
       ? draftAuthoring
       : buildChestAuthoring(authoredManifest, state.authoring);
   state.authoring = authoring;
-  const resolved = syncP3DeformerConfig(authoredRuntimeManifest(authoring));
-  const deformersText = JSON.stringify(authoring.deformers || {}, null, 2) + "\n";
-  const physicsText = JSON.stringify(authoring.physics || {}, null, 2) + "\n";
-  const rangesText = JSON.stringify(authoring.parameter_ranges || {}, null, 2) + "\n";
-  const meta = { version: Number(authoring.version || 1), source_revision: authoring.source_revision || "" };
+  const savedAuthoring = cloneJson(authoring);
+  const baseManifest = cloneJson(state.autoManifest || state.manifest || {});
+  const resolved = syncP3DeformerConfig(authoredRuntimeManifest(savedAuthoring));
   const revisionOf = () => JSON.stringify({
     authoring: currentAuthoringDraft(), r3Dirty: state.r3.dirty,
     calibration: state.r3.dirty ? state.qa.r3 : null,
@@ -3237,6 +3666,7 @@ export async function persistR2Authoring(message = "R2 correction saved", option
   const revision = revisionOf();
   const directory = state.projectDirectoryHandle;
   const project = state.autoManifest;
+  const projectRoot = state.projectRootPath;
   if (!directory) {
     downloadR2File("authoring.json", authoring);
     updateProjectMeta("다운로드됨 · 프로젝트 폴더에는 저장되지 않음");
@@ -3245,13 +3675,35 @@ export async function persistR2Authoring(message = "R2 correction saved", option
   state.saveInProgress = true;
   updateProjectMeta("저장 중…");
   try {
-    await writeR2File("authoring/deformers.json", deformersText, directory);
-    await writeR2File("authoring/physics.json", physicsText, directory);
-    await writeR2File("authoring/parameter_ranges.json", rangesText, directory);
-    await writeR2File("authoring/meta.json", JSON.stringify(meta, null, 2) + "\n", directory);
-    await writeR2File("portrait_rig_manifest.json", JSON.stringify(resolved, null, 2) + "\n", directory);
+    const files = await buildProjectGenerationFiles(savedAuthoring, resolved, directory,
+      baseManifest, projectRoot);
+    const randomPart = globalThis.crypto?.randomUUID?.().replaceAll("-", "")
+      || Math.random().toString(16).slice(2);
+    const generationId = `g-${Date.now()}-${randomPart}`;
+    const record = await createProjectGenerationRecord(generationId, files);
+    if (record.format !== PROJECT_GENERATION_FORMAT || record.version !== PROJECT_GENERATION_VERSION)
+      throw new Error("Unsupported project generation contract");
+    const generationPrefix = `project_generations/${generationId}/`;
+    for (const [relative, contents] of files) {
+      await writeR2File(`${generationPrefix}${relative}`, contents, directory);
+      const stagedFile = await readR2File(`${generationPrefix}${relative}`, directory);
+      if (!stagedFile || await sha256Hex(stagedFile) !== record.files[relative])
+        throw new Error(`Project generation write verification failed: ${relative}`);
+    }
+    await writeR2File(`${generationPrefix}complete.json`, JSON.stringify(record, null, 2) + "\n", directory);
+    const completeFile = await readR2File(`${generationPrefix}complete.json`, directory);
+    if (!completeFile || JSON.stringify(JSON.parse(await completeFile.text())) !== JSON.stringify(record))
+      throw new Error("Project generation completion marker verification failed");
+    // This is the transaction commit point. The previous committed generation
+    // remains loadable until every staged file has closed and verified.
+    await writeR2File(PROJECT_GENERATION_POINTER, JSON.stringify(record, null, 2) + "\n", directory);
+    const compatibilityPaths = [...files.keys()].sort((a, b) =>
+      (a === "portrait_rig_manifest.json") - (b === "portrait_rig_manifest.json")
+        || a.localeCompare(b));
+    for (const relative of compatibilityPaths)
+      await writeR2File(relative, files.get(relative), directory);
   } catch (error) {
-    document.getElementById("r2Meta").textContent = "R2 save failed: " + error.message;
+    document.getElementById("r2Meta").textContent = "Project save failed: " + error.message;
     updateProjectMeta("저장 실패 · 변경 내용 유지됨");
     return false;
   } finally {
@@ -4372,19 +4824,34 @@ const r2EditMode = document.getElementById("r2EditMode");
 const r2Pose = document.getElementById("r2Pose");
 const r2EditTarget = document.getElementById("r2EditTarget");
 function setR2EditMode(enabled) {
+  if (!enabled) cancelR2ActiveGesture();
   state.r2.editMode = !!enabled;
+  if (!state.r2.editMode) {
+    state.r2.activePoint = null;
+    state.r2.selectedPoint = null;
+    state.r2.selectedTarget = null;
+    state.r2.selectedRevision = null;
+    state.r2.staleSelection = false;
+  }
   r2Overlay?.classList.toggle("r2-editable", state.r2.editMode);
   updateR2Meta();
+  updateR2PointInspector();
 }
 function setR2Pose(pose) {
   if (!R2_CHEST_EDIT_POSES.includes(pose)) return;
+  cancelR2ActiveGesture();
   state.r2.pose = pose;
+  state.r2.selectedPoint = null;
+  state.r2.selectedTarget = null;
+  state.r2.selectedRevision = null;
+  state.r2.staleSelection = false;
   const vectors = {
     neutral: [0, 0], bust_x_neg: [-1, 0], bust_x_pos: [1, 0],
     bust_y_neg: [0, -1], bust_y_pos: [0, 1],
   };
   state.motionQA.p3Pose = { x: vectors[pose][0], y: vectors[pose][1] };
   updateR2Meta();
+  updateR2PointInspector();
 }
 async function resetR2ToAuto() {
   const autoSpec = p3SpecFromManifest(state.autoManifest);
@@ -4407,15 +4874,52 @@ async function resetR2ToAuto() {
 r2EditMode?.addEventListener("change", () => setR2EditMode(r2EditMode.checked));
 r2Pose?.addEventListener("change", () => setR2Pose(r2Pose.value));
 r2EditTarget?.addEventListener("change", () => {
+  cancelR2ActiveGesture();
   state.r2.editTarget = r2EditTarget.value;
+  state.r2.selectedPoint = null;
+  state.r2.selectedTarget = null;
+  state.r2.selectedRevision = null;
+  state.r2.staleSelection = false;
   updateR2Meta();
+  updateR2PointInspector();
 });
 r2Overlay?.addEventListener("pointerdown", r2PointerDown);
 r2Overlay?.addEventListener("pointermove", r2PointerMove);
 r2Overlay?.addEventListener("pointerup", r2PointerUp);
-r2Overlay?.addEventListener("pointercancel", r2PointerUp);
+r2Overlay?.addEventListener("pointercancel", r2PointerCancel);
+r2Overlay?.addEventListener("lostpointercapture", r2PointerCancel);
 document.getElementById("r2Save")?.addEventListener("click", () => saveProject());
 document.getElementById("r2Reset")?.addEventListener("click", resetR2ToAuto);
+for (const [id, axis] of [["r2PointX", "x"], ["r2PointY", "y"]]) {
+  const input = document.getElementById(id);
+  input?.addEventListener("focus", () => {
+    state.r2.numericGesture = { axis };
+    beginAuthoringGesture();
+  });
+  input?.addEventListener("input", (event) => {
+    if (!state.r2.numericGesture) {
+      state.r2.numericGesture = { axis };
+      beginAuthoringGesture();
+    }
+    previewR2PointField(axis, event.currentTarget.value);
+  });
+  input?.addEventListener("keydown", (event) => {
+    if (event.isComposing) return;
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitR2NumericGesture();
+      event.currentTarget.blur();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      cancelR2NumericGesture();
+      event.currentTarget.blur();
+    }
+  });
+  input?.addEventListener("blur", () => {
+    commitR2NumericGesture();
+    updateR2PointInspector();
+  });
+}
 document.getElementById("r2Download")?.addEventListener("click", () => {
   const draft = currentAuthoringDraft();
   const authoring = (state.r2.dirty || state.r6Mouth.dirty)
@@ -4455,20 +4959,58 @@ document.getElementById("saveProject")?.addEventListener("click", () => saveProj
 document.getElementById("undoProject")?.addEventListener("click", undoProject);
 document.getElementById("redoProject")?.addEventListener("click", redoProject);
 document.addEventListener("keydown", (event) => {
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+  if (event.key === "Escape" && !event.isComposing) {
+    if (state.r2?.numericGesture) {
+      event.preventDefault();
+      cancelR2NumericGesture();
+      return;
+    }
+    if (cancelR2PointerGesture() || cancelR2KeyboardGesture()) {
+      event.preventDefault();
+      updateR2PointInspector();
+    }
+    return;
+  }
+  if (event.isComposing || isTextEntryTarget(event.target)) return;
+  if (nudgeR2SelectedPoint(event)) return;
+  if (!(event.ctrlKey || event.metaKey)) return;
+  const key = event.key.toLowerCase();
+  if (key === "s") {
     event.preventDefault();
     saveProject();
     return;
   }
-  if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "z") return;
-  const target = event.target;
-  if (target?.matches?.("input, textarea, select")) return;
-  event.preventDefault();
-  if (event.shiftKey) redoProject();
-  else undoProject();
+  if (key === "z") {
+    event.preventDefault();
+    if (event.shiftKey) redoProject();
+    else undoProject();
+  } else if (key === "y") {
+    event.preventDefault();
+    redoProject();
+  }
 });
+document.addEventListener("keyup", (event) => {
+  if (event.key.startsWith("Arrow")) finishR2KeyboardGesture(event.key);
+});
+if (typeof window !== "undefined") {
+  window.addEventListener("blur", () => finishR2KeyboardGesture());
+  window.addEventListener("rigstudio:modechange", (event) => {
+    if (event.detail?.mode !== "edit") cancelR2ActiveGesture();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) cancelR2ActiveGesture();
+  });
+  window.addEventListener("rigstudio:reducedmotionchange", (event) => {
+    state.reducedMotion = !!event.detail?.enabled;
+    state.motionPreference = event.detail?.preference || state.motionPreference || "system";
+    rigController.setReducedMotion(state.reducedMotion);
+    if (state.reducedMotion) resetPhysics();
+    updateQaActiveBadge();
+  });
+}
 updateProjectMeta();
 updateR6MouthControls();
+updateR2PointInspector();
 for (const id of ["showP3Cage", "showP3Heatmap", "showP3Influenced", "showP3Locks", "showP3Occluders"]) {
   document.getElementById(id).addEventListener("change", () => {
     const cage = document.getElementById("showP3Cage")?.checked;

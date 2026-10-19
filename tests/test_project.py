@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import portrait_autorig.project as project_module
 
 from portrait_autorig.bundle import PortraitAsset
 from portrait_autorig.compiler import compile_asset
@@ -79,6 +80,10 @@ def test_project_round_trip_keeps_generated_base_and_authoring_separate(tmp_path
     assert (project.root / "source" / "assembly_reference.json").is_file()
     assert (project.root / "generated" / "portrait_rig_manifest.json").is_file()
     assert (project.root / "authoring" / "deformers.json").is_file()
+    generation_pointer = json.loads((project.root / "project-generation.json").read_text(encoding="utf-8"))
+    assert generation_pointer["format"] == "portrait-rig-project-generation"
+    assert generation_pointer["version"] == 1
+    assert generation_pointer["files"]["authoring/deformers.json"]
     assert project.source_revision_status == "MATCH"
     assert project.resolved_manifest == project.generated_manifest
 
@@ -93,6 +98,40 @@ def test_project_round_trip_keeps_generated_base_and_authoring_separate(tmp_path
     assert reloaded.authoring["deformers"]["upper_torso"]["source_instance_id"] == "topwear_instance"
     assert reloaded.resolved_manifest["motion"]["upper_torso_parametric_deformer"]["keyforms"]["neutral"] == [[1, 2]]
     assert reloaded.generated_manifest["motion"]["upper_torso_parametric_deformer"]["keyforms"]["neutral"] == [[0, 0]]
+
+
+def test_committed_generation_survives_compatibility_export_failure_and_recovers(tmp_path, monkeypatch):
+    project = create_rig_project(tmp_path / "A002.rigproject", _manifest(), _images())
+    old_pointer = json.loads((project.root / "project-generation.json").read_text(encoding="utf-8"))
+    project.set_deformer_override(
+        "upper_torso", {"source_instance_id": "topwear_instance", "range_override": {"x": 9.0}},
+    )
+    publish = project_module._publish_compatibility_exports
+
+    def fail_after_commit(*args, **kwargs):
+        raise OSError("injected compatibility export failure")
+
+    monkeypatch.setattr(project_module, "_publish_compatibility_exports", fail_after_commit)
+    with pytest.raises(OSError, match="is committed"):
+        project.save()
+    current_pointer = json.loads((project.root / "project-generation.json").read_text(encoding="utf-8"))
+    assert current_pointer["generation"] != old_pointer["generation"]
+
+    monkeypatch.setattr(project_module, "_publish_compatibility_exports", publish)
+    reloaded = load_rig_project(project.root)
+    assert reloaded.revision_report["generation_status"] == "COMMITTED"
+    assert reloaded.resolved_manifest["motion"]["upper_torso_parametric_deformer"]["ranges_px"]["x"] == 9.0
+    exported = json.loads((project.root / "portrait_rig_manifest.json").read_text(encoding="utf-8"))
+    assert exported["motion"]["upper_torso_parametric_deformer"]["ranges_px"]["x"] == 9.0
+
+
+def test_generation_checksum_mismatch_is_reported_without_loading_partial_state(tmp_path):
+    project = create_rig_project(tmp_path / "A002.rigproject", _manifest(), _images())
+    pointer = json.loads((project.root / "project-generation.json").read_text(encoding="utf-8"))
+    authoring_file = project.root / "project_generations" / pointer["generation"] / "authoring" / "deformers.json"
+    authoring_file.write_text('{"corrupt": true}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        load_rig_project(project.root)
 
 
 def test_revision_mismatch_is_reported_without_discarding_corrections(tmp_path):

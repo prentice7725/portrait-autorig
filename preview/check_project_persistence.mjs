@@ -41,18 +41,53 @@ assert.match(control("projectDirty").textContent, /ダウンロード|다운로�
 let writes = [];
 let failAt = 2;
 let duringWrite = null;
-const directory = {
-  async getDirectoryHandle() { return directory; },
-  async getFileHandle(name) {
-    return { async createWritable() { return {
-      async write(text) {
-        writes.push({ name, text });
-        if (writes.length === failAt) throw new Error("simulated disk failure");
-        if (duringWrite) { const editNow = duringWrite; duringWrite = null; editNow(); }
-      }, async close() {},
-    }; } };
-  },
-};
+const storedFiles = new Map();
+const directories = new Set([""]);
+function folder(prefix) {
+  return {
+    async getDirectoryHandle(name, options = {}) {
+      const next = `${prefix}${name}/`;
+      if (!directories.has(next)) {
+        if (!options.create) {
+          const error = new Error("not found"); error.name = "NotFoundError"; throw error;
+        }
+        directories.add(next);
+      }
+      return folder(next);
+    },
+    async getFileHandle(name, options = {}) {
+      const path = `${prefix}${name}`;
+      if (!storedFiles.has(path) && !options.create) {
+        const error = new Error("not found"); error.name = "NotFoundError"; throw error;
+      }
+      return {
+        async getFile() {
+          if (!storedFiles.has(path)) { const error = new Error("not found"); error.name = "NotFoundError"; throw error; }
+          const contents = storedFiles.get(path);
+          const bytes = typeof contents === "string" ? new TextEncoder().encode(contents) : contents;
+          return {
+            async text() { return typeof contents === "string" ? contents : new TextDecoder().decode(bytes); },
+            async arrayBuffer() { return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength); },
+          };
+        },
+        async createWritable() {
+          let contents;
+          return {
+            async write(value) {
+              writes.push({ path, value });
+              if (writes.length === failAt) throw new Error("simulated disk failure");
+              contents = typeof value === "string" ? value : new Uint8Array(value);
+              if (duringWrite) { const editNow = duringWrite; duringWrite = null; editNow(); }
+            },
+            async close() { storedFiles.set(path, contents); },
+            async abort() {},
+          };
+        },
+      };
+    },
+  };
+}
+const directory = folder("");
 state.projectDirectoryHandle = directory;
 assert.equal(await persistR2Authoring(), false);
 assert.equal(downloads, 1, "partial folder write must never silently fall back to download");
@@ -62,7 +97,13 @@ assert.match(control("projectDirty").textContent, /저장 실패/);
 
 writes = []; failAt = -1;
 assert.equal(await persistR2Authoring(), true);
-assert.equal(writes.length, 5);
+assert.ok(writes.some(({ path }) => path === "project-generation.json"),
+  "a generation pointer must publish the committed save");
+assert.ok(writes.some(({ path }) => path.endsWith("/complete.json")),
+  "a generation completion marker must be written before publication");
+assert.ok(writes.findIndex(({ path }) => path === "project-generation.json")
+  < writes.findIndex(({ path }) => path === "portrait_rig_manifest.json"),
+"the generation pointer must be committed before the compatibility manifest is refreshed");
 assert.equal(state.persistenceDirty, false);
 assert.equal(state.r6Mouth.dirty, false);
 assert.equal(control("projectDirty").dataset.state, "clean");
@@ -80,15 +121,13 @@ duringWrite = () => {
 };
 assert.equal(await persistR2Authoring(), false, "calibration edits made during save must remain dirty too");
 assert.equal(state.r3.dirty, true);
-control("saveProject").listeners.get("click")();
-await new Promise(resolve => setTimeout(resolve, 0));
+await control("saveProject").listeners.get("click")();
 assert.equal(state.authoring.physics.upper_torso.damping_ratio, 0.7);
 assert.equal(state.persistenceDirty, false);
 
 state.qa.r3.physics = { damping_ratio: 0.1 };
 state.r3.dirty = false;
-control("saveProject").listeners.get("click")();
-await new Promise(resolve => setTimeout(resolve, 0));
+await control("saveProject").listeners.get("click")();
 assert.equal(state.authoring.physics?.upper_torso?.damping_ratio, 0.7,
   "QA-only probes must not become authored overrides through Project Save");
 console.log("project persistence checks passed");
