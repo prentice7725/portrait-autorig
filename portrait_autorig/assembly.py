@@ -69,12 +69,12 @@ ASSEMBLY_VERSION = "0.2"
 # commit is part of the input seam, so a future Composer schema change cannot
 # silently alter what AutoRig accepts.
 ASSEMBLY_SCHEMA_VENDOR = "portrait-composer"
-ASSEMBLY_SCHEMA_COMMIT = "682f25e"
+ASSEMBLY_SCHEMA_COMMIT = "53e98b43d3856dcfaac30cb787e5755ef9e3c3c1"
 ASSEMBLY_SCHEMA_ID = "portrait-assembly-v0.2"
 # Hash of Composer's schema at the pinned commit.  The schema file itself is
 # copied byte-for-byte; provenance lives here so the upstream JSON remains a
 # true vendor copy and is never modified with AutoRig-specific fields.
-ASSEMBLY_SCHEMA_SHA256 = "70d2efe40f73548cd1b3369992c8bc257aaa270b3a78fAD5e2e6fd8cd6eca378".lower()
+ASSEMBLY_SCHEMA_SHA256 = "206d6c6c8cf391b760faf167a46017e791a024e719e5eed06ad13a62c1202449"
 ASSEMBLY_SCHEMA_PIN = f"{ASSEMBLY_SCHEMA_VENDOR}@{ASSEMBLY_SCHEMA_COMMIT}:{ASSEMBLY_SCHEMA_ID}"
 ASSEMBLY_SCHEMA_PATH = Path(__file__).with_name("schemas") / "portrait-assembly-v0.2.schema.json"
 
@@ -105,6 +105,12 @@ class AssemblyAsset:
     # Source-local dimensions and the exact transform used to place each
     # Composer instance. RigIntent geometry is authored in this local space.
     instance_geometry: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Input-specific pins and semantics retained when Assembly is the
+    # intermediate in-memory representation for a Rig Bundle.
+    source_kind: str = "assembly"
+    source_schema: dict[str, Any] = field(default_factory=dict)
+    expression_intent: dict[str, Any] = field(default_factory=dict)
+    source_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def _read_json(path: Path) -> dict:
@@ -608,6 +614,11 @@ def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
     with Image.open(reference_path) as ref:
         reference = np.array(ref.convert("RGBA"), dtype=np.uint8)
 
+    source_metadata = {
+        str(source_id): source.get("metadata", {})
+        for source_id, source in (manifest.get("sources") or {}).items()
+        if isinstance(source, dict) and isinstance(source.get("metadata", {}), dict)
+    }
     return AssemblyAsset(
         root=root, canvas=(width, height), layers=layers, body_remainder=body_remainder,
         draw_order=draw_order,
@@ -622,4 +633,5 @@ def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
         source_id=root.name,
         provenance=manifest.get("provenance") or {},
         instance_geometry=instance_geometry,
+        source_metadata=source_metadata,
     )

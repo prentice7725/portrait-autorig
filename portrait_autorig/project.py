@@ -155,6 +155,8 @@ def _source_kind(source: Path) -> str:
         value = _read_json(manifest_path).get("format")
         if value == "portrait-assembly":
             return "assembly"
+        if value == "portrait-rig-bundle":
+            return "rig_bundle"
         if value == "portrait-bundle":
             return "portrait"
     if list(source.glob("*_rig_manifest.json")):
