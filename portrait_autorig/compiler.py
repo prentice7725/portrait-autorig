@@ -12,12 +12,14 @@ from .assembly import (
     ASSEMBLY_FORMAT, ASSEMBLY_SCHEMA_COMMIT, ASSEMBLY_SCHEMA_ID,
     ASSEMBLY_SCHEMA_PATH, ASSEMBLY_SCHEMA_PIN, ASSEMBLY_SCHEMA_VENDOR,
     ASSEMBLY_VERSION,
-    AssemblyAsset, load_assembly_bundle,
+    AssemblyAsset, load_assembly_bundle, resolve_rig_intent_coordinates,
 )
 from .bundle import PortraitAsset, load_legacy_run, load_portrait_bundle
 from .physics import physics_spec_from_rig_intent
+from .rig_bundle import load_rig_bundle
 from .project import create_rig_project
 from .rig import build_rig, rig_preflight, write_rig_project
+from .soft_morph import TARGET_ALIASES
 
 
 def compile_asset(asset: PortraitAsset, output_dir: str | os.PathLike[str], *,
@@ -97,25 +99,28 @@ def compile_assembly_asset(asset: AssemblyAsset, output_dir: str | os.PathLike[s
     topwear geometry.  Final corrections and calibration belong to the Rig
     Project authoring layer.
     """
-    # Preserve the legacy generated-base seed when a Composer motion hint is
-    # present.  Final physics calibration is still authored in Rig Studio and
-    # resolves over this base in the Rig Project.
+    resolved_rig_intent, rig_intent_resolution = resolve_rig_intent_coordinates(
+        asset.rig_intent, asset.instance_geometry, asset.canvas, set(TARGET_ALIASES)
+    )
+    # Preserve the legacy generated-base seed when a uniquely resolved
+    # Composer motion hint is present. Final calibration remains authoring.
     if physics is None:
-        physics = physics_spec_from_rig_intent(asset.rig_intent)
+        physics = physics_spec_from_rig_intent(resolved_rig_intent)
     preflight = rig_preflight(asset.layers, original_rgba=None,
                               body_remainder=asset.body_remainder,
-                              rig_intent=asset.rig_intent)
+                              rig_intent=resolved_rig_intent)
     if preflight["status"] == "INCOMPATIBLE":
         messages = "; ".join(item["message"] for item in preflight["warnings"])
-        raise ValueError(f"Assembly Bundle is not rig-compatible: {messages}")
+        raise ValueError(f"Input Bundle is not rig-compatible: {messages}")
     output = Path(output_dir)
     # Preserve a one-to-one Composer instance binding on ordinary semantic
     # parts where flattening did not lose identity.  Variant members retain
     # their exact instance id inside build_rig.
     by_tag: dict[str, list[str]] = {}
     for instance_id in asset.instance_draw_order:
-        tag = asset.instance_to_tag.get(instance_id)
-        if tag is not None:
+        geometry = asset.instance_geometry.get(instance_id) or {}
+        tag = geometry.get("semantic")
+        if tag is not None and geometry.get("included_in_semantic_layer"):
             by_tag.setdefault(tag, []).append(instance_id)
     source_instance_ids = {
         tag: ids[0] for tag, ids in by_tag.items() if len(ids) == 1
@@ -127,7 +132,7 @@ def compile_assembly_asset(asset: AssemblyAsset, output_dir: str | os.PathLike[s
         frame_size=(asset.canvas[1], asset.canvas[0]),
         draw_order=asset.draw_order,
         rest_reference=asset.reference,
-        rig_intent=asset.rig_intent,
+        rig_intent=resolved_rig_intent,
         gradient_tags=gradient_tags,
         contour_tags=contour_tags,
         island_policy=island_policy,
@@ -145,26 +150,39 @@ def compile_assembly_asset(asset: AssemblyAsset, output_dir: str | os.PathLike[s
         provenance=asset.provenance,
         source_instance_ids=source_instance_ids,
     )
-    manifest["source"]["assembly_schema"] = {
-        "format": ASSEMBLY_FORMAT, "version": ASSEMBLY_VERSION,
-        "vendor": ASSEMBLY_SCHEMA_VENDOR,
-        "upstream_commit": ASSEMBLY_SCHEMA_COMMIT,
-        "schema_id": ASSEMBLY_SCHEMA_ID,
-        "schema_file": ASSEMBLY_SCHEMA_PATH.name,
-        "pin": ASSEMBLY_SCHEMA_PIN,
-    }
+    if asset.source_kind == "rig_bundle":
+        manifest["source"]["rig_bundle_schema"] = json.loads(json.dumps(asset.source_schema))
+    else:
+        manifest["source"]["assembly_schema"] = {
+            "format": ASSEMBLY_FORMAT, "version": ASSEMBLY_VERSION,
+            "vendor": ASSEMBLY_SCHEMA_VENDOR,
+            "upstream_commit": ASSEMBLY_SCHEMA_COMMIT,
+            "schema_id": ASSEMBLY_SCHEMA_ID,
+            "schema_file": ASSEMBLY_SCHEMA_PATH.name,
+            "pin": ASSEMBLY_SCHEMA_PIN,
+        }
+    manifest["source"]["input_kind"] = asset.source_kind
+    manifest["source"]["rig_intent"] = json.loads(json.dumps(asset.rig_intent))
+    manifest["source"]["source_metadata"] = json.loads(json.dumps(asset.source_metadata))
+    manifest["source"]["capability_limits"] = [
+        "AutoRig compiles separate layer meshes; full-body joints, IK, and walking/gait generation are outside this contract"
+    ]
+    if asset.expression_intent:
+        manifest["source"]["expression_intent"] = json.loads(json.dumps(asset.expression_intent))
+    manifest["source"]["rig_intent_resolution"] = rig_intent_resolution
     if manifest["rest_fidelity"]["status"] == "fail":
         raise ValueError(
-            "rig rest pose differs from the Assembly Bundle's own reference.png: "
+            "rig rest pose differs from the input bundle's own reference.png: "
             f"{manifest['rest_fidelity']}"
         )
     output.mkdir(parents=True, exist_ok=True)
     Image.fromarray(asset.reference, mode="RGBA").save(output / "reference.png")
-    manifest["source"]["assembly_bundle"] = asset.source_id
+    source_key = "rig_bundle" if asset.source_kind == "rig_bundle" else "assembly_bundle"
+    manifest["source"][source_key] = asset.source_id
     manifest["source"]["reference"] = "reference.png"
     manifest_path = write_rig_project(str(output), "portrait", manifest, images)
     create_rig_project(
-        output, manifest, images, source=asset.root, source_kind="assembly",
+        output, manifest, images, source=asset.root, source_kind=asset.source_kind,
         source_id=asset.source_id, instance_ids=list(asset.instance_draw_order),
     )
     return manifest_path
@@ -174,6 +192,16 @@ def compile_assembly_bundle(bundle_dir: str, output_dir: str, *,
                             gradient_tags=(), contour_tags=(), island_policy="separate",
                             clip_masks=(), boundary_stitches=(), physics=None) -> str:
     return compile_assembly_asset(load_assembly_bundle(bundle_dir), output_dir,
+                                  gradient_tags=gradient_tags, contour_tags=contour_tags,
+                                  island_policy=island_policy, clip_masks=clip_masks,
+                                  boundary_stitches=boundary_stitches, physics=physics)
+
+
+def compile_rig_bundle(bundle_dir: str, output_dir: str, *,
+                       gradient_tags=(), contour_tags=(), island_policy="separate",
+                       clip_masks=(), boundary_stitches=(), physics=None) -> str:
+    """Compile Composer Rig Bundle v0.4 through the Assembly compiler seam."""
+    return compile_assembly_asset(load_rig_bundle(bundle_dir), output_dir,
                                   gradient_tags=gradient_tags, contour_tags=contour_tags,
                                   island_policy=island_policy, clip_masks=clip_masks,
                                   boundary_stitches=boundary_stitches, physics=physics)

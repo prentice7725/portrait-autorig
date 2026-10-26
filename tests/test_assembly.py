@@ -148,7 +148,7 @@ class PositioningTests(unittest.TestCase):
 class LoadAssemblyBundleTests(unittest.TestCase):
     def test_composer_schema_vendor_is_pinned(self):
         self.assertEqual(ASSEMBLY_SCHEMA_VENDOR, "portrait-composer")
-        self.assertEqual(ASSEMBLY_SCHEMA_COMMIT, "682f25e")
+        self.assertEqual(ASSEMBLY_SCHEMA_COMMIT, "53e98b43d3856dcfaac30cb787e5755ef9e3c3c1")
         self.assertEqual(ASSEMBLY_SCHEMA_ID, "portrait-assembly-v0.2")
         self.assertIn(ASSEMBLY_SCHEMA_COMMIT, ASSEMBLY_SCHEMA_PIN)
         raw = ASSEMBLY_SCHEMA_PATH.read_bytes()

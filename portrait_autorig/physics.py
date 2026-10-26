@@ -80,18 +80,26 @@ def physics_spec_from_rig_intent(rig_intent: dict[str, Any] | None) -> dict[str,
     if not isinstance(rig_intent, dict):
         return None
     aliases = {"topwear", "topwear_with_arms", "topwear_with_handwear"}
-    for region in (rig_intent.get("regions") or {}).values():
+    matches = []
+    for region_id, region in (rig_intent.get("regions") or {}).items():
         if not isinstance(region, dict):
             continue
-        target = str(region.get("target", ""))
-        if target.endswith("__instance"):
-            target = target[:-len("__instance")]
-        if target not in aliases:
+        resolution_status = region.get("rig_intent_resolution_status")
+        if resolution_status and resolution_status != "RESOLVED":
             continue
-        if region.get("enabled", True) is False:
-            return None
-        return default_p2_3_physics_spec(str(region.get("response_profile", "soft")))
-    return None
+        target = str(region.get("target", ""))
+        semantic = str(region.get("resolved_target_semantic", ""))
+        if target in aliases or semantic in aliases:
+            matches.append((str(region_id), region))
+    if len(matches) > 1:
+        region_ids = ", ".join(region_id for region_id, _ in matches)
+        raise ValueError(f"multiple RigIntent regions match the physics consumer: {region_ids}")
+    if not matches:
+        return None
+    region = matches[0][1]
+    if region.get("enabled", True) is False:
+        return None
+    return default_p2_3_physics_spec(str(region.get("response_profile", "soft")))
 
 
 def validate_physics_spec(spec: dict[str, Any]) -> list[str]:

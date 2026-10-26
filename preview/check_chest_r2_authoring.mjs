@@ -1,10 +1,25 @@
 // R2 authoring contract check: explicit cage/keyform overrides are applied to
 // a generated P3 manifest without mutating the generated base or physics.
-const control = () => ({ checked: false, value: "0", textContent: "", innerHTML: "",
-  addEventListener() {}, append() {}, appendChild() {}, classList: {
-    add() {}, remove() {}, toggle() {},
-  } });
-globalThis.document = { getElementById: control, createElement: control, addEventListener() {} };
+const documentListeners = new Map();
+const control = (id = "") => ({ id, checked: false, value: "0", textContent: "", innerHTML: "", dataset: {},
+  handlers: {}, setAttribute() {},
+  focus() { globalThis.document.activeElement = this; },
+  blur() { globalThis.document.activeElement = null; this.handlers.blur?.({ currentTarget: this }); },
+  setPointerCapture() {}, hasPointerCapture() { return true; }, releasePointerCapture() {},
+  getBoundingClientRect() { return { left: 0, top: 0, width: 256, height: 256 }; },
+  matches(selector) { return this.id.startsWith("r2Point") && selector.includes("input"); },
+  addEventListener(type, handler) { this.handlers[type] = handler; },
+  append() {}, appendChild() {}, classList: { add() {}, remove() {}, toggle() {} } });
+const controls = new Map();
+const getControl = (id) => {
+  if (!controls.has(id)) controls.set(id, control(id));
+  return controls.get(id);
+};
+globalThis.document = {
+  documentElement: { dataset: {}, style: { setProperty() {} } }, body: { setAttribute() {} }, activeElement: null,
+  getElementById: getControl, createElement: () => control("created"),
+  addEventListener(type, handler) { documentListeners.set(type, handler); },
+};
 globalThis.performance = { now: () => 0 };
 globalThis.requestAnimationFrame = () => {};
 globalThis.location = { search: "" };
@@ -113,6 +128,73 @@ Runtime.deform(correctedPart, 0, motion);
 for (let index = 0; index < autoRest.length; index++)
 if (Math.abs(correctedPart.mesh.live[index] - autoRest[index]) > 1e-6)
     throw new Error("R2 neutral pose is not exact rest");
+
+// A11Y-2: exercise the actual runtime document keydown path, not just the
+// DOM-free nudge helper. A selected cage point supports Arrow and numeric edit.
+const keyboardSpec = makeP3Fixture(makeCompiledTopwearFixture());
+Runtime.state.manifest = { motion: { upper_torso_parametric_deformer: keyboardSpec }, parts: [] };
+Runtime.state.autoManifest = { motion: { upper_torso_parametric_deformer: keyboardSpec }, parts: [], deformers: [] };
+Runtime.state.parts = [{ chestParametric: keyboardSpec, mesh: { rest: new Float32Array(48) } }];
+Runtime.state.authoring = { version: 1, deformers: {}, physics: {} };
+Runtime.state.r2 = { pose: "bust_y_pos", editTarget: "cage", editMode: true,
+  activePoint: null, selectedPoint: 0, selectedTarget: "cage", selectedRevision: null,
+  keyboardGesture: null, numericGesture: null, dragging: false, dirty: false };
+getControl("r2NudgeStep").value = "1";
+const keydown = documentListeners.get("keydown");
+const keyup = documentListeners.get("keyup");
+if (typeof keydown !== "function") throw new Error("R2 keyboard handler was not registered");
+if (typeof keyup !== "function") throw new Error("R2 keyboard gesture commit handler was not registered");
+let prevented = false;
+const overlay = getControl("regionOverlay");
+const currentKeyboardSpec = () => Runtime.state.manifest.motion.upper_torso_parametric_deformer;
+overlay.focus();
+keydown({ key: "ArrowRight", target: overlay, ctrlKey: false, metaKey: false,
+  shiftKey: false, altKey: false, preventDefault() { prevented = true; } });
+keyup({ key: "ArrowRight" });
+if (!prevented || currentKeyboardSpec().cage.rest_points[0][0] !== 91)
+  throw new Error("Arrow nudge did not move the selected cage point");
+if (Runtime.state.history.undo.length !== 1)
+  throw new Error("Arrow key repeat transaction must create exactly one undo step");
+const xInput = getControl("r2PointX");
+xInput.focus(); xInput.value = "7";
+xInput.handlers.input({ currentTarget: xInput });
+xInput.handlers.keydown({ key: "Enter", currentTarget: xInput,
+  preventDefault() {} });
+if (currentKeyboardSpec().cage.rest_points[0][0] !== 7 || Runtime.state.history.undo.length !== 2)
+  throw new Error("numeric point edit must commit as one undoable transaction");
+let shortcutPrevented = false;
+keydown({ key: "z", target: overlay, ctrlKey: true, metaKey: false, shiftKey: false,
+  preventDefault() { shortcutPrevented = true; } });
+if (!shortcutPrevented || currentKeyboardSpec().cage.rest_points[0][0] !== 91)
+  throw new Error("Ctrl+Z did not restore the previous point transaction");
+shortcutPrevented = false;
+keydown({ key: "y", target: overlay, ctrlKey: true, metaKey: false, shiftKey: false,
+  preventDefault() { shortcutPrevented = true; } });
+if (!shortcutPrevented || currentKeyboardSpec().cage.rest_points[0][0] !== 7)
+  throw new Error("Ctrl+Y did not redo the previous point transaction");
+shortcutPrevented = false;
+keydown({ key: "y", target: xInput, ctrlKey: true, metaKey: false, shiftKey: false,
+  preventDefault() { shortcutPrevented = true; } });
+if (shortcutPrevented || Runtime.state.history.undo.length !== 2)
+  throw new Error("Ctrl+Y must not override a numeric text field");
+xInput.focus(); xInput.value = "8";
+xInput.handlers.input({ currentTarget: xInput });
+xInput.handlers.keydown({ key: "Escape", currentTarget: xInput,
+  preventDefault() {} });
+if (currentKeyboardSpec().cage.rest_points[0][0] !== 7 || Runtime.state.history.undo.length !== 2)
+  throw new Error("numeric Escape must restore the edit without adding history");
+const beforePointerCancel = currentKeyboardSpec().cage.rest_points[0].slice();
+const undoCountBeforeCancel = Runtime.state.history.undo.length;
+const pointDown = { currentTarget: overlay, pointerId: 4,
+  clientX: beforePointerCancel[0], clientY: beforePointerCancel[1], preventDefault() {} };
+overlay.handlers.pointerdown(pointDown);
+overlay.handlers.pointermove({ currentTarget: overlay, clientX: beforePointerCancel[0] + 4,
+  clientY: beforePointerCancel[1], preventDefault() {} });
+overlay.handlers.pointercancel(pointDown);
+const afterPointerCancel = currentKeyboardSpec().cage.rest_points[0];
+if (afterPointerCancel[0] !== beforePointerCancel[0] || afterPointerCancel[1] !== beforePointerCancel[1]
+    || Runtime.state.history.undo.length !== undoCountBeforeCancel)
+  throw new Error("pointercancel must restore the gesture snapshot without adding history");
 const cleared = Runtime.clearChestAuthoring({ ...saved,
   physics: { upper_torso: { natural_frequency_hz: 2.7 } },
 });

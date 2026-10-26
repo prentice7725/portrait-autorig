@@ -414,20 +414,29 @@ def basis_physics_distribution(response_profile: str) -> dict[str, Any]:
 
 
 def find_authored_region(rig_intent: dict[str, Any] | None) -> dict[str, Any] | None:
-    """The first RigIntent region (enabled or not -- callers decide what to
-    do with a disabled one) whose `target` names the surface this module's
-    Phase 1 scope can act on. None when there is no `rig_intent` at all, or
-    none of its regions target `topwear`. Callers may then use the
-    character-derived AutoRig base; this function only identifies an optional
-    Composer motion hint."""
+    """Return the single RigIntent region this consumer can safely apply.
+
+    Multiple matching regions are an ambiguous producer contract. Selecting
+    one by mapping order would silently discard authored intent, so fail with
+    the region ids instead.
+    """
     if not rig_intent:
         return None
-    for region in (rig_intent.get("regions") or {}).values():
+    matches: list[tuple[str, dict[str, Any]]] = []
+    for region_id, region in (rig_intent.get("regions") or {}).items():
+        if not isinstance(region, dict):
+            continue
+        resolution_status = region.get("rig_intent_resolution_status")
+        if resolution_status and resolution_status != "RESOLVED":
+            continue
         target = str(region.get("target", ""))
-        target_base = target[:-len("__instance")] if target.endswith("__instance") else target
-        if target in TARGET_ALIASES or target_base in TARGET_ALIASES:
-            return region
-    return None
+        resolved_semantic = str(region.get("resolved_target_semantic", ""))
+        if target in TARGET_ALIASES or resolved_semantic in TARGET_ALIASES:
+            matches.append((str(region_id), region))
+    if len(matches) > 1:
+        region_ids = ", ".join(region_id for region_id, _ in matches)
+        raise ValueError(f"multiple RigIntent regions match the upper-torso consumer: {region_ids}")
+    return matches[0][1] if matches else None
 
 
 def region_from_rig_intent(topwear: np.ndarray | None, region: dict[str, Any] | None, *,
@@ -450,9 +459,33 @@ def region_from_rig_intent(topwear: np.ndarray | None, region: dict[str, Any] | 
     box = _bbox(_alpha_of(topwear) > 0)
     if box is None:
         return None
+    bx1, by1, bx2, by2 = box
+    box_width, box_height = bx2 - bx1, by2 - by1
+    geometry_in_bbox = geometry
+    if region.get("coordinate_space") == "canvas_normalized":
+        canvas_h, canvas_w = topwear.shape[:2]
+        geometry_in_bbox = {}
+        for side in ("left", "right"):
+            lobe = geometry.get(side) or {}
+            center = lobe.get("center") or []
+            radius = lobe.get("radius") or []
+            if len(center) != 2 or len(radius) != 2:
+                return None
+            geometry_in_bbox[side] = {
+                "center": [
+                    (float(center[0]) * canvas_w - bx1) / box_width,
+                    (float(center[1]) * canvas_h - by1) / box_height,
+                ],
+                "radius": [
+                    float(radius[0]) * canvas_w / box_width,
+                    float(radius[1]) * canvas_h / box_height,
+                ],
+            }
     locks = region.get("locks") or {}
     return {
-        "mode": "two_lobe", "left": left, "right": right,
+        "mode": "two_lobe",
+        "left": geometry_in_bbox.get("left", left),
+        "right": geometry_in_bbox.get("right", right),
         "center_lock": locks.get("center", CENTER_LOCK_WIDTH),
         "neckline_lock": locks.get("neckline", NECKLINE_LOCK_WIDTH),
         "bbox": list(box),
@@ -496,11 +529,10 @@ def authored_upper_torso_soft_morph_spec(region: dict[str, Any],
     spec: dict[str, Any] = {
         "enabled": enabled,
         "mode": "two_lobe",
-        # Composer's RigIntent geometry is normalized in the authored target
-        # instance space. Assembly layers are positioned into the canvas by
-        # the input seam; for the current canvas-sized target contract this is
-        # the canvas coordinate space. Keep the distinction explicit so the
-        # runtime never silently re-normalizes it against a cropped rig part.
+        # The Assembly seam resolves source-instance geometry through its
+        # placement transform before this spec is built. Runtime consumes the
+        # resulting canvas coordinates directly and must not re-normalize them
+        # against the cropped rig part.
         "coordinate_space": "canvas_normalized",
         "strength": round(float(strength), 3),
         "horizontal_px": DEFAULT_HORIZONTAL_PX,
@@ -525,14 +557,19 @@ def authored_upper_torso_soft_morph_spec(region: dict[str, Any],
     # soft-morph bridge.  The compiler may also add the resolved
     # `source_instance_id` on the flattened part, but keeping this value
     # makes the P3 deformer binding explicit when tags are duplicated.
-    if region.get("target"):
-        spec["target_instance"] = region["target"]
+    target_instance = region.get("resolved_target_instance") or region.get("target")
+    if target_instance:
+        spec["target_instance"] = target_instance
     reasons = list(verdict.get("reasons") or [])
     if not author_enabled:
         reasons = ["author_disabled"] + reasons
     if reasons:
         spec["status_reasons"] = reasons
     if region_geometry is not None:
-        spec["left"] = region_geometry["left"]
-        spec["right"] = region_geometry["right"]
+        if region.get("coordinate_space") == "canvas_normalized":
+            spec["left"] = region["geometry"]["left"]
+            spec["right"] = region["geometry"]["right"]
+        else:
+            spec["left"] = region_geometry["left"]
+            spec["right"] = region_geometry["right"]
     return spec

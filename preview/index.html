@@ -22,6 +22,7 @@
     --bg: #10131a; --panel: #171c26; --panel-raised: #1d2430;
     --line: #303949; --fg: #f2f5f8; --muted: #aab4c2;
     --accent: #79b8ff; --accent-strong: #b8d9ff;
+    --rig-studio-ui-scale: 1;
   }
   * { box-sizing: border-box; }
   body {
@@ -51,14 +52,32 @@
   #topStatus #runmeta { max-width: 190px; max-height: 24px; overflow: hidden; text-overflow: ellipsis; }
   #topStatus #physicsWarning { max-width: 230px; max-height: 42px; overflow: auto; font-size: 11px; }
   #topStatus #r4DisplayMeta { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+  .a11y-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .a11y-setting { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .a11y-setting select { width: auto; min-width: 76px; min-height: 34px; padding: 6px; }
+  .a11y-status { color: var(--muted); font-size: 11px; white-space: nowrap; }
+  .a11y-status[data-state="active"] { color: #9fe3b1; }
+  .shortcut-help { position: relative; }
+  .shortcut-help summary { cursor: pointer; color: var(--muted); min-height: 34px; display: flex; align-items: center; }
+  .shortcut-help summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .shortcut-list { position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; width: 250px;
+                  margin: 0; padding: 10px 12px; background: var(--panel-raised); border: 1px solid var(--line);
+                  border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+  .shortcut-list div { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; }
+  .shortcut-list kbd { color: var(--accent-strong); font: inherit; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
   #r4DisplayPreset { width: auto; min-width: 128px; }
   #semanticTree { display: none; }
   body[data-mode="edit"] { grid-template-columns: 188px minmax(0, 1fr) 320px; }
+  body[data-ui-scale="125"] { grid-template-columns: minmax(0, 1fr) 400px; }
+  body[data-ui-scale="150"] { grid-template-columns: minmax(0, 1fr) 480px; }
+  body[data-mode="edit"][data-ui-scale="125"] { grid-template-columns: 235px minmax(0, 1fr) 400px; }
+  body[data-mode="edit"][data-ui-scale="150"] { grid-template-columns: 282px minmax(0, 1fr) 480px; }
   body[data-mode="edit"] #semanticTree { display: block; grid-column: 1; grid-row: 2; }
   #semanticTree {
     background: #141a23; border-right: 1px solid var(--line); padding: 16px 12px;
     overflow-y: auto;
   }
+  #topbar, #semanticTree, #panel { zoom: var(--rig-studio-ui-scale); }
   #semanticTree h2 { margin: 0 0 12px; }
   .tree-group { margin: 12px 0 18px; }
   .tree-group button { width: 100%; text-align: left; background: transparent; border-color: transparent; }
@@ -116,6 +135,7 @@
   canvas.r4-sized { max-width: none; max-height: none; }
   #regionOverlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   #regionOverlay.r2-editable { pointer-events: auto; cursor: crosshair; }
+  #regionOverlay.r2-editable:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
   #drop {
     position: absolute; inset: 24px; border: 2px dashed var(--line); border-radius: 12px;
     display: grid; place-content: center; text-align: center; gap: 14px; padding: 32px;
@@ -155,6 +175,18 @@
   .audio-test .row { flex-wrap: wrap; }
   .mode-status { color: var(--accent); font-size: 11px; }
   .mode-status[data-state="active"] { color: #9fe3b1; }
+  .point-inspector { margin: 10px 0; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: rgba(20,26,35,.7); }
+  .point-inspector legend { color: var(--muted); padding: 0 4px; }
+  .point-inspector .numeric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .point-inspector input[type="number"] { width: 100%; min-height: 36px; padding: 7px; background: #262b34; color: var(--fg); border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+  .point-inspector .hint { margin-top: 8px; }
+  .overlay-legend { display: grid; gap: 4px; margin: 8px 0; padding: 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); font-size: 11px; }
+  .overlay-legend span { display: flex; align-items: center; gap: 7px; }
+  .legend-mark { display: inline-block; width: 11px; height: 11px; border: 2px solid currentColor; flex: 0 0 auto; }
+  .legend-mark.circle { border-radius: 50%; }
+  .legend-mark.square { border-radius: 2px; }
+  .legend-mark.diamond { transform: rotate(45deg); width: 9px; height: 9px; border-radius: 1px; }
+  .legend-mark.line { width: 18px; height: 0; border-width: 2px 0 0; border-style: dashed; }
   .warn { color: #ffb454; }
   .qa-active-badge { color: #10131a; background: #ffb454; border-radius: 999px;
                     padding: 3px 9px; font-size: 11px; font-weight: 800;
@@ -164,6 +196,7 @@
   .project-actions button:disabled { opacity: .45; cursor: default; }
   #projectDirty[data-state="dirty"] { color: #ffcf85; }
   #projectDirty[data-state="clean"] { color: #9fe3b1; }
+  #projectDirty[data-state="dirty"]::first-letter, #projectDirty[data-state="clean"]::first-letter { font-weight: 800; }
   #physicsWarning { border: 1px solid #9a5a2b; background: rgba(154,90,43,.18);
                     border-radius: 6px; padding: 8px; margin-top: 8px; }
   #err { color: #ff8080; white-space: pre-wrap; }
@@ -178,6 +211,10 @@
   }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
+  }
+  :root[data-reduce-motion="true"] *, :root[data-reduce-motion="true"] *::before,
+  :root[data-reduce-motion="true"] *::after {
+    scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important;
   }
 </style>
 </head>
@@ -196,12 +233,42 @@
   <div id="topStatus">
     <div class="meta" id="topRunMeta">No rig loaded</div>
     <div class="meta" id="topPhysicsWarning" hidden></div>
-    <div class="qa-active-badge" id="qaActiveBadge" aria-live="polite" aria-hidden="true" hidden>QA ACTIVE</div>
-    <div class="meta" id="projectDirty" data-state="clean" aria-live="polite">저장됨</div>
+    <div class="qa-active-badge" id="qaActiveBadge" role="status" aria-live="polite" aria-hidden="true" hidden>[QA] QA ACTIVE</div>
+    <div class="meta" id="projectDirty" data-state="clean" aria-live="polite">[SAVED] 저장됨</div>
     <div class="project-actions" aria-label="Project history">
       <button id="saveProject" type="button">프로젝트 저장</button>
       <button id="undoProject" type="button" disabled>실행 취소</button>
       <button id="redoProject" type="button" disabled>다시 실행</button>
+    </div>
+    <div class="a11y-controls" aria-label="Rig Studio accessibility settings">
+      <label class="a11y-setting">동작
+        <select id="motionPreference" aria-label="자동 동작 설정">
+          <option value="system">시스템 설정</option>
+          <option value="reduce">동작 감소</option>
+          <option value="full">전체 재생</option>
+        </select>
+      </label>
+      <span class="a11y-status" id="motionStatus" role="status" aria-live="polite">동작: OS 설정</span>
+      <label class="a11y-setting">UI 크기
+        <select id="uiScale" aria-label="Rig Studio UI scale">
+          <option value="100">100%</option>
+          <option value="125">125%</option>
+          <option value="150">150%</option>
+        </select>
+      </label>
+      <span class="a11y-status" id="uiScaleStatus" role="status" aria-live="polite">UI 크기: 100%</span>
+      <details class="shortcut-help">
+        <summary>단축키</summary>
+        <div class="shortcut-list" aria-label="Rig Studio keyboard shortcuts">
+          <div><kbd>Ctrl/Cmd + S</kbd><span>프로젝트 저장</span></div>
+          <div><kbd>Ctrl/Cmd + Z</kbd><span>실행 취소</span></div>
+          <div><kbd>Ctrl/Cmd + Shift + Z</kbd><span>다시 실행</span></div>
+          <div><kbd>Ctrl + Y</kbd><span>다시 실행</span></div>
+          <div><kbd>1 / 2 / 3</kbd><span>Preview / Edit / QA</span></div>
+          <div><kbd>Arrow</kbd><span>선택 포인트 이동</span></div>
+          <div><kbd>Shift + Arrow</kbd><span>큰 폭 이동</span></div>
+        </div>
+      </details>
     </div>
     <label>크기
       <select id="topR4DisplayPreset" aria-label="Game preview display preset">
@@ -242,7 +309,7 @@
 <div id="stage">
   <div id="canvasWrap">
     <canvas id="gl"></canvas>
-    <canvas id="regionOverlay"></canvas>
+    <canvas id="regionOverlay" tabindex="0" aria-label="Rig Studio authoring overlay. Select a visible point, then use Arrow keys to nudge it."></canvas>
   </div>
   <div id="drop">
     <h1>Portrait Rig Preview</h1>
@@ -315,7 +382,7 @@
      frame. The graph shows body Y and independent chest L/R response over the
      last five seconds; QA buttons never modify the manifest.</p>
   <h2>가슴 Soft Morph</h2>
-  <div class="meta" id="softMeta">not available in this run <span id="qaBadge" class="warn" hidden>QA OVERRIDE</span></div>
+  <div class="meta" id="softMeta">not available in this run <span id="qaBadge" class="warn" hidden>[QA] QA OVERRIDE</span></div>
   <div class="meta" id="chestCalibration">Chest response: no probe</div>
   <div class="row">
     <button id="chest1px">가슴 1px</button>
@@ -353,7 +420,9 @@
   <p class="hint">R3 changes timing and physical response only. Body Kick X/Y
      and Auto idle above are live probes; BustX/Y shape authoring remains in
      R2. Save Calibration writes <code>authoring/physics.json</code> and the
-     range correction separately from the generated base.</p>
+     range correction separately from the generated base. Frequency is the
+     natural oscillation rate (Hz), damping ratio controls settling, lag is in
+     seconds, and range/maximum displacement are measured in reference pixels.</p>
   <label class="row"><input type="checkbox" id="doSoftMorph"> 가슴 Soft Morph</label>
   <label>강도 <span class="val" id="softStrengthv">0.00</span>
     <input type="range" id="softStrength" min="0" max="1" step="0.01" value="0"></label>
@@ -371,7 +440,7 @@
 
   <h2>가슴 형태 QA (P2.5.1)</h2>
   <div class="meta" id="chestBasisMeta">basis: 없음
-    <span id="shapeQaBadge" class="warn" hidden>QA OVERRIDE</span></div>
+    <span id="shapeQaBadge" class="warn" hidden>[QA] QA OVERRIDE</span></div>
   <div class="row">
     <button id="poseQPlus4">형태 q +4</button>
     <button id="poseQMinus4">형태 q -4</button>
@@ -479,6 +548,28 @@
     </select>
   </label>
   <label class="row"><input type="checkbox" id="r2EditMode"> 편집 모드</label>
+  <fieldset id="r2PointInspector" class="point-inspector" hidden>
+    <legend>선택 포인트 수치 편집</legend>
+    <div class="meta" id="r2PointMeta" role="status" aria-live="polite">포인트를 선택하세요.</div>
+    <div class="numeric-grid">
+      <label>X
+        <input id="r2PointX" type="number" inputmode="decimal" step="0.1" aria-describedby="r2PointHelp">
+      </label>
+      <label>Y
+        <input id="r2PointY" type="number" inputmode="decimal" step="0.1" aria-describedby="r2PointHelp">
+      </label>
+    </div>
+    <label>Arrow 이동 폭
+      <input id="r2NudgeStep" type="number" inputmode="decimal" min="0.01" max="100" step="0.1" value="1" aria-describedby="r2PointHelp">
+    </label>
+    <p class="hint" id="r2PointHelp">좌표는 캔버스 픽셀 기준입니다. 포인트를 선택한 뒤 Arrow로 이동합니다. Shift는 10배, Alt는 0.1배입니다. X/Y 입력은 Enter로 확정하고 Esc로 취소합니다.</p>
+  </fieldset>
+  <div id="r2OverlayLegend" class="overlay-legend" aria-label="Authoring overlay marker legend">
+    <span><i class="legend-mark circle" aria-hidden="true"></i> 원: cage/keyform 포인트</span>
+    <span><i class="legend-mark square" aria-hidden="true"></i> 사각형: 선택된 포인트 / lock</span>
+    <span><i class="legend-mark diamond" aria-hidden="true"></i> 마름모: cage 범위 핸들</span>
+    <span><i class="legend-mark line" aria-hidden="true"></i> 점선: 편집 가능한 cage</span>
+  </div>
   <div class="row">
     <button id="r2Save">보정 저장</button>
     <button id="r2Reset">Deformer를 Auto로 초기화</button>
@@ -618,6 +709,7 @@
 <script type="module" src="./parameter-panel.mjs"></script>
 <script type="module" src="./expression-ui.mjs"></script>
 <script type="module" src="./audio-test-ui.mjs"></script>
+<script type="module" src="./accessibility.mjs"></script>
 <script type="module" src="./runtime.mjs"></script>
 
 </body>

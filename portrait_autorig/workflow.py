@@ -7,8 +7,9 @@ from typing import Callable
 
 from .assembly import load_assembly_bundle
 from .bundle import load_portrait_bundle
-from .compiler import compile_assembly_bundle, compile_bundle, compile_legacy_run
+from .compiler import compile_assembly_bundle, compile_bundle, compile_legacy_run, compile_rig_bundle
 from .physics import physics_spec_from_rig_intent
+from .rig_bundle import load_rig_bundle
 
 
 @dataclass(frozen=True)
@@ -22,8 +23,9 @@ class BuildResult:
 
 def portrait_name(path: Path) -> str:
     name = path.name
-    if name.endswith(".portrait"):
-        return name[: -len(".portrait")]
+    for suffix in (".portrait", ".assembly", ".rigbundle"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
     return name
 
 
@@ -54,7 +56,7 @@ def discover_portrait_bundles(input_dir: Path, *, recursive: bool = False) -> li
                 format_name = json.load(handle).get("format")
         except (OSError, json.JSONDecodeError, AttributeError):
             continue
-        if format_name in {"portrait-bundle", "portrait-assembly"}:
+        if format_name in {"portrait-bundle", "portrait-assembly", "portrait-rig-bundle"}:
             found.append(path)
     return sorted(found)
 
@@ -84,6 +86,9 @@ def bundle_kind(input_path: Path) -> str:
     if format_name == "portrait-assembly":
         load_assembly_bundle(input_path)
         return "assembly"
+    if format_name == "portrait-rig-bundle":
+        load_rig_bundle(input_path)
+        return "rig_bundle"
     raise ValueError(f"지원하지 않는 Bundle format입니다: {format_name!r}")
 
 
@@ -97,9 +102,9 @@ def _manifest_status(manifest_path: Path) -> tuple[str, str]:
 
 def _physics_for_bundle(input_path: Path, kind: str) -> dict | None:
     """Resolve Composer's torso opt-in at the workflow boundary."""
-    if kind != "assembly":
+    if kind not in {"assembly", "rig_bundle"}:
         return None
-    asset = load_assembly_bundle(input_path)
+    asset = load_rig_bundle(input_path) if kind == "rig_bundle" else load_assembly_bundle(input_path)
     return physics_spec_from_rig_intent(asset.rig_intent)
 
 
@@ -118,7 +123,7 @@ def compile_portrait(
         physics = None
     else:
         kind = bundle_kind(input_path)
-        compile_fn = compile_assembly_bundle if kind == "assembly" else compile_bundle
+        compile_fn = {"assembly": compile_assembly_bundle, "rig_bundle": compile_rig_bundle}.get(kind, compile_bundle)
         physics = _physics_for_bundle(input_path, kind)
     manifest = Path(
         compile_fn(str(input_path), str(output_path), gradient_tags=gradient, physics=physics)
@@ -148,7 +153,7 @@ def compile_bundle_input(
     output_path = (output_path or default_output_path(input_path)).expanduser().resolve()
     kind = bundle_kind(input_path)
     gradient = ("back hair",) if soften_back_hair else ()
-    compile_fn = compile_assembly_bundle if kind == "assembly" else compile_bundle
+    compile_fn = {"assembly": compile_assembly_bundle, "rig_bundle": compile_rig_bundle}.get(kind, compile_bundle)
     physics = _physics_for_bundle(input_path, kind)
     manifest = Path(
         compile_fn(str(input_path), str(output_path), gradient_tags=gradient, physics=physics)

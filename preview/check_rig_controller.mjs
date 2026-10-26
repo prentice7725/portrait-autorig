@@ -1,10 +1,11 @@
 // P5 DOM-free controller contract checks.
 import assert from "node:assert/strict";
-import { createRigController, RIG_CONTROLLER_VERSION, CURSOR_FOLLOW_VERSION, LIPSYNC_VERSION } from "./rig-controller.mjs";
+import { createRigController, RIG_CONTROLLER_VERSION, CURSOR_FOLLOW_VERSION, LIPSYNC_VERSION, REDUCED_MOTION_VERSION } from "./rig-controller.mjs";
 
 assert.equal(RIG_CONTROLLER_VERSION, "P5.0");
 assert.equal(CURSOR_FOLLOW_VERSION, "P6.1");
 assert.equal(LIPSYNC_VERSION, "P6.3");
+assert.equal(REDUCED_MOTION_VERSION, "A11Y-1.1");
 const runtimeState = {
   manifest: null,
   parameters: {},
@@ -135,5 +136,25 @@ assert.equal(runtimeState.mouthOpen, 0.25);
 assert.equal(runtimeState.parameters.ParamAngleX, 1);
 controller.setControl("autoIdle", true);
 assert.equal(controller.tick(10000, { t: 10, dt: 1 / 60 }).bodySwayEnabled, true);
+
+// A11Y-1: the explicit preference suspends every automatic preview source
+// without changing the user-owned control values or manifest parameters.
+controller.setControl("autoIdle", true);
+controller.setControl("bodySway", true);
+controller.setControl("doBlink", true);
+controller.setControl("doBreathe", true);
+controller.setCursorGazeEnabled(true);
+controller.lookAt(1, -1);
+controller.startBlink(10100, ["l", "r"]);
+assert.equal(controller.setReducedMotion(true), true);
+const reducedFrame = controller.tick(10120, { t: 10.12, dt: 1 / 60, mouthAvailable: true });
+assert.equal(reducedFrame.reducedMotion, true);
+assert.equal(reducedFrame.autoIdle, false);
+assert.equal(reducedFrame.bodySwayEnabled, false);
+assert.equal(reducedFrame.cursorActive, false);
+assert.deepEqual(reducedFrame.blink, { l: 0, r: 0 });
+assert.equal(reducedFrame.breath, 0);
+assert.equal(runtimeState.blinkPhase, null);
+assert.equal(controller.setReducedMotion(false), false);
 
 console.log("P6.1 DOM-free cursor-follow controller checks passed");

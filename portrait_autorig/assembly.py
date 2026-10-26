@@ -43,8 +43,9 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -56,7 +57,7 @@ __all__ = ["ASSEMBLY_FORMAT", "ASSEMBLY_VERSION", "ASSEMBLY_SCHEMA_VENDOR",
            "ASSEMBLY_SCHEMA_COMMIT", "ASSEMBLY_SCHEMA_ID", "ASSEMBLY_SCHEMA_SHA256",
            "ASSEMBLY_SCHEMA_PIN",
            "ASSEMBLY_SCHEMA_PATH", "AssemblyAsset", "validate_assembly_manifest",
-           "load_assembly_bundle"]
+           "load_assembly_bundle", "resolve_rig_intent_coordinates"]
 
 ASSEMBLY_FORMAT = "portrait-assembly"
 # Exact match, not a major-version prefix check: pre-1.0, a minor bump
@@ -68,12 +69,12 @@ ASSEMBLY_VERSION = "0.2"
 # commit is part of the input seam, so a future Composer schema change cannot
 # silently alter what AutoRig accepts.
 ASSEMBLY_SCHEMA_VENDOR = "portrait-composer"
-ASSEMBLY_SCHEMA_COMMIT = "682f25e"
+ASSEMBLY_SCHEMA_COMMIT = "53e98b43d3856dcfaac30cb787e5755ef9e3c3c1"
 ASSEMBLY_SCHEMA_ID = "portrait-assembly-v0.2"
 # Hash of Composer's schema at the pinned commit.  The schema file itself is
 # copied byte-for-byte; provenance lives here so the upstream JSON remains a
 # true vendor copy and is never modified with AutoRig-specific fields.
-ASSEMBLY_SCHEMA_SHA256 = "70d2efe40f73548cd1b3369992c8bc257aaa270b3a78fAD5e2e6fd8cd6eca378".lower()
+ASSEMBLY_SCHEMA_SHA256 = "206d6c6c8cf391b760faf167a46017e791a024e719e5eed06ad13a62c1202449"
 ASSEMBLY_SCHEMA_PIN = f"{ASSEMBLY_SCHEMA_VENDOR}@{ASSEMBLY_SCHEMA_COMMIT}:{ASSEMBLY_SCHEMA_ID}"
 ASSEMBLY_SCHEMA_PATH = Path(__file__).with_name("schemas") / "portrait-assembly-v0.2.schema.json"
 
@@ -101,6 +102,15 @@ class AssemblyAsset:
     reference: np.ndarray              # Composer's own rendered reference.png
     source_id: str
     provenance: dict[str, Any]
+    # Source-local dimensions and the exact transform used to place each
+    # Composer instance. RigIntent geometry is authored in this local space.
+    instance_geometry: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Input-specific pins and semantics retained when Assembly is the
+    # intermediate in-memory representation for a Rig Bundle.
+    source_kind: str = "assembly"
+    source_schema: dict[str, Any] = field(default_factory=dict)
+    expression_intent: dict[str, Any] = field(default_factory=dict)
+    source_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def _read_json(path: Path) -> dict:
@@ -238,6 +248,207 @@ def _position(img: Image.Image, transform: dict[str, Any]) -> tuple[Image.Image,
     return img, (x, y)
 
 
+def _transform_normalized_point(center: list[float], radius: list[float],
+                                source_size: list[int], transform: dict[str, Any],
+                                positioned_size: list[int], canvas_offset: list[int]
+                                ) -> tuple[list[float], list[float]]:
+    """Map an instance-normalized axis-aligned ellipse into canvas space.
+
+    The center follows the same scale/clockwise-rotation/translation order as
+    ``_position``. The returned radii are the axis-aligned bounds of the
+    transformed ellipse; the current RigIntent shape cannot represent a
+    rotated ellipse directly.
+    """
+    source_w, source_h = (int(source_size[0]), int(source_size[1]))
+    scale_x = float(transform.get("scale_x", 1.0))
+    scale_y = float(transform.get("scale_y", 1.0))
+    if source_w <= 0 or source_h <= 0 or scale_x <= 0 or scale_y <= 0:
+        raise ValueError("RigIntent target has invalid source dimensions or scale")
+    width = max(1, round(source_w * scale_x))
+    height = max(1, round(source_h * scale_y))
+    angle = math.radians(float(transform.get("rotation", 0.0)))
+    cosine, sine = math.cos(angle), math.sin(angle)
+    local_x, local_y = float(center[0]) * width, float(center[1]) * height
+    dx, dy = local_x - width / 2.0, local_y - height / 2.0
+    placed_w, placed_h = int(positioned_size[0]), int(positioned_size[1])
+    canvas_center = [
+        float(canvas_offset[0]) + placed_w / 2.0 + cosine * dx - sine * dy,
+        float(canvas_offset[1]) + placed_h / 2.0 + sine * dx + cosine * dy,
+    ]
+    rx, ry = float(radius[0]) * width, float(radius[1]) * height
+    canvas_radius = [
+        math.hypot(rx * cosine, ry * sine),
+        math.hypot(rx * sine, ry * cosine),
+    ]
+    return canvas_center, canvas_radius
+
+
+def resolve_rig_intent_coordinates(
+    rig_intent: dict[str, Any] | None,
+    instance_geometry: dict[str, dict[str, Any]],
+    canvas: tuple[int, int],
+    supported_semantics: set[str],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Resolve supported Composer torso intent without guessing identities.
+
+    Legacy v0.2 regions omit a coordinate-space field; the pinned plan treats
+    those coordinates as normalized to the target instance. Explicit canvas
+    coordinates remain supported. Semantic-only targets are accepted only
+    when exactly one visible, ordinary instance can own the rig surface.
+    """
+    width, height = int(canvas[0]), int(canvas[1])
+    if width <= 0 or height <= 0:
+        raise ValueError("RigIntent canvas dimensions must be positive")
+    resolved = json.loads(json.dumps(rig_intent or {}))
+    regions = resolved.get("regions") or {}
+    if not isinstance(regions, dict):
+        raise ValueError("RigIntent regions must be an object")
+    eligible = [
+        (instance_id, info) for instance_id, info in instance_geometry.items()
+        if info.get("included_in_semantic_layer")
+        and info.get("semantic") in supported_semantics
+    ]
+    report: list[dict[str, Any]] = []
+
+    def mark(region: dict[str, Any], status: str) -> None:
+        region["rig_intent_resolution_status"] = status
+
+    applicable_region_exists = any(
+        isinstance(region, dict) and isinstance(region.get("target"), str)
+        and (
+            region["target"] in supported_semantics
+            or (region["target"] in instance_geometry
+                and instance_geometry[region["target"]].get("semantic") in supported_semantics)
+        )
+        for region in regions.values()
+    )
+    if applicable_region_exists and len(eligible) > 1:
+        ids = ", ".join(instance_id for instance_id, _ in eligible)
+        raise ValueError(
+            "RigIntent targets a surface that AutoRig currently flattens into "
+            f"one semantic part, but multiple visible instances match: {ids}"
+        )
+
+    selected_regions: list[tuple[str, dict[str, Any], str, dict[str, Any], str]] = []
+    for region_id, region in regions.items():
+        if not isinstance(region, dict):
+            report.append({"region_id": str(region_id), "status": "INVALID"})
+            continue
+        target = region.get("target")
+        if not isinstance(target, str) or not target:
+            mark(region, "UNRESOLVED")
+            report.append({"region_id": str(region_id), "status": "UNRESOLVED",
+                           "reason": "target is missing"})
+            continue
+        info = instance_geometry.get(target)
+        instance_id = target if info is not None else None
+        binding_strategy = "source_instance_id" if info is not None else "semantic_unique"
+        if info is None and target in supported_semantics:
+            if len(eligible) == 1:
+                instance_id, info = eligible[0]
+            else:
+                mark(region, "UNRESOLVED")
+                report.append({"region_id": str(region_id), "target": target,
+                               "status": "UNRESOLVED",
+                               "reason": "no unique visible target instance"})
+                continue
+        elif info is None and target.endswith("__instance") \
+                and target[:-len("__instance")] in supported_semantics:
+            # A stale instance id must not fall back to its semantic-looking
+            # prefix; that could silently bind an orphan to a different part.
+            mark(region, "UNRESOLVED")
+            report.append({"region_id": str(region_id), "target": target,
+                           "status": "UNRESOLVED",
+                           "reason": "instance identity is not present in this Assembly"})
+            continue
+        if info is None:
+            mark(region, "UNRESOLVED")
+            report.append({"region_id": str(region_id), "target": target,
+                           "status": "UNRESOLVED",
+                           "reason": "target identity or semantic is not present in this Assembly"})
+            continue
+        if info.get("semantic") not in supported_semantics:
+            mark(region, "OUT_OF_SCOPE")
+            report.append({"region_id": str(region_id), "target": target,
+                           "status": "OUT_OF_SCOPE",
+                           "reason": "target semantic is not consumed by this AutoRig path"})
+            continue
+        if not info.get("included_in_semantic_layer"):
+            mark(region, "UNRESOLVED")
+            report.append({"region_id": str(region_id), "target": target,
+                           "status": "UNRESOLVED",
+                           "reason": "target is hidden, transparent, or a variant member"})
+            continue
+        if instance_id is None:
+            instance_id = target
+        selected_regions.append((str(region_id), region, instance_id, info,
+                                  binding_strategy))
+
+    # Prefer one explicitly named instance over a semantic fallback. Two
+    # regions for the same consumed surface are ambiguous and are not ordered
+    # by JSON/map insertion order.
+    if len(selected_regions) > 1:
+        explicit = [entry for entry in selected_regions
+                    if entry[4] == "source_instance_id"]
+        selected = explicit if explicit else selected_regions
+        if len(selected) != 1:
+            ids = ", ".join(entry[0] for entry in selected)
+            raise ValueError(f"multiple RigIntent regions target the compiled torso: {ids}")
+        chosen = selected[0]
+        for entry in selected_regions:
+            if entry is not chosen:
+                mark(entry[1], "SHADOWED_BY_EXPLICIT_TARGET")
+                report.append({"region_id": entry[0], "target": entry[1].get("target"),
+                               "status": "SHADOWED_BY_EXPLICIT_TARGET"})
+        selected_regions = [chosen]
+
+    for region_id, region, instance_id, info, binding_strategy in selected_regions:
+        source_space = str(region.get("coordinate_space", "instance_normalized"))
+        if source_space not in {"instance_normalized", "canvas_normalized"}:
+            raise ValueError(f"RigIntent region {region_id!r} has unsupported coordinate_space {source_space!r}")
+        geometry = region.get("geometry") or {}
+        mapped_geometry: dict[str, Any] = {}
+        for side in ("left", "right"):
+            lobe = geometry.get(side)
+            if not isinstance(lobe, dict):
+                raise ValueError(f"RigIntent region {region_id!r} is missing {side} lobe geometry")
+            center, radius = lobe.get("center"), lobe.get("radius")
+            if (not isinstance(center, list) or len(center) != 2
+                    or not isinstance(radius, list) or len(radius) != 2):
+                raise ValueError(f"RigIntent region {region_id!r} has invalid {side} lobe geometry")
+            values = [float(value) for value in (*center, *radius)]
+            if not all(math.isfinite(value) for value in values) or values[2] < 0 or values[3] < 0:
+                raise ValueError(f"RigIntent region {region_id!r} has non-finite or negative geometry")
+            if source_space == "instance_normalized":
+                canvas_center, canvas_radius = _transform_normalized_point(
+                    center, radius, info["source_size"], info.get("transform") or {},
+                    info["positioned_size"], info["canvas_offset"],
+                )
+                mapped_geometry[side] = {
+                    "center": [canvas_center[0] / width, canvas_center[1] / height],
+                    "radius": [canvas_radius[0] / width, canvas_radius[1] / height],
+                }
+            else:
+                mapped_geometry[side] = {"center": list(center), "radius": list(radius)}
+        region["geometry"] = mapped_geometry
+        region["coordinate_space"] = "canvas_normalized"
+        region["resolved_target_instance"] = instance_id
+        region["resolved_target_semantic"] = info.get("semantic")
+        mark(region, "RESOLVED")
+        report.append({
+            "region_id": region_id, "target": region.get("target"),
+            "resolved_target_instance": instance_id,
+            "semantic": info.get("semantic"), "status": "RESOLVED",
+            "binding_strategy": binding_strategy,
+            "input_coordinate_space": source_space,
+            "output_coordinate_space": "canvas_normalized",
+            "transform": dict(info.get("transform") or {}),
+            "positioned_size": list(info.get("positioned_size") or []),
+            "canvas_offset": list(info.get("canvas_offset") or []),
+        })
+    return resolved, report
+
+
 def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
     """Read an Assembly Bundle directory into an `AssemblyAsset`.
 
@@ -304,6 +515,7 @@ def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
         for member in (spec.get("members") or [])
     }
     instance_layers: dict[str, np.ndarray] = {}
+    instance_geometry: dict[str, dict[str, Any]] = {}
     variant_visibility: dict[str, bool] = {}
     instance_to_tag: dict[str, str] = {}
     instance_draw_order: list[str] = []
@@ -322,23 +534,46 @@ def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
             raise FileNotFoundError(f"layer image missing for instance {inst_id!r}: {image_path}")
         with Image.open(image_path) as raw:
             im = raw.convert("RGBA")
+            source_size = list(im.size)
             opacity = float(inst.get("opacity", 1.0))
+            transform = dict(inst.get("transform") or {})
+            is_visible = bool(inst.get("visible", True))
+            is_variant_member = str(inst_id) in variant_member_ids
+            instance_geometry[str(inst_id)] = {
+                "semantic": tag,
+                "source_size": source_size,
+                "transform": transform,
+                "visible": is_visible,
+                "opacity": opacity,
+                "variant_member": is_variant_member,
+                "included_in_semantic_layer": False,
+            }
             if opacity < 1.0:
                 r, g, b, a = im.split()
                 a = a.point(lambda v: round(v * opacity))
                 im = Image.merge("RGBA", (r, g, b, a))
-            positioned, (x, y) = _position(im, inst.get("transform") or {})
-            if str(inst_id) in variant_member_ids:
+            positioned, (x, y) = _position(im, transform)
+            instance_geometry[str(inst_id)]["positioned_size"] = list(positioned.size)
+            instance_geometry[str(inst_id)]["canvas_offset"] = [x, y]
+            clip_left, clip_top = max(0, x), max(0, y)
+            clip_right = min(width, x + positioned.width)
+            clip_bottom = min(height, y + positioned.height)
+            has_rig_alpha = False
+            if clip_right > clip_left and clip_bottom > clip_top:
+                visible_crop = positioned.crop((clip_left - x, clip_top - y,
+                                                clip_right - x, clip_bottom - y))
+                has_rig_alpha = bool(np.any(np.asarray(visible_crop)[..., 3] > 10))
+            instance_geometry[str(inst_id)]["included_in_semantic_layer"] = bool(
+                is_visible and opacity > 0.0 and not is_variant_member and has_rig_alpha
+            )
+            if is_variant_member:
                 full = Image.new("RGBA", (width, height), (0, 0, 0, 0))
                 full.alpha_composite(positioned, dest=(x, y))
                 instance_layers[str(inst_id)] = np.array(full, dtype=np.uint8)
                 variant_visibility[str(inst_id)] = bool(
-                    inst.get("visible", True)
-                    and float(inst.get("opacity", 1.0)) > 0.0
+                    is_visible and opacity > 0.0
                 )
-            if (not inst.get("visible", True)
-                    or float(inst.get("opacity", 1.0)) <= 0.0
-                    or str(inst_id) in variant_member_ids):
+            if not is_visible or opacity <= 0.0 or is_variant_member:
                 continue
             visible_tags_in_order.append(tag)
             if tag not in canvas_layers:
@@ -379,6 +614,11 @@ def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
     with Image.open(reference_path) as ref:
         reference = np.array(ref.convert("RGBA"), dtype=np.uint8)
 
+    source_metadata = {
+        str(source_id): source.get("metadata", {})
+        for source_id, source in (manifest.get("sources") or {}).items()
+        if isinstance(source, dict) and isinstance(source.get("metadata", {}), dict)
+    }
     return AssemblyAsset(
         root=root, canvas=(width, height), layers=layers, body_remainder=body_remainder,
         draw_order=draw_order,
@@ -392,4 +632,6 @@ def load_assembly_bundle(directory: str | os.PathLike[str]) -> AssemblyAsset:
         reference=reference,
         source_id=root.name,
         provenance=manifest.get("provenance") or {},
+        instance_geometry=instance_geometry,
+        source_metadata=source_metadata,
     )

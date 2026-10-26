@@ -193,8 +193,11 @@ def build_chest_parametric_deformer(
         # torso-like parts share a semantic tag.
         "target_instance": (soft_spec.get("target_instance")
                             or part.get("source_instance_id") or part.get("name")),
+        **({"source_instance_id": part["source_instance_id"]}
+           if part.get("source_instance_id") else {}),
         "target_part": part.get("name"),
         "target_tag": part.get("tag", "topwear"), "profile": profile,
+        "target_topology_hash": (part.get("mesh") or {}).get("topology_hash"),
         "breath_isolated": True,
         "parameters": {"x": "ParamBustX", "y": "ParamBustY"},
         "ranges_px": {"x": float(range_x_px), "y": float(range_y_px)},

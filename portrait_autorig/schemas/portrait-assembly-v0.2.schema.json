@@ -40,7 +40,6 @@
     "variant_sets": { "type": "object", "additionalProperties": { "$ref": "#/$defs/variantSet" }, "description": "C1 -- VariantSet map, id -> {mode, default, active, members} (directive #12, variants.py)" },
     "expressions": { "type": "object", "additionalProperties": { "$ref": "#/$defs/expressionPreset" }, "description": "C3 -- thin ExpressionPreset map over VariantSets; no runtime parameter binding" },
     "links": { "type": "object", "description": "C1 -- TransformLink map, id -> {members: [instance_id,...]} (directive #11, links.py)" },
-
     "rig_intent": {
       "type": "object",
       "description": "C4 -- RigIntent (directive #21-23)",
@@ -163,6 +162,16 @@
             "lower_falloff": { "type": "number", "minimum": 0, "maximum": 1 }
           }
         },
+        "lock_intent": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "center": { "type": "string", "enum": ["none", "auto", "explicit"] },
+            "neckline": { "type": "string", "enum": ["none", "auto", "explicit"] },
+            "shoulder": { "type": "string", "enum": ["none", "auto", "explicit"] }
+          }
+        },
+        "geometry_role": { "type": "string", "enum": ["mass_hint"] },
         "exclusions": { "type": "array" },
         "author_strength": { "type": "number", "minimum": 0, "maximum": 1 },
         "response_profile": { "type": "string", "enum": ["soft", "firm_bounce", "springy"] },
